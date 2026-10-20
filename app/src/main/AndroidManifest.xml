@@ -13,6 +13,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Shizuku 拉起的特权 UserService（独立进程 :codec，身份 adb shell） -->
+        <service
+            android:name=".shell.CodecService"
+            android:exported="false"
+            android:process=":codec" />
+
         <!-- Shizuku binder 接收器（必须手动声明，provider 工件不会自动合并） -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
