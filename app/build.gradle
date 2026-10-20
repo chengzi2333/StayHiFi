@@ -1,0 +1,24 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.chengzi.lhdcpoc'
+    compileSdk 37
+
+    buildFeatures {
+        aidl true
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId 'com.chengzi.lhdcpoc'
+        minSdk 29
+        targetSdk 37
+        versionCode 1
+        versionName '0.1-poc'
+    }
+}
+
+dependencies {
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+}
