@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -39,7 +40,7 @@ class MainActivity : ComponentActivity() {
         provider = ShizukuShellProvider(this)
         setContent {
             MaterialTheme {
-                Column(Modifier.fillMaxSize().padding(12.dp).verticalScroll(rememberScrollState())) {
+                Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp).verticalScroll(rememberScrollState())) {
                     Button(onClick = { bindService() }) { Text("① 绑定特权服务") }
                     Button(onClick = { readConfig() }) { Text("② 读取当前配置") }
                     Text(logText)
