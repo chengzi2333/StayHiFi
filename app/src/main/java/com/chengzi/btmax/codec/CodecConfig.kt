@@ -54,6 +54,17 @@ object Masks {
 
     fun bitsDepth(mask: Int): String = BITS_NAMES[mask] ?: "unknown"
 
-    fun codecName(type: Int): String =
-        if (type == 10) "LHDC" else "vendor($type)"
+    /**
+     * codecType ≥ 5 为厂商私有编号，10=LHDC 仅在 OPPO/vivo 系栈上成立；
+     * 此映射仅用于显示。0~4 为 AOSP 标准编号，全平台通用。
+     */
+    fun codecName(type: Int): String = when (type) {
+        0 -> "SBC"
+        1 -> "AAC"
+        2 -> "aptX"
+        3 -> "aptX-HD"
+        4 -> "LDAC"
+        10 -> "LHDC"
+        else -> "vendor($type)"
+    }
 }

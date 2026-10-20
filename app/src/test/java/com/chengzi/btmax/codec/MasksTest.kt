@@ -28,6 +28,15 @@ class MasksTest {
     }
 
     @Test
+    fun codecNameKnowsStandardCodecs() {
+        assertEquals("SBC", Masks.codecName(0))
+        assertEquals("AAC", Masks.codecName(1))
+        assertEquals("aptX", Masks.codecName(2))
+        assertEquals("aptX-HD", Masks.codecName(3))
+        assertEquals("LDAC", Masks.codecName(4))
+    }
+
+    @Test
     fun codecNameKnowsLhdc() {
         assertEquals("LHDC", Masks.codecName(10))
     }

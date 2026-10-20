@@ -1,6 +1,9 @@
 package com.chengzi.btmax.codec
 
+import kotlinx.serialization.Serializable
+
 /** 已知设备的持久化档案：MAC + 名称 + 应应用的 codec 配置。 */
+@Serializable
 data class DeviceProfile(
     val mac: String,
     val name: String,
