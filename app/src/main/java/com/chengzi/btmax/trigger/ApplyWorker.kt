@@ -118,7 +118,7 @@ class ApplyWorker(context: Context) {
         }
     }
 
-    /** writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回读回是否与 target 一致。 */
+    /** writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。 */
     private suspend fun writeVerified(
         service: ICodecService, mac: String, target: CodecConfig,
     ): Boolean {
@@ -128,9 +128,16 @@ class ApplyWorker(context: Context) {
             if (err != null) {
                 log("writeConfig 返回 error: $err")
             } else {
+                val applied = parseApplied(res)
                 val final = parseFinal(res)
-                if (final == target) {
-                    log("读回一致 ✓")
+                if (applied) {
+                    // applied 是服务端按 codecType+rate+bits 语义判定的，直接采信；
+                    // final 仅做交叉验证（栈可能规范化 priority/cs1~cs4 等字段）
+                    if (final != null && !ApplyPolicy.matches(target, final)) {
+                        log("applied=true 但 final=${final.summary()} 三项与目标不符（以 applied 为准）")
+                    } else {
+                        log("读回一致 ✓ final=${final?.summary()}")
+                    }
                     return true
                 }
                 log("读回不一致: ${final?.summary() ?: "无 final 字段"}")
@@ -184,6 +191,12 @@ class ApplyWorker(context: Context) {
         JSONObject(json).optString("error").takeIf { it.isNotEmpty() }
     } catch (t: Throwable) {
         "结果解析失败: $t"
+    }
+
+    private fun parseApplied(json: String): Boolean = try {
+        JSONObject(json).optBoolean("applied", false)
+    } catch (t: Throwable) {
+        false
     }
 
     private fun parseFinal(json: String): CodecConfig? = try {

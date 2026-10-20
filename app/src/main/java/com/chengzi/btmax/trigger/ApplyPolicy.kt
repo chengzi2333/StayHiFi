@@ -13,6 +13,16 @@ object ApplyPolicy {
     fun decide(current: CodecConfig, target: CodecConfig): Boolean = current != target
 
     /**
+     * 生效判定（与服务端 CodecService.writeConfig 的 match 语义一致）：
+     * codecType 相等 &&（target 采样率为 0 或相等）&&（target 位深为 0 或相等）。
+     * 只比对协议栈承诺生效的三项；priority/cs1~cs4 等栈管理字段可能被栈规范化，不参与判定。
+     */
+    fun matches(target: CodecConfig, actual: CodecConfig): Boolean =
+        actual.codecType == target.codecType &&
+            (target.sampleRate == 0 || actual.sampleRate == target.sampleRate) &&
+            (target.bitsPerSample == 0 || actual.bitsPerSample == target.bitsPerSample)
+
+    /**
      * 无档案新设备的全局默认策略：codecType / channelMode / cs1~cs4 保持 current 不变，
      * rate / bits 取 [selectable] 中当前 codec 能力掩码的最高位，priority 置 1000000。
      * [selectable] 中没有当前 codec 的能力条目时，rate / bits 保持 current。

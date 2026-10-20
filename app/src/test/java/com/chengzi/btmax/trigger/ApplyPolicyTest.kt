@@ -85,4 +85,38 @@ class ApplyPolicyTest {
         assertEquals(2, target.bitsPerSample)
         assertEquals(1_000_000, target.priority)
     }
+
+    // matches：与服务端 CodecService 生效语义一致 —— codecType + rate(target≠0) + bits(target≠0)
+
+    @Test
+    fun matchesIgnoresStackManagedFields() {
+        // cs1 不同但三项关键字段相同 → 视为已生效（协议栈可能规范化栈管理字段）
+        val actual = golden.copy(cs1 = 0L, cs3 = 1543503872L, priority = 0)
+        assertTrue(ApplyPolicy.matches(golden, actual))
+    }
+
+    @Test
+    fun matchesReturnsFalseWhenRateDiffers() {
+        val actual = golden.copy(sampleRate = 8)
+        assertFalse(ApplyPolicy.matches(golden, actual))
+    }
+
+    @Test
+    fun matchesReturnsFalseWhenBitsDiffers() {
+        val actual = golden.copy(bitsPerSample = 1)
+        assertFalse(ApplyPolicy.matches(golden, actual))
+    }
+
+    @Test
+    fun matchesReturnsFalseWhenCodecTypeDiffers() {
+        val actual = golden.copy(codecType = 4)
+        assertFalse(ApplyPolicy.matches(golden, actual))
+    }
+
+    @Test
+    fun matchesIgnoresRateAndBitsWhenTargetMasksAreZero() {
+        val target = golden.copy(sampleRate = 0, bitsPerSample = 0)
+        val actual = golden.copy(sampleRate = 8, bitsPerSample = 1)
+        assertTrue(ApplyPolicy.matches(target, actual))
+    }
 }
