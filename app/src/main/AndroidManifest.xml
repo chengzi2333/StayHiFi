@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- ACL_CONNECTED 广播里读取 BluetoothDevice（Android 12+ 运行时权限，M1 由调试页申请） -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- 结果通知（Android 13+ 运行时权限） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:label="音质满格"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
@@ -12,6 +17,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 连接触发自动拉满（设计 §4.3，goAsync 短任务零驻留） -->
+        <receiver android:name=".trigger.ConnectionReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Shizuku 拉起的特权 UserService（独立进程 :codec，身份 adb shell） -->
         <service
