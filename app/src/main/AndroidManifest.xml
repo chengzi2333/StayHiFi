@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:label="LHDC PoC"
+        android:label="音质满格"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false">
 
@@ -12,12 +12,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- Shizuku UserService：该类实际运行在 Shizuku 拉起的 shell(uid 2000) 进程中 -->
-        <service
-            android:name=".CodecService"
-            android:exported="false"
-            android:process=":codec" />
 
         <!-- Shizuku binder 接收器（必须手动声明，provider 工件不会自动合并） -->
         <provider
