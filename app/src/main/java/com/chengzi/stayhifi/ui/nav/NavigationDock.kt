@@ -1,0 +1,650 @@
+/* 设计移植自 FlClash (GPL-3.0) lib/ui/navigation_dock.dart — https://github.com/chen08209/FlClash */
+
+package com.chengzi.stayhifi.ui.nav
+
+import android.content.res.Configuration
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
+import androidx.compose.animation.core.SpringSpec
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.shape.GenericShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sign
+
+/** 布局与物理公式，移植自 FlClash `navigation_dock.dart`，纯函数可单测。单位由调用方自定（dp 或 px）。 */
+internal object DockMath {
+    const val BarHeight = 62f
+    const val BarPadding = 4f
+    const val EdgeMargin = 21f
+    const val ShadowRoom = 8f
+    const val MaxItemExtent = 86f
+    const val MinLensWidth = 84f
+    const val FullWidthCount = 5
+    const val IconSize = 28f
+    const val LabelGap = 2f
+    const val LabelInset = 2f
+    const val LabelSize = 10f
+    const val PressGrowth = 1f / 8f
+    const val MaxPressGrowth = 16f
+    const val LensGrowth = 8f
+    const val LensMagnify = 0.16f
+    const val LiftSnap = 0.975f
+    const val LiftRelease = 0.04f
+    const val JellySpeed = 3f
+    const val JellyStretch = 0.2f
+    const val JellyBrake = 25f
+    const val JellySquash = 0.15f
+    const val JellyAspect = 1.4f
+    const val Overdrag = 0.35f
+    const val PullLimit = 7f / 32f
+    const val PullStretch = 0.5f
+    const val FlingProjectionSeconds = 0.1f
+
+    /** 透镜矩形，相对 items 行区域左上角。 */
+    class LensRect(val left: Float, val top: Float, val width: Float, val height: Float)
+
+    fun rubberBand(overshoot: Float, limit: Float): Float {
+        if (limit <= 0f || overshoot == 0f) return 0f
+        val pull = 1f - 1f / (abs(overshoot) * 0.55f / limit + 1f)
+        return limit * pull * sign(overshoot)
+    }
+
+    /** iOS 式间距：静置透镜比 item 宽 2*BarPadding，且不小于 MinLensWidth。返回 Triple(pitch, lens, inset)。 */
+    fun dockLayout(span: Float, count: Int): Triple<Float, Float, Float> {
+        if (count <= 1) return Triple(span - BarPadding * 2, span, BarPadding)
+        val pitch = (span - BarPadding * 2) / count
+        if (pitch + BarPadding * 2 >= MinLensWidth) {
+            return Triple(pitch, pitch + BarPadding * 2, BarPadding)
+        }
+        val lens = min(MinLensWidth, span)
+        val closed = (span - lens) / (count - 1)
+        return Triple(closed, lens, (lens - closed) / 2)
+    }
+
+    fun indexAt(position: Float, lastIndex: Int): Int =
+        floor(position + 0.5).toInt().coerceIn(0, lastIndex)
+
+    /** 手指 x（栏坐标系，含 BarPadding）→ 透镜位置；两端过界走 rubberBand。 */
+    fun positionAt(dx: Float, pitch: Float, inset: Float, lastIndex: Int): Float {
+        val position = (dx - BarPadding - inset) / pitch - 0.5f
+        return when {
+            position < 0f -> rubberBand(position, Overdrag)
+            position > lastIndex -> lastIndex + rubberBand(position - lastIndex, Overdrag)
+            else -> position
+        }
+    }
+
+    /** fling 最多越过当前项 ±1 个，再 clamp 到范围内。 */
+    fun flingIndex(lensTarget: Float, velocityX: Float, pitch: Float, pressed: Int, lastIndex: Int): Int =
+        floor(lensTarget + velocityX / pitch * FlingProjectionSeconds + 0.5).toInt()
+            .coerceIn(pressed - 1, pressed + 1)
+            .coerceIn(0, lastIndex)
+
+    fun lensRect(
+        position: Float,
+        stretch: Float,
+        pitch: Float,
+        width: Float,
+        height: Float,
+        lift: Float,
+        inset: Float,
+    ): LensRect {
+        val growth = LensGrowth * 2 * lift
+        val lensWidth = (width + growth) * (1 + stretch)
+        val lensHeight = (height + growth) * (1 - stretch * JellyAspect)
+        return LensRect(
+            left = (position + 0.5f) * pitch - lensWidth / 2 + inset,
+            top = (height - lensHeight) / 2,
+            width = lensWidth,
+            height = lensHeight,
+        )
+    }
+
+    /** Dart `_saturate`: 1 - 2 / (exp(2v) + 1)。 */
+    fun saturate(value: Float): Float {
+        val e = exp(2.0 * value)
+        return (1.0 - 2.0 / (e + 1.0)).toFloat()
+    }
+}
+
+// 弹簧参数对照裁决表：withDampingRatio 直搬；withDurationAndBounce 按 stiffness=(2π/T)²、ratio≈1−bounce×1.4 换算。
+private val PressSpring = spring<Float>(dampingRatio = 0.593f, stiffness = 311f)
+private val FollowSpring = spring<Float>(dampingRatio = 0.9f, stiffness = 1024f)
+private val JellySpring = spring<Float>(dampingRatio = 0.4f, stiffness = 100f)
+private val TravelSpring = spring<Float>(dampingRatio = 0.79f, stiffness = 247f)
+private val LiftSpring = spring<Float>(dampingRatio = 1f, stiffness = 632f)
+private val TrackSpring = spring<Float>(dampingRatio = 1f, stiffness = 2742f)
+
+private val PillShape = RoundedCornerShape(percent = 50)
+
+class DockDestination(val icon: ImageVector, val label: String)
+
+/** 一次手势里的布局参数（px）。 */
+private class DockLayout(
+    val pitch: Float,
+    val lens: Float,
+    val inset: Float,
+    val barWidth: Float,
+    val barHeight: Float,
+    val lastIndex: Int,
+)
+
+/**
+ * 一组弹簧状态的持有者。对应原作的 `_Spring` 列表：
+ * 每个 retarget 先取消旧 Job（保留当前速度），再以当前速度起新动画，
+ * 等价于原作 `springTo` 的"手指每帧改目标"语义。
+ */
+private class DockController(
+    private val scope: CoroutineScope,
+    selectedIndex: Int,
+) {
+    val lens = Animatable(selectedIndex.toFloat())
+    val lift = Animatable(0f)
+    val swell = Animatable(0f)
+    val stretch = Animatable(0f)
+    val jelly = Animatable(0f)
+
+    var lensTarget = selectedIndex.toFloat()
+        private set
+    var pressedIndex: Int? = null
+        private set
+    var dragging = false
+        private set
+    var pointerDown = false
+        private set
+    private var dropping = false
+    private var pressX = 0f
+
+    private class Slot {
+        var job: Job? = null
+    }
+
+    private val lensSlot = Slot()
+    private val liftSlot = Slot()
+    private val swellSlot = Slot()
+    private val stretchSlot = Slot()
+    private val jellySlot = Slot()
+
+    private fun retarget(
+        anim: Animatable<Float, AnimationVector1D>,
+        slot: Slot,
+        target: Float,
+        spec: SpringSpec<Float>,
+    ) {
+        val velocity = anim.velocity
+        slot.job?.cancel()
+        slot.job = scope.launch { anim.animateTo(target, spec, initialVelocity = velocity) }
+    }
+
+    fun travel(target: Float) {
+        lensTarget = target
+        retarget(lens, lensSlot, target, TravelSpring)
+    }
+
+    fun press(x: Float, layout: DockLayout, touchSlop: Float) {
+        pointerDown = true
+        pressX = x
+        dragging = false
+        dropping = false
+        retarget(swell, swellSlot, 1f, PressSpring)
+        val index = DockMath.indexAt(
+            DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex),
+            layout.lastIndex,
+        )
+        pressedIndex = index
+        retarget(lift, liftSlot, 1f, LiftSpring)
+        travel(index.toFloat())
+    }
+
+    /** 返回 true 表示已越过拖动阈值（用于消费事件）。 */
+    fun slide(x: Float, layout: DockLayout, touchSlop: Float, haptic: () -> Unit): Boolean {
+        if (pressedIndex == null) return false
+        if (!dragging) {
+            if (abs(x - pressX) < touchSlop) return false
+            dragging = true
+        }
+        val overshoot = x - x.coerceIn(0f, layout.barWidth)
+        retarget(
+            stretch,
+            stretchSlot,
+            DockMath.rubberBand(overshoot, layout.barHeight * DockMath.PullLimit),
+            TrackSpring,
+        )
+        val position = DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex)
+        lensTarget = position
+        retarget(lens, lensSlot, position, FollowSpring)
+        val index = DockMath.indexAt(position, layout.lastIndex)
+        if (index != pressedIndex) {
+            haptic()
+            pressedIndex = index
+        }
+        return true
+    }
+
+    fun fling(velocityX: Float, layout: DockLayout, haptic: () -> Unit) {
+        val pressed = pressedIndex
+        if (!dragging || pressed == null) return
+        val index = DockMath.flingIndex(lensTarget, velocityX, layout.pitch, pressed, layout.lastIndex)
+        if (index != pressed) {
+            haptic()
+            pressedIndex = index
+        }
+    }
+
+    fun release(commit: Boolean, selected: Int, onSelected: (Int) -> Unit) {
+        pointerDown = false
+        retarget(swell, swellSlot, 0f, PressSpring)
+        retarget(stretch, stretchSlot, 0f, PressSpring)
+        val index = pressedIndex ?: return
+        pressedIndex = null
+        dragging = false
+        dropping = true
+        travel(if (commit) index.toFloat() else selected.toFloat())
+        checkDropLift()
+        if (commit && index != selected) onSelected(index)
+    }
+
+    /** UIKit 语义：透镜升到顶（>= LiftSnap）且归位到位后才放下。 */
+    fun checkDropLift() {
+        if (!dropping || pointerDown || lift.value < DockMath.LiftSnap) return
+        if (abs(lensTarget - lens.value) > DockMath.LiftRelease) return
+        dropping = false
+        retarget(lift, liftSlot, 0f, LiftSpring)
+    }
+
+    fun settleToSelection(selected: Int) {
+        if (pressedIndex == null && !pointerDown && lensTarget != selected.toFloat()) {
+            travel(selected.toFloat())
+        }
+    }
+
+    fun updateJelly(target: Float) {
+        if (abs(target - jelly.targetValue) > 0.001f) {
+            retarget(jelly, jellySlot, target, JellySpring)
+        }
+    }
+}
+
+/**
+ * iOS 风浮动导航 Dock：选中项是一枚在目的地间弹跳归位的透镜。
+ * 按下整栏膨胀、透镜升起；拖动透镜跟手、两端过界橡胶带回弹；
+ * 松手透镜 travel 弹簧归位并提交选中；fling 最多越过当前项 ±1。
+ */
+@Composable
+fun NavigationDock(
+    destinations: List<DockDestination>,
+    selectedIndex: Int,
+    onSelected: (Int) -> Unit,
+) {
+    val count = destinations.size
+    val lastIndex = (count - 1).coerceAtLeast(0)
+    val selected = selectedIndex.coerceIn(0, lastIndex)
+
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
+    val controller = remember { DockController(scope, selected) }
+    val haptics = LocalHapticFeedback.current
+    val touchSlop = LocalViewConfiguration.current.touchSlop
+    val currentSelected = rememberUpdatedState(selected)
+    val currentOnSelected = rememberUpdatedState(onSelected)
+    val colorScheme = MaterialTheme.colorScheme
+
+    val tick: () -> Unit = { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+
+    // 外部选中项变化时透镜归位（按下/拖动中不打断）。
+    LaunchedEffect(selected) {
+        controller.settleToSelection(selected)
+    }
+    // lift 升到顶且透镜归位到位后放下透镜。
+    LaunchedEffect(controller) {
+        snapshotFlow { controller.lift.value to controller.lens.value }
+            .collect { controller.checkDropLift() }
+    }
+    // 果冻变形：透镜速度 → 拉伸，减速度 → 压扁（原作 _wobble；加速度用速度差分近似）。
+    LaunchedEffect(controller) {
+        var lastVelocity = 0f
+        var lastTimeNanos = 0L
+        while (true) {
+            withFrameNanos { now ->
+                val velocity = controller.lens.velocity
+                val dt = if (lastTimeNanos == 0L) 0f else (now - lastTimeNanos) / 1_000_000_000f
+                lastTimeNanos = now
+                val acceleration = if (dt > 0f) (velocity - lastVelocity) / dt else 0f
+                lastVelocity = velocity
+                val braking = max(0f, -acceleration * sign(velocity))
+                val target =
+                    DockMath.JellyStretch * DockMath.saturate(abs(velocity) / DockMath.JellySpeed) -
+                        DockMath.JellySquash * DockMath.saturate(braking / DockMath.JellyBrake)
+                controller.updateJelly(target)
+            }
+        }
+    }
+
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val bottomMargin = maxOf(DockMath.EdgeMargin.dp, navBottom)
+    val maxPressGrowthPx = with(density) { DockMath.MaxPressGrowth.dp.toPx() }
+    val isDark = colorScheme.surface.luminance() < 0.5f
+    val strength = if (isDark) 3f else 1f
+    // material3 1.4 已移除 ColorScheme.shadow（M3 方案里 shadow 恒为黑色）。
+    val shadowColor = Color.Black
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(DockMath.ShadowRoom.dp + DockMath.BarHeight.dp + bottomMargin),
+    ) {
+        var barModifier = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(horizontal = DockMath.EdgeMargin.dp)
+            .height(DockMath.BarHeight.dp)
+            .fillMaxWidth()
+        if (count in 1 until DockMath.FullWidthCount) {
+            barModifier = barModifier.widthIn(
+                max = (count * DockMath.MaxItemExtent + DockMath.BarPadding * 4).dp,
+            )
+        }
+
+        BoxWithConstraints(
+            barModifier
+                // iOS 式双软阴影（深色强度 ×3 对照 dockShadows）。
+                .shadow(
+                    8.dp,
+                    PillShape,
+                    ambientColor = shadowColor.copy(alpha = 0.08f * strength),
+                    spotColor = shadowColor.copy(alpha = 0.08f * strength),
+                )
+                .shadow(
+                    1.dp,
+                    PillShape,
+                    ambientColor = shadowColor.copy(alpha = 0.04f * strength),
+                    spotColor = shadowColor.copy(alpha = 0.04f * strength),
+                )
+                .clip(PillShape)
+                .background(colorScheme.surfaceContainerHigh)
+                // Raw pointer 而非 recognizer：拖动没有 arena 要赢，tap 等待会推迟透镜升起。
+                .pointerInput(count) {
+                    if (count == 0) return@pointerInput
+                    val paddingPx = with(density) { DockMath.BarPadding.dp.toPx() }
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        val span = size.width - paddingPx * 2
+                        val (pitch, lensW, inset) = DockMath.dockLayout(span, count)
+                        val layout = DockLayout(
+                            pitch = pitch,
+                            lens = lensW,
+                            inset = inset,
+                            barWidth = size.width.toFloat(),
+                            barHeight = size.height.toFloat(),
+                            lastIndex = count - 1,
+                        )
+                        val tracker = VelocityTracker()
+                        tracker.addPosition(down.uptimeMillis, down.position)
+                        controller.press(down.position.x, layout, touchSlop)
+                        var active = true
+                        while (active) {
+                            val event = awaitPointerEvent()
+                            when (event.type) {
+                                PointerEventType.Move -> {
+                                    var pointerGone = false
+                                    for (change in event.changes) {
+                                        tracker.addPosition(change.uptimeMillis, change.position)
+                                        if (!change.pressed) {
+                                            pointerGone = true
+                                            continue
+                                        }
+                                        if (controller.slide(change.position.x, layout, touchSlop, tick)) {
+                                            change.consume()
+                                        }
+                                    }
+                                    // Compose 1.12 无 PointerEventType.Cancel：按压丢失按取消处理。
+                                    if (pointerGone) {
+                                        controller.release(false, currentSelected.value, currentOnSelected.value)
+                                        active = false
+                                    }
+                                }
+                                PointerEventType.Release -> {
+                                    controller.fling(tracker.calculateVelocity().x, layout, tick)
+                                    controller.release(true, currentSelected.value, currentOnSelected.value)
+                                    active = false
+                                }
+                                else -> Unit
+                            }
+                        }
+                    }
+                }
+                // ElasticPress：整栏 swell + 横向 pull（只影响绘制，命中坐标不变）。
+                .graphicsLayer {
+                    val swellV = controller.swell.value
+                    val pull = controller.stretch.value
+                    val maxGrowth = maxPressGrowthPx
+                    val growth = min(DockMath.PressGrowth * 2f, maxGrowth / size.maxDimension)
+                    val swellScale = 1f + swellV * growth
+                    scaleX = swellScale * (1f + abs(pull) / size.width * DockMath.PullStretch)
+                    scaleY = swellScale
+                    translationX = pull
+                },
+        ) {
+            if (count == 0) return@BoxWithConstraints
+            val barPaddingPx = with(density) { DockMath.BarPadding.dp.toPx() }
+            val span = constraints.maxWidth - barPaddingPx * 2
+            val coreHeight = constraints.maxHeight - barPaddingPx * 2
+            val (pitch, lensWidth, inset) = DockMath.dockLayout(span, count)
+            val core = Modifier.matchParentSize().padding(DockMath.BarPadding.dp)
+            val insetDp = with(density) { inset.toDp() }
+
+            val liftV = controller.lift.value
+            val rect = DockMath.lensRect(
+                position = controller.lens.value,
+                stretch = controller.jelly.value,
+                pitch = pitch,
+                width = lensWidth,
+                height = coreHeight,
+                lift = liftV,
+                inset = inset,
+            )
+
+            // 透镜底（secondaryContainer alpha 0.85，对照 HCT tone 90/4 裁决）。
+            Canvas(core) {
+                drawRoundRect(
+                    color = colorScheme.secondaryContainer.copy(alpha = 0.85f),
+                    topLeft = Offset(rect.left, rect.top),
+                    size = Size(rect.width, rect.height),
+                    cornerRadius = CornerRadius(rect.height / 2, rect.height / 2),
+                )
+            }
+            // 底层 items：原色（onSurfaceVariant）。
+            DockItems(
+                destinations = destinations,
+                tint = colorScheme.onSurfaceVariant,
+                inset = insetDp,
+                selectedIndex = selected,
+                modifier = core,
+            )
+            // 透镜层 items：同一 Row 再画一遍，clip 到透镜矩形、内容色 primary、随 lift 放大。
+            val magnify: () -> Float = { 1f + DockMath.LensMagnify * controller.lift.value }
+            Box(
+                core.graphicsLayer {
+                    clip = true
+                    shape = GenericShape { _, _ ->
+                        addRoundRect(
+                            RoundRect(
+                                left = rect.left,
+                                top = rect.top,
+                                right = rect.left + rect.width,
+                                bottom = rect.top + rect.height,
+                                cornerRadius = CornerRadius(rect.height / 2, rect.height / 2),
+                            ),
+                        )
+                    }
+                },
+            ) {
+                DockItems(
+                    destinations = destinations,
+                    tint = colorScheme.primary,
+                    inset = insetDp,
+                    selectedIndex = -1,
+                    magnify = magnify,
+                    modifier = Modifier.matchParentSize(),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DockItems(
+    destinations: List<DockDestination>,
+    tint: Color,
+    inset: Dp,
+    modifier: Modifier = Modifier,
+    selectedIndex: Int = -1,
+    magnify: (() -> Float)? = null,
+) {
+    Row(modifier.padding(horizontal = inset)) {
+        destinations.forEachIndexed { index, destination ->
+            val itemModifier = if (magnify != null) {
+                Modifier.graphicsLayer {
+                    val m = magnify()
+                    scaleX = m
+                    scaleY = m
+                }
+            } else {
+                Modifier
+            }
+            Box(
+                itemModifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .then(
+                        if (selectedIndex >= 0) {
+                            Modifier.semantics(mergeDescendants = true) {
+                                contentDescription = destination.label
+                                selected = index == selectedIndex
+                            }
+                        } else {
+                            Modifier.clearAndSetSemantics { }
+                        },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    Modifier.padding(horizontal = DockMath.LabelInset.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        imageVector = destination.icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(DockMath.IconSize.dp),
+                        tint = tint,
+                    )
+                    Spacer(Modifier.height(DockMath.LabelGap.dp))
+                    Text(
+                        text = destination.label,
+                        color = tint,
+                        fontSize = DockMath.LabelSize.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private val previewDestinations = listOf(
+    DockDestination(Icons.Filled.Home, "首页"),
+    DockDestination(Icons.Filled.Search, "设备"),
+    DockDestination(Icons.Filled.Settings, "设置"),
+)
+
+@Preview(name = "浅色", showBackground = true, backgroundColor = 0xFFF8F9FF)
+@Composable
+private fun NavigationDockLightPreview() {
+    StayHiFiTheme(dynamicColor = false) {
+        NavigationDock(previewDestinations, 1, {})
+    }
+}
+
+@Preview(
+    name = "深色",
+    showBackground = true,
+    backgroundColor = 0xFF111320,
+    uiMode = Configuration.UI_MODE_NIGHT_YES,
+)
+@Composable
+private fun NavigationDockDarkPreview() {
+    StayHiFiTheme(dynamicColor = false, darkTheme = true) {
+        NavigationDock(previewDestinations, 1, {})
+    }
+}

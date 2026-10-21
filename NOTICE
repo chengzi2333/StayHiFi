@@ -21,3 +21,7 @@ This product bundles the following third-party components:
 - dev.rikka.shizuku:api / dev.rikka.shizuku:provider (https://github.com/RikkaApps/Shizuku)
   Licensed under the Apache License, Version 2.0.
   See https://www.apache.org/licenses/LICENSE-2.0 for the full text.
+
+- NavigationDock 组件设计参考并移植自 FlClash (https://github.com/chen08209/FlClash)
+  的 lib/ui/navigation_dock.dart。
+  Licensed under GPL-3.0.
