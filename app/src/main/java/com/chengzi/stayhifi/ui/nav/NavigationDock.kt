@@ -27,10 +27,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.shape.GenericShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -45,13 +44,13 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.asComposePath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -73,6 +72,10 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.graphics.shapes.CornerRounding
+import androidx.graphics.shapes.RoundedPolygon
+import androidx.graphics.shapes.rectangle
+import androidx.graphics.shapes.toPath
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -196,15 +199,30 @@ internal object DockMath {
     }
 }
 
-// 弹簧参数对照裁决表：withDampingRatio 直搬；withDurationAndBounce 按 stiffness=(2π/T)²、ratio≈1−bounce×1.4 换算。
+// 弹簧参数对照裁决表：withDampingRatio 直搬；withDurationAndBounce 按 Flutter 官方公式
+// stiffness=(2π/T)²·m、damping=4π(1−bounce)m/T → dampingRatio = 1−bounce（UIWidgets 文档 SpringDescription.withDurationAndBounce）。
 private val PressSpring = spring<Float>(dampingRatio = 0.593f, stiffness = 311f)
 private val FollowSpring = spring<Float>(dampingRatio = 0.9f, stiffness = 1024f)
 private val JellySpring = spring<Float>(dampingRatio = 0.4f, stiffness = 100f)
-private val TravelSpring = spring<Float>(dampingRatio = 0.79f, stiffness = 247f)
+// travel 400ms/bounce 0.15 → ζ=0.85（原 0.79 系换算表误差，回弹过量）。
+private val TravelSpring = spring<Float>(dampingRatio = 0.85f, stiffness = 247f)
 private val LiftSpring = spring<Float>(dampingRatio = 1f, stiffness = 632f)
 private val TrackSpring = spring<Float>(dampingRatio = 1f, stiffness = 2742f)
 
-private val PillShape = RoundedCornerShape(percent = 50)
+/** 超椭圆 path（Lamé n=4 近似）：graphics-shapes smoothing=1 的圆角矩形，即 Flutter RoundedSuperellipseBorder 的视觉等价。 */
+private fun superellipsePath(size: Size, radius: Float): Path =
+    RoundedPolygon.rectangle(
+        width = size.width,
+        height = size.height,
+        rounding = CornerRounding(radius, smoothing = 1f),
+        centerX = size.width / 2f,
+        centerY = size.height / 2f,
+    ).toPath().asComposePath()
+
+/** 栏体超椭圆形状（半径 = 短边一半，对应原作 AppShape.full）。 */
+private val SuperellipseShape = GenericShape { bounds, _ ->
+    addPath(superellipsePath(Size(bounds.width, bounds.height), min(bounds.width, bounds.height) / 2f))
+}
 
 class DockDestination(val icon: ImageVector, val label: String)
 
@@ -243,6 +261,7 @@ private class DockController(
     var pointerDown = false
         private set
     private var dropping = false
+    private var released = false
     private var pressX = 0f
 
     private class Slot {
@@ -273,6 +292,7 @@ private class DockController(
 
     fun press(x: Float, layout: DockLayout, touchSlop: Float) {
         pointerDown = true
+        released = false
         pressX = x
         dragging = false
         dropping = false
@@ -323,7 +343,8 @@ private class DockController(
 
     fun release(commit: Boolean, selected: Int, onSelected: (Int) -> Unit) {
         pointerDown = false
-        retarget(swell, swellSlot, 0f, PressSpring)
+        released = true
+        // 原作 _release：pull 立即归零，swell 不归零——由 _settle 等膨胀升到 LiftSnap 再放下。
         retarget(stretch, stretchSlot, 0f, PressSpring)
         val index = pressedIndex ?: return
         pressedIndex = null
@@ -340,6 +361,13 @@ private class DockController(
         if (abs(lensTarget - lens.value) > DockMath.LiftRelease) return
         dropping = false
         retarget(lift, liftSlot, 0f, LiftSpring)
+    }
+
+    /** 原作 ElasticPress._settle：快速点按松手后膨胀先升满（>= LiftSnap）再弹回，气泡感不被掐断。 */
+    fun checkSettleSwell() {
+        if (!released || pointerDown || swell.value < DockMath.LiftSnap) return
+        released = false
+        retarget(swell, swellSlot, 0f, PressSpring)
     }
 
     fun settleToSelection(selected: Int) {
@@ -385,10 +413,13 @@ fun NavigationDock(
     LaunchedEffect(selected) {
         controller.settleToSelection(selected)
     }
-    // lift 升到顶且透镜归位到位后放下透镜。
+    // lift 升到顶且透镜归位到位后放下透镜；松手后 swell 升满再归零（checkSettleSwell）。
     LaunchedEffect(controller) {
-        snapshotFlow { controller.lift.value to controller.lens.value }
-            .collect { controller.checkDropLift() }
+        snapshotFlow { Triple(controller.lift.value, controller.lens.value, controller.swell.value) }
+            .collect {
+                controller.checkDropLift()
+                controller.checkSettleSwell()
+            }
     }
     // 果冻变形：透镜速度 → 拉伸，减速度 → 压扁（原作 _wobble；加速度用速度差分近似）。
     LaunchedEffect(controller) {
@@ -441,19 +472,19 @@ fun NavigationDock(
                 // iOS 式双软阴影（深色强度 ×3 对照 dockShadows）；clip=false——升起的透镜允许溢出栏体。
                 .shadow(
                     8.dp,
-                    PillShape,
+                    SuperellipseShape,
                     clip = false,
                     ambientColor = shadowColor.copy(alpha = 0.08f * strength),
                     spotColor = shadowColor.copy(alpha = 0.08f * strength),
                 )
                 .shadow(
                     1.dp,
-                    PillShape,
+                    SuperellipseShape,
                     clip = false,
                     ambientColor = shadowColor.copy(alpha = 0.04f * strength),
                     spotColor = shadowColor.copy(alpha = 0.04f * strength),
                 )
-                .background(colorScheme.surfaceContainerHigh, PillShape)
+                .background(colorScheme.surfaceContainerHigh, SuperellipseShape)
                 // Raw pointer 而非 recognizer：拖动没有 arena 要赢，tap 等待会推迟透镜升起。
                 .pointerInput(count) {
                     if (count == 0) return@pointerInput
@@ -559,25 +590,16 @@ fun NavigationDock(
                     lensGrowth = lensGrowthPx,
                 )
             }
-            val lensRoundRect: (DockMath.LensRect) -> RoundRect = { r ->
-                RoundRect(
-                    left = r.left,
-                    top = r.top,
-                    right = r.left + r.width,
-                    bottom = r.top + r.height,
-                    cornerRadius = CornerRadius(r.height / 2, r.height / 2),
-                )
+            val lensPath: (DockMath.LensRect) -> Path = { r ->
+                superellipsePath(Size(r.width, r.height), r.height / 2f).apply {
+                    translate(Offset(r.left, r.top))
+                }
             }
 
             // 透镜底（secondaryContainer alpha 0.85，对照 HCT tone 90/4 裁决）。
             Canvas(core) {
                 val r = lensRectNow(size.height)
-                drawRoundRect(
-                    color = lensColor,
-                    topLeft = Offset(r.left, r.top),
-                    size = Size(r.width, r.height),
-                    cornerRadius = CornerRadius(r.height / 2, r.height / 2),
-                )
+                drawPath(path = lensPath(r), color = lensColor)
             }
             // 底层 items：原色（onSurfaceVariant）。透镜区域挖空（evenOdd 裁剪），
             // 透镜下内容只由上层绘制（对照原作 _LensTint.paint 的 outside 层）。
@@ -585,10 +607,10 @@ fun NavigationDock(
                 core.graphicsLayer {
                     clip = true
                     val r = lensRectNow(size.height)
-                    shape = GenericShape { bounds, _ ->
+                    shape = GenericShape { _, _ ->
                         fillType = PathFillType.EvenOdd
-                        addRect(Rect(Offset.Zero, bounds))
-                        addRoundRect(lensRoundRect(r))
+                        addRect(Rect(Offset.Zero, size))
+                        addPath(lensPath(r))
                     }
                 },
             ) {
@@ -607,7 +629,7 @@ fun NavigationDock(
                 core.graphicsLayer {
                     clip = true
                     val r = lensRectNow(size.height)
-                    shape = GenericShape { _, _ -> addRoundRect(lensRoundRect(r)) }
+                    shape = GenericShape { _, _ -> addPath(lensPath(r)) }
                 },
             ) {
                 DockItems(
@@ -693,7 +715,7 @@ private fun DockItems(
 
 private val previewDestinations = listOf(
     DockDestination(Icons.Filled.Home, "首页"),
-    DockDestination(Icons.Filled.Search, "设备"),
+    DockDestination(Icons.Filled.Headphones, "设备"),
     DockDestination(Icons.Filled.Settings, "设置"),
 )
 

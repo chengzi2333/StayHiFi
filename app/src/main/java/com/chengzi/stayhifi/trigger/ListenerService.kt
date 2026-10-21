@@ -77,7 +77,8 @@ class ListenerService : Service() {
         try {
             ServiceCompat.startForeground(
                 this, ID_LISTENER,
-                notifier.persistentNotification(TEXT_WAITING),
+                // 首帧即「运行中」：等 notifyPersistent collect 才刷新期间的瞬态不该闪「等待耳机连接」。
+                notifier.persistentNotification(TEXT_RUNNING),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
             )
         } catch (se: SecurityException) {
