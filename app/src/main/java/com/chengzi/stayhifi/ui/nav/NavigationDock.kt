@@ -35,8 +35,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
@@ -45,19 +47,27 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.asComposePath
 import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -74,6 +84,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.graphics.shapes.CornerRounding
@@ -86,6 +97,7 @@ import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sign
 
 /** 布局与物理公式，移植自 FlClash `navigation_dock.dart`，纯函数可单测。
@@ -696,46 +708,22 @@ fun NavigationDock(
                 val color = lensTint.copy(alpha = 0.08f * lift).compositeOver(lensRestColor)
                 drawPath(path = lensPath(r), color = color)
             }
-            // 底层 items：原色（onSurfaceVariant）。透镜区域挖空（evenOdd 裁剪），
-            // 透镜下内容只由上层绘制（对照原作 _LensTint.paint 的 outside 层）。
-            Box(
-                core.graphicsLayer {
-                    clip = true
-                    val r = lensRectNow(size.height)
-                    shape = GenericShape { _, _ ->
-                        fillType = PathFillType.EvenOdd
-                        addRect(Rect(Offset.Zero, size))
-                        addPath(lensPath(r))
-                    }
-                },
-            ) {
-                DockItems(
-                    destinations = destinations,
-                    tint = colorScheme.onSurfaceVariant,
-                    inset = insetDp,
-                    selectedIndex = selected,
-                    onActivate = { currentOnSelected.value(it) },
-                    modifier = Modifier.matchParentSize(),
-                )
-            }
-            // 透镜层 items：同一 Row 再画一遍，clip 到透镜矩形、内容色 primary、随 lift 放大。
-            val magnify: () -> Float = { 1f + DockMath.LensMagnify * controller.lift.value }
-            Box(
-                core.graphicsLayer {
-                    clip = true
-                    val r = lensRectNow(size.height)
-                    shape = GenericShape { _, _ -> addPath(lensPath(r)) }
-                },
-            ) {
-                DockItems(
-                    destinations = destinations,
-                    tint = colorScheme.primary,
-                    inset = insetDp,
-                    selectedIndex = -1,
-                    magnify = magnify,
-                    modifier = Modifier.matchParentSize(),
-                )
-            }
+            // 逐 item 渲染（对照原作 _RenderLensTint）：透镜未触及的 item 只重放录制层、零合成开销；
+            // 触及的 item 才做局部 outside（evenOdd 挖洞）/inside（透镜 clip + 放大 + srcIn 染色）双层。
+            DockItems(
+                destinations = destinations,
+                tint = colorScheme.onSurfaceVariant,
+                inset = insetDp,
+                selectedIndex = selected,
+                onActivate = { currentOnSelected.value(it) },
+                lensTint = colorScheme.primary,
+                lensWidthPx = lensWidth,
+                lensGrowthPx = lensGrowthPx,
+                barPaddingPx = barPaddingPx,
+                labelInsetPx = with(density) { DockMath.LabelInset.dp.toPx() },
+                lensState = { Triple(controller.lens.value, controller.jelly.value, controller.lift.value) },
+                modifier = core,
+            )
         }
         }
     }
@@ -749,21 +737,32 @@ private fun DockItems(
     modifier: Modifier = Modifier,
     selectedIndex: Int = -1,
     onActivate: ((Int) -> Unit)? = null,
-    magnify: (() -> Float)? = null,
+    // 逐 item 透镜渲染参数（对照原作 _LensTint，L1634-1992）；lensTint 非 null 时启用双层。
+    // 全部在 draw 阶段读取，动画帧只触发重绘不触发重组。
+    lensTint: Color? = null,
+    lensWidthPx: Float = 0f,
+    lensGrowthPx: Float = 0f,
+    barPaddingPx: Float = 0f,
+    labelInsetPx: Float = 0f,
+    lensState: (() -> Triple<Float, Float, Float>)? = null,
 ) {
     Row(modifier.padding(horizontal = inset)) {
         destinations.forEachIndexed { index, destination ->
-            val itemModifier = if (magnify != null) {
-                Modifier.graphicsLayer {
-                    val m = magnify()
-                    scaleX = m
-                    scaleY = m
+            // 内容静态（图标+label），各录制一次 GraphicsLayer 之后纯重放；
+            // 主题/字号/label 变化引起重组时，由 SideEffect 标注重录一次。
+            // tintedLayer 录制时经 saveLayer(colorFilter=srcIn) 把 primary 染色烘进层里
+            // ——GraphicsLayer.colorFilter 是绘制期属性、drawLayer 不随中途赋值生效，故烘焙。
+            val itemLayer = rememberGraphicsLayer()
+            val tintedLayer = rememberGraphicsLayer()
+            var needsRecord by remember { mutableStateOf(true) }
+            SideEffect { needsRecord = true }
+            val tintPaint = remember(lensTint) {
+                Paint().apply {
+                    colorFilter = ColorFilter.tint(lensTint ?: Color.White, BlendMode.SrcIn)
                 }
-            } else {
-                Modifier
             }
             Box(
-                itemModifier
+                Modifier
                     .weight(1f)
                     .fillMaxHeight()
                     .then(
@@ -781,7 +780,71 @@ private fun DockItems(
                         } else {
                             Modifier.clearAndSetSemantics { }
                         },
-                    ),
+                    )
+                    .drawWithContent {
+                        if (needsRecord) {
+                            val sz = IntSize(size.width.roundToInt(), size.height.roundToInt())
+                            itemLayer.record(sz) {
+                                this@drawWithContent.drawContent()
+                            }
+                            tintedLayer.record(sz) {
+                                drawIntoCanvas { canvas ->
+                                    canvas.saveLayer(Rect(0f, 0f, size.width, size.height), tintPaint)
+                                }
+                                this@drawWithContent.drawContent()
+                                drawIntoCanvas { canvas -> canvas.restore() }
+                            }
+                            needsRecord = false
+                        }
+                        val state = lensState
+                        if (state == null) {
+                            drawLayer(itemLayer)
+                            return@drawWithContent
+                        }
+                        val (lensPos, jelly, lift) = state()
+                        // item-local 透镜矩形：pitch = item 自身宽度（原作 _lensBounds L1840-1857）。
+                        val lr = DockMath.lensRect(
+                            position = lensPos - index,
+                            stretch = jelly,
+                            pitch = size.width,
+                            width = lensWidthPx,
+                            height = size.height,
+                            lift = lift,
+                            inset = 0f,
+                            lensGrowth = lensGrowthPx,
+                        )
+                        // reached：左右各收 barPaddingPx——透镜伸过相邻项上空的部分没东西可挖（原作 L1914-1919）。
+                        val reachedLeft = lr.left + barPaddingPx
+                        val reachedRight = lr.left + lr.width - barPaddingPx
+                        if (reachedRight <= 0f || reachedLeft >= size.width) {
+                            // 透镜未触及本 item：零层开销，直接重放。
+                            drawLayer(itemLayer)
+                            return@drawWithContent
+                        }
+                        val path = superellipsePath(Size(lr.width, lr.height), lr.height / 2f).apply {
+                            translate(Offset(lr.left, lr.top))
+                        }
+                        // reach = item 界膨胀 labelInsetPx（原作 L1934）。
+                        val reach = Rect(
+                            left = -labelInsetPx,
+                            top = -labelInsetPx,
+                            right = size.width + labelInsetPx,
+                            bottom = size.height + labelInsetPx,
+                        )
+                        // outside：reach − 透镜（evenOdd），原色重放（对照 outside 层 L1936-1947）。
+                        clipPath(Path().apply {
+                            fillType = PathFillType.EvenOdd
+                            addRect(reach)
+                            addPath(path)
+                        }) {
+                            drawLayer(itemLayer)
+                        }
+                        // inside：透镜 path 内，绕 item 中心放大 1+0.16×lift，染 primary 副本（对照 _paintTinted L1969-1991）。
+                        clipPath(path) {
+                            val m = 1f + DockMath.LensMagnify * lift
+                            scale(m, pivot = center) { drawLayer(tintedLayer) }
+                        }
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 Column(
