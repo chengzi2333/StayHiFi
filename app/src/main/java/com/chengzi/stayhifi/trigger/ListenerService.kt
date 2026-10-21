@@ -34,10 +34,10 @@ import org.json.JSONObject
  *   开关切换 / BootReceiver 三处拉起；开关变 false 时自行 stopSelf。
  * - 运行时注册 ACL_CONNECTED / ACL_DISCONNECTED（exported=false 仅本进程），
  *   连接事件走 [ApplyWorker]（与广播兜底共用同一入口）。
- * - 常驻通知 channel_listener（IMPORTANCE_LOW 静默）：标题「StayHiFi 运行中」，
- *   连接后正文 "Enco X3 · LHDC·192kHz·24bit"，未连接「等待耳机连接」。
- * - notifyPersistent 开 = 事件驱动（连接/断开/写入后）+ 30s 轮询 readConfig 刷新；
- *   关 = 静态文案，不轮询。
+ * - 常驻通知 channel_listener（IMPORTANCE_LOW 静默）：标题「StayHiFi 运行中」。
+ *   notifyPersistent 关 = 静态正文「音质满格运行中」，不轮询；
+ *   notifyPersistent 开 = 事件驱动（连接/断开/写入后）+ 30s 轮询 readConfig 刷新，
+ *   已连接显示 "Enco X3 · LHDC·192kHz·24bit"，未连接或读不到参数时「等待耳机连接」。
  */
 class ListenerService : Service() {
 
@@ -196,7 +196,7 @@ class ListenerService : Service() {
 
     private suspend fun refreshNotification() {
         val content = if (!notifyPersistent) {
-            TEXT_WAITING
+            TEXT_RUNNING
         } else {
             readConnectedSummary() ?: TEXT_WAITING
         }
@@ -247,6 +247,7 @@ class ListenerService : Service() {
         private const val ID_LISTENER = 100
         private const val POLL_MS = 30_000L
         private const val TEXT_WAITING = "等待耳机连接"
+        private const val TEXT_RUNNING = "音质满格运行中"
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(
