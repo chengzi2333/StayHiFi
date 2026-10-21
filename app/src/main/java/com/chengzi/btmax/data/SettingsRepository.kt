@@ -12,7 +12,7 @@ private val Context.settingsDataStore by preferencesDataStore(name = "settings")
 
 /**
  * 全局设置（DataStore Preferences，设计 §4.6）。
- * 全部默认 false；autoEnabled 在 Onboarding 完成时置 true（M1 由调试页开关代替）。
+ * 全部默认 false；autoEnabled 在 Onboarding 完成时置 true。
  */
 class SettingsRepository(private val context: Context) {
 

@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ACL_CONNECTED 广播里读取 BluetoothDevice（Android 12+ 运行时权限，M1 由调试页申请） -->
+    <!-- ACL_CONNECTED 广播里读取 BluetoothDevice（Android 12+ 运行时权限，Onboarding 首次进入时申请） -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- 结果通知（Android 13+ 运行时权限） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 电池白名单引导（Onboarding「加入电池白名单」，需显式声明才能发 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- 包可见性：真机实测缺它导致 Shizuku/Stellar 安装探测误报 -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api"/>
+        <package android:name="roro.stellar.manager"/>
+    </queries>
 
     <application
         android:label="音质满格"

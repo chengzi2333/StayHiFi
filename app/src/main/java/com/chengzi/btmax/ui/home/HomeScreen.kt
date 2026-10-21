@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.chengzi.btmax.ui.theme.FullBarsTheme
 
@@ -218,7 +219,7 @@ private fun FullBarsBadge(fullBars: Boolean) {
     }
 }
 
-// TODO(5b): 加回 @Preview(showBackground = true, name = "首页-浅色-满血")（需 androidx.compose.ui:ui-tooling-preview 依赖）
+@Preview(showBackground = true, name = "首页-浅色-满血")
 @Composable
 private fun HomeScreenPreviewLight() {
     FullBarsTheme(dynamicColor = false) {
@@ -234,7 +235,7 @@ private fun HomeScreenPreviewLight() {
     }
 }
 
-// TODO(5b): 加回 @Preview(showBackground = true, name = "首页-深色-异常")（需 androidx.compose.ui:ui-tooling-preview 依赖）
+@Preview(showBackground = true, name = "首页-深色-异常")
 @Composable
 private fun HomeScreenPreviewDark() {
     FullBarsTheme(darkTheme = true, dynamicColor = false) {

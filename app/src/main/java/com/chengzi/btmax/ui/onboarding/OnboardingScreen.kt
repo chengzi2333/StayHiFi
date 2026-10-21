@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.chengzi.btmax.ui.theme.FullBarsTheme
 import kotlinx.coroutines.launch
@@ -562,7 +563,7 @@ private fun OnboardingBottomBar(
     }
 }
 
-// TODO(5b): 加回 @Preview(showBackground = true, name = "引导页-浅色")（需 androidx.compose.ui:ui-tooling-preview 依赖）
+@Preview(showBackground = true, name = "引导页-浅色")
 @Composable
 private fun OnboardingScreenPreviewLight() {
     FullBarsTheme(dynamicColor = false) {
@@ -576,7 +577,7 @@ private fun OnboardingScreenPreviewLight() {
     }
 }
 
-// TODO(5b): 加回 @Preview(showBackground = true, name = "引导页-深色")（需 androidx.compose.ui:ui-tooling-preview 依赖）
+@Preview(showBackground = true, name = "引导页-深色")
 @Composable
 private fun OnboardingScreenPreviewDark() {
     FullBarsTheme(darkTheme = true, dynamicColor = false) {

@@ -15,6 +15,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.chengzi.btmax.ui.theme.FullBarsTheme
@@ -135,7 +136,7 @@ private fun WizardStep(index: Int, text: String) {
     }
 }
 
-// TODO(5b): 加回 @Preview(showBackground = true, name = "录制向导-浅色")（需 androidx.compose.ui:ui-tooling-preview 依赖）
+@Preview(showBackground = true, name = "录制向导-浅色")
 @Composable
 private fun RecordWizardPreviewLight() {
     FullBarsTheme(dynamicColor = false) {
@@ -149,7 +150,7 @@ private fun RecordWizardPreviewLight() {
     }
 }
 
-// TODO(5b): 加回 @Preview(showBackground = true, name = "录制向导-深色")（需 androidx.compose.ui:ui-tooling-preview 依赖）
+@Preview(showBackground = true, name = "录制向导-深色")
 @Composable
 private fun RecordWizardPreviewDark() {
     FullBarsTheme(darkTheme = true, dynamicColor = false) {
