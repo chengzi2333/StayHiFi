@@ -45,6 +45,7 @@ import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.QsTileService
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
 import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.HeadsetEvents
 import com.chengzi.stayhifi.trigger.ListenerService
 import com.chengzi.stayhifi.ui.devices.DevicesAction
 import com.chengzi.stayhifi.ui.devices.DevicesScreen
@@ -178,6 +179,13 @@ class MainActivity : ComponentActivity() {
         val notifyResultOn by settingsRepo.notifyResult.collectAsState(initial = false)
         val notifyPersistentOn by settingsRepo.notifyPersistent.collectAsState(initial = false)
         val qsTileOn by settingsRepo.qsTile.collectAsState(initial = false)
+
+        // 耳机事件总线：连接/断开/拉满完成都 bump，首页随之刷新。
+        // version=0 是初始值，跳过避免首帧与 onResume 的 refreshHome 重复刷。
+        val headsetVersion by HeadsetEvents.version.collectAsState()
+        LaunchedEffect(headsetVersion) {
+            if (headsetVersion > 0L) refreshHome()
+        }
 
         Scaffold(
             bottomBar = {

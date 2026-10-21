@@ -57,6 +57,7 @@ class ListenerService : Service() {
                 BluetoothDevice.ACTION_ACL_CONNECTED -> onConnected(intent)
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> scope.launch {
                     LogStore.log("ACL_DISCONNECTED，刷新常驻通知")
+                    HeadsetEvents.bump()
                     refreshNotification()
                 }
             }
@@ -162,6 +163,7 @@ class ListenerService : Service() {
             return
         }
         scope.launch {
+            HeadsetEvents.bump()
             refreshNotification()
             try {
                 ApplyWorker(this@ListenerService).run(mac, name)
@@ -169,6 +171,7 @@ class ListenerService : Service() {
                 LogStore.log("ListenerService 触发 ApplyWorker 未捕获异常: $t")
             }
             // 写入成功后立即刷新一次通知正文
+            HeadsetEvents.bump()
             refreshNotification()
         }
     }
