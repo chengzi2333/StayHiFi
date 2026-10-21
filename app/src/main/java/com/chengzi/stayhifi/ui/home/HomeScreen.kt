@@ -76,9 +76,19 @@ fun HomeScreen(
             modifier = Modifier
                 .padding(innerPadding)
                 .fillMaxSize()
-                .padding(horizontal = 20.dp, vertical = 16.dp),
+                // top=32dp：状态栏下方呼吸空间（对照 Stellar 首页）；bottom 维持 16dp。
+                .padding(horizontal = 20.dp)
+                .padding(top = 32.dp, bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // 品牌大字（方案 A：纯文字，无图标/副标），深浅色随 onSurface 自动适配。
+            Text(
+                text = "StayHiFi",
+                style = MaterialTheme.typography.displaySmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+
             state.carrierAlert?.let { alert ->
                 CarrierAlertBanner(text = alert, onClick = { onAction(HomeAction.FixCarrier) })
             }

@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.shape.GenericShape
@@ -98,9 +97,7 @@ internal object DockMath {
     const val ShadowRoom = 8f
     const val HitSlop = 8f
     const val TouchSlop = 18f
-    const val MaxItemExtent = 86f
     const val MinLensWidth = 84f
-    const val FullWidthCount = 5
     const val IconSize = 28f
     const val LabelGap = 2f
     const val LabelInset = 2f
@@ -534,7 +531,9 @@ fun NavigationDock(
             .fillMaxWidth()
             .height(DockMath.ShadowRoom.dp + barHeight + bottomMargin),
     ) {
-        var hitModifier = Modifier
+        // 全宽栏 = 保留行为（对照 FlClash 真机外观）：原 widthIn(count×86+16) 三档收窄已被
+        // fillMaxWidth 顺序中和为死代码，删除（含 FullWidthCount/MaxItemExtent 常量）。
+        val hitModifier = Modifier
             .align(Alignment.BottomCenter)
             // 外边距收窄 hitSlop，使命中域比栏体四周各大 8dp（对照 _HitSlop）。
             .padding(horizontal = DockMath.EdgeMargin.dp - DockMath.HitSlop.dp)
@@ -543,11 +542,6 @@ fun NavigationDock(
             // 顶部多占 hitSlop，恰落入 ShadowRoom。
             .height(barHeight + DockMath.HitSlop.dp)
             .fillMaxWidth()
-        if (count in 1 until DockMath.FullWidthCount) {
-            hitModifier = hitModifier.widthIn(
-                max = (count * DockMath.MaxItemExtent + DockMath.BarPadding * 4).dp + DockMath.HitSlop.dp * 2,
-            )
-        }
 
         // hitSlop 命中层：pointerInput 挂在这层，坐标系相对外扩盒，手势侧需按 slopPx 校正。
         Box(
@@ -621,17 +615,12 @@ fun NavigationDock(
                     }
                 },
         ) {
-            var barModifier = Modifier
+            val barModifier = Modifier
                 .align(Alignment.BottomCenter)
                 // 收回 hitSlop，背景/内容保持原栏体尺寸。
                 .padding(horizontal = DockMath.HitSlop.dp)
                 .height(barHeight)
                 .fillMaxWidth()
-            if (count in 1 until DockMath.FullWidthCount) {
-                barModifier = barModifier.widthIn(
-                    max = (count * DockMath.MaxItemExtent + DockMath.BarPadding * 4).dp,
-                )
-            }
 
             BoxWithConstraints(
                 barModifier
