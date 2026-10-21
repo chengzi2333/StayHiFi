@@ -18,13 +18,11 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      # 仓库未提交 Gradle wrapper，钉死与本地一致的版本保证可复现
+      # 仓库已提交 Gradle wrapper（gradle/wrapper/ 锁 9.8.2），CI 与本地使用同一版本
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 9.8.2
 
       - name: Assemble debug APK
-        run: gradle assembleDebug
+        run: ./gradlew assembleDebug
 
       - name: Run unit tests
-        run: gradle testDebugUnitTest
+        run: ./gradlew testDebugUnitTest
