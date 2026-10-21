@@ -8,15 +8,23 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
+import android.service.quicksettings.TileService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,11 +40,20 @@ import com.chengzi.btmax.codec.DeviceProfile
 import com.chengzi.btmax.codec.Presets
 import com.chengzi.btmax.data.ProfileRepository
 import com.chengzi.btmax.data.SettingsRepository
+import com.chengzi.btmax.notify.QsTileService
 import com.chengzi.btmax.shell.ShizukuShellProvider
 import com.chengzi.btmax.trigger.ApplyWorker
+import com.chengzi.btmax.trigger.ListenerService
+import com.chengzi.btmax.ui.devices.DevicesAction
+import com.chengzi.btmax.ui.devices.DevicesScreen
+import com.chengzi.btmax.ui.devices.DevicesUiState
+import com.chengzi.btmax.ui.devices.DeviceItemUi
 import com.chengzi.btmax.ui.home.HomeAction
 import com.chengzi.btmax.ui.home.HomeScreen
 import com.chengzi.btmax.ui.home.HomeUiState
+import com.chengzi.btmax.ui.logs.LogsAction
+import com.chengzi.btmax.ui.logs.LogsScreen
+import com.chengzi.btmax.ui.logs.LogsUiState
 import com.chengzi.btmax.ui.onboarding.CarrierKind
 import com.chengzi.btmax.ui.onboarding.CarrierUiState
 import com.chengzi.btmax.ui.onboarding.CodecConfigSummary
@@ -44,7 +61,11 @@ import com.chengzi.btmax.ui.onboarding.OnboardingAction
 import com.chengzi.btmax.ui.onboarding.OnboardingScreen
 import com.chengzi.btmax.ui.onboarding.OnboardingUiState
 import com.chengzi.btmax.ui.onboarding.RecordWizard
+import com.chengzi.btmax.ui.settings.SettingsAction
+import com.chengzi.btmax.ui.settings.SettingsScreen
+import com.chengzi.btmax.ui.settings.SettingsUiState
 import com.chengzi.btmax.ui.theme.FullBarsTheme
+import com.chengzi.btmax.util.KeepAlive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -78,6 +99,11 @@ class MainActivity : ComponentActivity() {
     private var connectedMac: String? = null
     private var connectedName: String? = null
 
+    // ---- 底部导航 / 日志页（Task 6） ----
+    private var selectedTab by mutableStateOf(0)
+    private var logsVisible by mutableStateOf(false)
+    private var logs by mutableStateOf<List<String>>(emptyList())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         provider = ShizukuShellProvider(this)
@@ -95,10 +121,7 @@ class MainActivity : ComponentActivity() {
                     // DataStore 首读前的空白闪屏
                     null -> Box(Modifier.fillMaxSize())
                     false -> OnboardingEntry()
-                    true -> HomeScreen(
-                        state = homeState.copy(autoApplyEnabled = autoApplyEnabled),
-                        onAction = ::onHomeAction,
-                    )
+                    true -> MainTabs(autoApplyEnabled = autoApplyEnabled)
                 }
 
                 RecordWizard(
@@ -130,6 +153,7 @@ class MainActivity : ComponentActivity() {
             val onboarded = settingsRepo.onboarded.first()
             if (onboarded) {
                 refreshHome()
+                logs = LogStore.snapshot().asReversed()
             } else {
                 refreshCarriers()
                 refreshBatteryState()
@@ -140,6 +164,134 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         provider.unbind()
         super.onDestroy()
+    }
+
+    // ================= 三 tab 主导航（Task 6） =================
+
+    /** 首页 / 设备 / 设置 三 tab；日志页全屏覆盖，设置页进入。 */
+    @Composable
+    private fun MainTabs(autoApplyEnabled: Boolean) {
+        val profileList by profileRepo.all.collectAsState(initial = emptyList())
+        val notifyResultOn by settingsRepo.notifyResult.collectAsState(initial = false)
+        val notifyPersistentOn by settingsRepo.notifyPersistent.collectAsState(initial = false)
+        val qsTileOn by settingsRepo.qsTile.collectAsState(initial = false)
+
+        Scaffold(
+            bottomBar = {
+                if (!logsVisible) {
+                    NavigationBar {
+                        NavigationBarItem(
+                            selected = selectedTab == 0,
+                            onClick = { selectedTab = 0 },
+                            icon = { Icon(Icons.Default.Home, contentDescription = null) },
+                            label = { Text("首页") },
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 1,
+                            onClick = { selectedTab = 1 },
+                            icon = { Icon(Icons.Default.List, contentDescription = null) },
+                            label = { Text("设备") },
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 2,
+                            onClick = { selectedTab = 2 },
+                            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                            label = { Text("设置") },
+                        )
+                    }
+                }
+            },
+        ) { innerPadding ->
+            Box(Modifier.padding(innerPadding).fillMaxSize()) {
+                when (selectedTab) {
+                    0 -> HomeScreen(
+                        state = homeState.copy(autoApplyEnabled = autoApplyEnabled),
+                        onAction = ::onHomeAction,
+                    )
+                    1 -> DevicesScreen(
+                        state = DevicesUiState(
+                            profileList.map {
+                                DeviceItemUi(
+                                    mac = it.mac,
+                                    name = it.name,
+                                    configSummary = it.config.summary(),
+                                    source = it.source,
+                                    autoApply = it.autoApply,
+                                )
+                            },
+                        ),
+                        onAction = ::onDevicesAction,
+                    )
+                    2 -> SettingsScreen(
+                        state = SettingsUiState(
+                            notifyResult = notifyResultOn,
+                            notifyPersistent = notifyPersistentOn,
+                            qsTile = qsTileOn,
+                            batteryWhitelisted = KeepAlive.isBatteryWhitelisted(this@MainActivity),
+                        ),
+                        onAction = ::onSettingsAction,
+                    )
+                }
+                if (logsVisible) {
+                    LogsScreen(state = LogsUiState(logs), onAction = ::onLogsAction)
+                }
+            }
+        }
+    }
+
+    private fun onDevicesAction(action: DevicesAction) {
+        when (action) {
+            is DevicesAction.SetAutoApply -> lifecycleScope.launch {
+                val profile = withContext(Dispatchers.IO) { profileRepo.profileFor(action.mac) }
+                    ?: return@launch
+                withContext(Dispatchers.IO) {
+                    profileRepo.save(profile.copy(autoApply = action.enabled))
+                }
+                LogStore.log("${profile.name} 自动应用 = ${action.enabled}")
+            }
+            is DevicesAction.ReRecord -> {
+                // 复用 RecordWizard；保存按 MAC 覆盖原档案
+                wizardResult = null
+                wizardVisible = true
+            }
+        }
+    }
+
+    private fun onSettingsAction(action: SettingsAction) {
+        when (action) {
+            is SettingsAction.SetNotifyResult -> lifecycleScope.launch {
+                settingsRepo.setNotifyResult(action.enabled)
+                LogStore.log("拉满结果通知 = ${action.enabled}")
+            }
+            is SettingsAction.SetNotifyPersistent -> lifecycleScope.launch {
+                settingsRepo.setNotifyPersistent(action.enabled)
+                LogStore.log("常驻通知参数详情 = ${action.enabled}")
+            }
+            is SettingsAction.SetQsTile -> lifecycleScope.launch {
+                settingsRepo.setQsTile(action.enabled)
+                TileService.requestListeningState(
+                    this@MainActivity,
+                    ComponentName(this@MainActivity, QsTileService::class.java),
+                )
+                LogStore.log("QS 磁贴 = ${action.enabled}")
+            }
+            SettingsAction.OpenAutostart -> onOpenAutostartSettings()
+            SettingsAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
+            SettingsAction.OpenLogs -> {
+                logs = LogStore.snapshot().asReversed()
+                logsVisible = true
+            }
+        }
+    }
+
+    private fun onLogsAction(action: LogsAction) {
+        when (action) {
+            LogsAction.Clear -> {
+                LogStore.clear()
+                logs = emptyList()
+            }
+            LogsAction.Back -> logsVisible = false
+        }
     }
 
     // ================= Onboarding =================
@@ -265,47 +417,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onOpenAutostartSettings() {
-        // vivo OriginOS 自启动管理页；无 API 可查，按「用户已手动开启」乐观置位
-        val vivo = Intent().setComponent(ComponentName(
-            "com.vivo.permissionmanager",
-            "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
-        ))
-        val opened = try {
-            startActivity(vivo)
-            true
-        } catch (t: Throwable) {
-            LogStore.log("vivo 自启动页打不开（$t），回退本 App 详情页")
-            try {
-                startActivity(Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse("package:$packageName"),
-                ))
-                true
-            } catch (t2: Throwable) {
-                LogStore.log("打开应用详情页也失败: $t2")
-                false
-            }
-        }
-        if (opened) {
+        if (KeepAlive.openVivoAutostart(this)) {
             onboardingState = onboardingState.copy(autostartEnabled = true)
         }
     }
 
     private fun onOpenBatteryWhitelist() {
-        try {
-            startActivity(Intent(
-                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                Uri.parse("package:$packageName"),
-            ))
-        } catch (t: Throwable) {
-            LogStore.log("请求电池白名单失败: $t")
+        if (KeepAlive.openBatteryWhitelist(this)) {
+            onboardingState = onboardingState.copy(
+                batteryWhitelistEnabled = KeepAlive.isBatteryWhitelisted(this),
+            )
         }
     }
 
     private fun refreshBatteryState() {
-        val pm = getSystemService(PowerManager::class.java)
         onboardingState = onboardingState.copy(
-            batteryWhitelistEnabled = pm.isIgnoringBatteryOptimizations(packageName),
+            batteryWhitelistEnabled = KeepAlive.isBatteryWhitelisted(this),
         )
     }
 
@@ -394,6 +521,12 @@ class MainActivity : ComponentActivity() {
         when (action) {
             is HomeAction.SetAutoApply -> lifecycleScope.launch {
                 settingsRepo.setAutoEnabled(action.enabled)
+                // FGS 主触发的拉起/停止与开关同步
+                if (action.enabled) {
+                    ListenerService.start(this@MainActivity)
+                } else {
+                    ListenerService.stop(this@MainActivity)
+                }
                 LogStore.log("自动拉满开关 = ${action.enabled}")
             }
             HomeAction.ApplyNow -> onApplyNow()

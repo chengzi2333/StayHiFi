@@ -24,6 +24,9 @@ class ProfileRepository(private val context: Context) {
     private val profiles: Flow<List<DeviceProfile>> = context.profileDataStore.data
         .map { prefs -> prefs[KEY_PROFILES]?.let { decode(it) } ?: emptyList() }
 
+    /** 全部设备档案（设备页列表数据源，Task 6 新增；既有签名不变）。 */
+    val all: Flow<List<DeviceProfile>> = profiles
+
     /** MAC 大小写不敏感匹配。 */
     fun profileFor(mac: String): DeviceProfile? = runBlocking {
         profiles.first().firstOrNull { it.mac.equals(mac, ignoreCase = true) }

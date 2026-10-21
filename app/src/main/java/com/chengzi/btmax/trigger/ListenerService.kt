@@ -1,0 +1,238 @@
+package com.chengzi.btmax.trigger
+
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.app.Service
+import android.content.pm.ServiceInfo
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
+import com.chengzi.btmax.LogStore
+import com.chengzi.btmax.codec.CodecConfig
+import com.chengzi.btmax.data.SettingsRepository
+import com.chengzi.btmax.notify.Notifier
+import com.chengzi.btmax.shell.ShizukuShellProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * FGS 主触发载体（2026-10-21 设计裁决：OriginOS 7 禁广播冷启动，
+ * manifest 广播接收器永远唤不醒 App，本服务成为 ACL_CONNECTED 的唯一可靠触发路径）。
+ *
+ * - 生命周期：[SettingsRepository.autoEnabled] == true 时由 Application.onCreate /
+ *   开关切换 / BootReceiver 三处拉起；开关变 false 时自行 stopSelf。
+ * - 运行时注册 ACL_CONNECTED / ACL_DISCONNECTED（exported=false 仅本进程），
+ *   连接事件走 [ApplyWorker]（与广播兜底共用同一入口）。
+ * - 常驻通知 channel_listener（IMPORTANCE_LOW 静默）：标题「音质满格运行中」，
+ *   连接后正文 "Enco X3 · LHDC·192kHz·24bit"，未连接「等待耳机连接」。
+ * - notifyPersistent 开 = 事件驱动（连接/断开/写入后）+ 30s 轮询 readConfig 刷新；
+ *   关 = 静态文案，不轮询。
+ */
+class ListenerService : Service() {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var settings: SettingsRepository
+    private lateinit var notifier: Notifier
+    private lateinit var provider: ShizukuShellProvider
+
+    @Volatile
+    private var notifyPersistent = false
+
+    private var pollJob: Job? = null
+
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                BluetoothDevice.ACTION_ACL_CONNECTED -> onConnected(intent)
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> scope.launch {
+                    LogStore.log("ACL_DISCONNECTED，刷新常驻通知")
+                    refreshNotification()
+                }
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        settings = SettingsRepository(this)
+        notifier = Notifier(this)
+        provider = ShizukuShellProvider(this)
+
+        ServiceCompat.startForeground(
+            this, ID_LISTENER,
+            notifier.persistentNotification(TEXT_WAITING),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+        )
+
+        // 开关被关掉 → 立即退出
+        scope.launch {
+            settings.autoEnabled.collect { enabled ->
+                if (!enabled) {
+                    LogStore.log("autoEnabled=false，ListenerService stopSelf")
+                    stopSelf()
+                }
+            }
+        }
+        // 常驻通知参数详情开关：开 → 事件驱动 + 30s 轮询；关 → 静态文案
+        scope.launch {
+            settings.notifyPersistent.collect { on ->
+                notifyPersistent = on
+                if (on) startPolling() else stopPolling()
+                refreshNotification()
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
+        LogStore.log("ListenerService 前台服务已启动（FGS 主触发）")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        scope.launch {
+            if (!settings.isAutoEnabled()) {
+                LogStore.log("onStartCommand：autoEnabled=false，不驻留")
+                stopSelf()
+            }
+        }
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(receiver) }
+        pollJob?.cancel()
+        provider.unbind()
+        scope.cancel()
+        super.onDestroy()
+        LogStore.log("ListenerService 已停止")
+    }
+
+    override fun onBind(intent: Intent?) = null
+
+    // ================= ACL_CONNECTED =================
+
+    private fun onConnected(intent: Intent) {
+        val device: BluetoothDevice? = try {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        } catch (se: SecurityException) {
+            LogStore.log("ListenerService 读取 EXTRA_DEVICE 需要 BLUETOOTH_CONNECT: $se")
+            null
+        }
+        if (device == null) {
+            LogStore.log("ListenerService：ACL_CONNECTED 无 EXTRA_DEVICE，跳过")
+            return
+        }
+        val mac: String
+        val name: String?
+        try {
+            mac = device.address
+            name = device.name
+        } catch (se: SecurityException) {
+            LogStore.log("ListenerService 读取设备地址/名称需要 BLUETOOTH_CONNECT: $se")
+            return
+        }
+        scope.launch {
+            refreshNotification()
+            try {
+                ApplyWorker(this@ListenerService).run(mac, name)
+            } catch (t: Throwable) {
+                LogStore.log("ListenerService 触发 ApplyWorker 未捕获异常: $t")
+            }
+            // 写入成功后立即刷新一次通知正文
+            refreshNotification()
+        }
+    }
+
+    // ================= 常驻通知 =================
+
+    /** notifyPersistent 开时的 30s 轮询刷新。 */
+    private fun startPolling() {
+        if (pollJob != null) return
+        pollJob = scope.launch {
+            while (isActive) {
+                refreshNotification()
+                delay(POLL_MS)
+            }
+        }
+    }
+
+    private fun stopPolling() {
+        pollJob?.cancel()
+        pollJob = null
+    }
+
+    private suspend fun refreshNotification() {
+        val content = if (!notifyPersistent) {
+            TEXT_WAITING
+        } else {
+            readConnectedSummary() ?: TEXT_WAITING
+        }
+        runCatching {
+            ServiceCompat.startForeground(
+                this, ID_LISTENER,
+                notifier.persistentNotification(content),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
+        }.onFailure { LogStore.log("常驻通知刷新失败: $it") }
+    }
+
+    /** 读第一台已连接 A2DP 设备的当前参数；载体异常/无设备返回 null。 */
+    private suspend fun readConnectedSummary(): String? {
+        if (!provider.isRunning || !provider.hasPermission) return null
+        return try {
+            val svc = withContext(Dispatchers.IO) { provider.bind() }
+            try {
+                val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                if (arr.length() == 0) {
+                    null
+                } else {
+                    val mac = arr.getJSONObject(0).getString("mac")
+                    val name = arr.getJSONObject(0).getString("name")
+                    val obj = JSONObject(withContext(Dispatchers.IO) { svc.readConfig(mac) })
+                    if (obj.has("error")) null
+                    else "$name · ${CodecConfig.fromJson(obj.getJSONObject("current").toString()).summary()}"
+                }
+            } finally {
+                provider.unbind()
+            }
+        } catch (t: Throwable) {
+            LogStore.log("常驻通知读取参数失败: $t")
+            null
+        }
+    }
+
+    companion object {
+        private const val ID_LISTENER = 100
+        private const val POLL_MS = 30_000L
+        private const val TEXT_WAITING = "等待耳机连接"
+
+        fun start(context: Context) {
+            ContextCompat.startForegroundService(
+                context, Intent(context, ListenerService::class.java))
+        }
+
+        fun stop(context: Context) {
+            context.stopService(Intent(context, ListenerService::class.java))
+        }
+    }
+}

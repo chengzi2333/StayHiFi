@@ -54,10 +54,34 @@ class Notifier(private val context: Context) {
         notify(ID_FIX, n)
     }
 
+    /**
+     * 常驻前台通知（channel_listener，IMPORTANCE_LOW 静默，Task 6 ListenerService 用）。
+     * 返回的 Notification 交给 startForeground；正文由调用方按当前参数刷新。
+     */
+    fun persistentNotification(content: String): android.app.Notification {
+        ensureChannel(CHANNEL_LISTENER, "常驻运行", NotificationManager.IMPORTANCE_LOW)
+        val intent = Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val pi = PendingIntent.getActivity(
+            context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(context, CHANNEL_LISTENER)
+            .setSmallIcon(android.R.drawable.stat_sys_headset)
+            .setContentTitle("音质满格运行中")
+            .setContentText(content)
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .build()
+    }
+
     private fun createChannel() {
+        ensureChannel(CHANNEL_AUTO, "自动拉满", NotificationManager.IMPORTANCE_DEFAULT)
+    }
+
+    private fun ensureChannel(id: String, name: String, importance: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(
-                CHANNEL_AUTO, "自动拉满", NotificationManager.IMPORTANCE_DEFAULT)
+            val ch = NotificationChannel(id, name, importance)
             context.getSystemService(NotificationManager::class.java)
                 ?.createNotificationChannel(ch)
         }
@@ -88,6 +112,7 @@ class Notifier(private val context: Context) {
 
     companion object {
         private const val CHANNEL_AUTO = "auto_apply"
+        private const val CHANNEL_LISTENER = "channel_listener"
         private const val ID_RESULT = 1
         private const val ID_FIX = 2
     }

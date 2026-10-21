@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 电池白名单引导（Onboarding「加入电池白名单」，需显式声明才能发 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS） -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 前台服务（FGS 主触发载体，OriginOS 7 禁广播冷启动后的唯一可靠触发路径） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- 开机拉起 ListenerService -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- 包可见性：真机实测缺它导致 Shizuku/Stellar 安装探测误报 -->
     <queries>
@@ -15,6 +20,7 @@
     </queries>
 
     <application
+        android:name=".FullBarsApp"
         android:label="音质满格"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false">
@@ -32,6 +38,31 @@
                 <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
             </intent-filter>
         </receiver>
+
+        <!-- 开机拉起 FGS（OriginOS 需自启动权限才收得到，Onboarding 保活页已引导） -->
+        <receiver android:name=".trigger.BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- FGS 主触发载体：运行时注册 ACL_CONNECTED，常驻静默通知 -->
+        <service
+            android:name=".trigger.ListenerService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- 快捷设置磁贴：一键拉满 -->
+        <service
+            android:name=".notify.QsTileService"
+            android:label="音质满格"
+            android:icon="@drawable/ic_qs_tile"
+            android:exported="true"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- Shizuku 拉起的特权 UserService（独立进程 :codec，身份 adb shell） -->
         <service
