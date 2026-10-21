@@ -44,13 +44,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -437,21 +438,22 @@ fun NavigationDock(
 
         BoxWithConstraints(
             barModifier
-                // iOS 式双软阴影（深色强度 ×3 对照 dockShadows）。
+                // iOS 式双软阴影（深色强度 ×3 对照 dockShadows）；clip=false——升起的透镜允许溢出栏体。
                 .shadow(
                     8.dp,
                     PillShape,
+                    clip = false,
                     ambientColor = shadowColor.copy(alpha = 0.08f * strength),
                     spotColor = shadowColor.copy(alpha = 0.08f * strength),
                 )
                 .shadow(
                     1.dp,
                     PillShape,
+                    clip = false,
                     ambientColor = shadowColor.copy(alpha = 0.04f * strength),
                     spotColor = shadowColor.copy(alpha = 0.04f * strength),
                 )
-                .clip(PillShape)
-                .background(colorScheme.surfaceContainerHigh)
+                .background(colorScheme.surfaceContainerHigh, PillShape)
                 // Raw pointer 而非 recognizer：拖动没有 arena 要赢，tap 等待会推迟透镜升起。
                 .pointerInput(count) {
                     if (count == 0) return@pointerInput
@@ -533,7 +535,6 @@ fun NavigationDock(
             val minLensPx = with(density) { DockMath.MinLensWidth.dp.toPx() }
             val lensGrowthPx = with(density) { DockMath.LensGrowth.dp.toPx() }
             val span = constraints.maxWidth - barPaddingPx * 2
-            val coreHeight = constraints.maxHeight - barPaddingPx * 2
             val (pitch, lensWidth, inset) = DockMath.dockLayout(
                 span.toFloat(),
                 count,
@@ -542,53 +543,71 @@ fun NavigationDock(
             )
             val core = Modifier.matchParentSize().padding(DockMath.BarPadding.dp)
             val insetDp = with(density) { inset.toDp() }
+            val lensColor = colorScheme.secondaryContainer.copy(alpha = 0.85f)
 
-            val liftV = controller.lift.value
-            val rect = DockMath.lensRect(
-                position = controller.lens.value,
-                stretch = controller.jelly.value,
-                pitch = pitch,
-                width = lensWidth,
-                height = coreHeight,
-                lift = liftV,
-                inset = inset,
-                lensGrowth = lensGrowthPx,
-            )
+            // 透镜矩形现算：动画期状态读取全部下沉到绘制阶段（graphicsLayer/draw lambda），
+            // 组合期不读任何 Animatable 值，动画帧只触发重绘不触发重组。
+            val lensRectNow: (height: Float) -> DockMath.LensRect = { h ->
+                DockMath.lensRect(
+                    position = controller.lens.value,
+                    stretch = controller.jelly.value,
+                    pitch = pitch,
+                    width = lensWidth,
+                    height = h,
+                    lift = controller.lift.value,
+                    inset = inset,
+                    lensGrowth = lensGrowthPx,
+                )
+            }
+            val lensRoundRect: (DockMath.LensRect) -> RoundRect = { r ->
+                RoundRect(
+                    left = r.left,
+                    top = r.top,
+                    right = r.left + r.width,
+                    bottom = r.top + r.height,
+                    cornerRadius = CornerRadius(r.height / 2, r.height / 2),
+                )
+            }
 
             // 透镜底（secondaryContainer alpha 0.85，对照 HCT tone 90/4 裁决）。
             Canvas(core) {
+                val r = lensRectNow(size.height)
                 drawRoundRect(
-                    color = colorScheme.secondaryContainer.copy(alpha = 0.85f),
-                    topLeft = Offset(rect.left, rect.top),
-                    size = Size(rect.width, rect.height),
-                    cornerRadius = CornerRadius(rect.height / 2, rect.height / 2),
+                    color = lensColor,
+                    topLeft = Offset(r.left, r.top),
+                    size = Size(r.width, r.height),
+                    cornerRadius = CornerRadius(r.height / 2, r.height / 2),
                 )
             }
-            // 底层 items：原色（onSurfaceVariant）。
-            DockItems(
-                destinations = destinations,
-                tint = colorScheme.onSurfaceVariant,
-                inset = insetDp,
-                selectedIndex = selected,
-                onActivate = { currentOnSelected.value(it) },
-                modifier = core,
-            )
+            // 底层 items：原色（onSurfaceVariant）。透镜区域挖空（evenOdd 裁剪），
+            // 透镜下内容只由上层绘制（对照原作 _LensTint.paint 的 outside 层）。
+            Box(
+                core.graphicsLayer {
+                    clip = true
+                    val r = lensRectNow(size.height)
+                    shape = GenericShape { bounds, _ ->
+                        fillType = PathFillType.EvenOdd
+                        addRect(Rect(Offset.Zero, bounds))
+                        addRoundRect(lensRoundRect(r))
+                    }
+                },
+            ) {
+                DockItems(
+                    destinations = destinations,
+                    tint = colorScheme.onSurfaceVariant,
+                    inset = insetDp,
+                    selectedIndex = selected,
+                    onActivate = { currentOnSelected.value(it) },
+                    modifier = Modifier.matchParentSize(),
+                )
+            }
             // 透镜层 items：同一 Row 再画一遍，clip 到透镜矩形、内容色 primary、随 lift 放大。
             val magnify: () -> Float = { 1f + DockMath.LensMagnify * controller.lift.value }
             Box(
                 core.graphicsLayer {
                     clip = true
-                    shape = GenericShape { _, _ ->
-                        addRoundRect(
-                            RoundRect(
-                                left = rect.left,
-                                top = rect.top,
-                                right = rect.left + rect.width,
-                                bottom = rect.top + rect.height,
-                                cornerRadius = CornerRadius(rect.height / 2, rect.height / 2),
-                            ),
-                        )
-                    }
+                    val r = lensRectNow(size.height)
+                    shape = GenericShape { _, _ -> addRoundRect(lensRoundRect(r)) }
                 },
             ) {
                 DockItems(
