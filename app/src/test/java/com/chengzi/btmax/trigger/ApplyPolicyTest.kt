@@ -86,13 +86,20 @@ class ApplyPolicyTest {
         assertEquals(1_000_000, target.priority)
     }
 
-    // matches：与服务端 CodecService 生效语义一致 —— codecType + rate(target≠0) + bits(target≠0)
+    // matches：与服务端 CodecService 生效语义一致 —— codecType + rate(target≠0) + bits(target≠0) + cs1
 
     @Test
     fun matchesIgnoresStackManagedFields() {
-        // cs1 不同但三项关键字段相同 → 视为已生效（协议栈可能规范化栈管理字段）
-        val actual = golden.copy(cs1 = 0L, cs3 = 1543503872L, priority = 0)
+        // priority/cs2~cs4 不同但关键字段相同 → 视为已生效（协议栈可能规范化栈管理字段）
+        val actual = golden.copy(cs2 = 7L, cs3 = 42L, cs4 = 1L, priority = 0)
         assertTrue(ApplyPolicy.matches(golden, actual))
+    }
+
+    @Test
+    fun matchesReturnsFalseWhenCs1Differs() {
+        // cs1 是档案/PRESET 目标指定的音质档，栈未套用则视为未生效
+        val actual = golden.copy(cs1 = 33914889L)
+        assertFalse(ApplyPolicy.matches(golden, actual))
     }
 
     @Test

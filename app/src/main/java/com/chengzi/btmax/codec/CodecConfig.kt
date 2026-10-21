@@ -22,9 +22,11 @@ data class CodecConfig(
 ) {
     fun toJson(): String = json.encodeToString(serializer(), this)
 
-    /** 如 "LHDC·192kHz·24bit" */
-    fun summary(): String =
-        "${Masks.codecName(codecType)}·${Masks.rateHz(sampleRate)}·${Masks.bitsDepth(bitsPerSample)}"
+    /** 如 "LHDC·192kHz·24bit" 或 "LHDC·192kHz·24bit·1000kbps"（cs1 可识别时追加质量档） */
+    fun summary(): String {
+        val base = "${Masks.codecName(codecType)}·${Masks.rateHz(sampleRate)}·${Masks.bitsDepth(bitsPerSample)}"
+        return Masks.qualityLabel(codecType, cs1)?.let { "$base·$it" } ?: base
+    }
 
     companion object {
         private val json = Json { encodeDefaults = true }
@@ -66,5 +68,28 @@ object Masks {
         4 -> "LDAC"
         10 -> "LHDC"
         else -> "vendor($type)"
+    }
+
+    /**
+     * cs1（codec-specific 1）质量档到人类可读标签；未知编号返回 null（调用方保持三段显示）。
+     * 4=LDAC 用 AOSP 标准值（见 BluetoothCodecConfig 注释）：
+     * 1000=990kbps 高 / 1001=660kbps / 1002=330kbps / 1003=自适应。
+     * 10=LHDC 为厂商私有编号（仅 OPPO/vivo 系栈实测）：
+     * 50888712=音质优先(1000kbps)、33914889=自适应。
+     */
+    fun qualityLabel(codecType: Int, cs1: Long): String? = when (codecType) {
+        4 -> when (cs1) {
+            1000L -> "990kbps"
+            1001L -> "660kbps"
+            1002L -> "330kbps"
+            1003L -> "自适应"
+            else -> null
+        }
+        10 -> when (cs1) {
+            50888712L -> "1000kbps"
+            33914889L -> "自适应"
+            else -> null
+        }
+        else -> null
     }
 }

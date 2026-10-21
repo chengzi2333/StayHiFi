@@ -14,13 +14,16 @@ object ApplyPolicy {
 
     /**
      * 生效判定（与服务端 CodecService.writeConfig 的 match 语义一致）：
-     * codecType 相等 &&（target 采样率为 0 或相等）&&（target 位深为 0 或相等）。
-     * 只比对协议栈承诺生效的三项；priority/cs1~cs4 等栈管理字段可能被栈规范化，不参与判定。
+     * codecType 相等 &&（target 采样率为 0 或相等）&&（target 位深为 0 或相等）&& cs1 相等。
+     * 档案/PRESET 目标的 cs1 是用户指定的音质档，栈未套用则视为未生效；
+     * autoTarget 的 cs1 继承 current，比对天然通过。priority/cs2~cs4 等栈管理字段
+     * 可能被栈规范化，不参与判定。
      */
     fun matches(target: CodecConfig, actual: CodecConfig): Boolean =
         actual.codecType == target.codecType &&
             (target.sampleRate == 0 || actual.sampleRate == target.sampleRate) &&
-            (target.bitsPerSample == 0 || actual.bitsPerSample == target.bitsPerSample)
+            (target.bitsPerSample == 0 || actual.bitsPerSample == target.bitsPerSample) &&
+            actual.cs1 == target.cs1
 
     /**
      * 无档案新设备的全局默认策略：codecType / channelMode / cs1~cs4 保持 current 不变，

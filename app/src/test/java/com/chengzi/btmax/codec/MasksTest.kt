@@ -45,4 +45,32 @@ class MasksTest {
     fun codecNameFallsBackToVendor() {
         assertEquals("vendor(99)", Masks.codecName(99))
     }
+
+    @Test
+    fun qualityLabelDecodesLdacTiers() {
+        // AOSP BluetoothCodecConfig 标准值
+        assertEquals("990kbps", Masks.qualityLabel(4, 1000L))
+        assertEquals("660kbps", Masks.qualityLabel(4, 1001L))
+        assertEquals("330kbps", Masks.qualityLabel(4, 1002L))
+        assertEquals("自适应", Masks.qualityLabel(4, 1003L))
+    }
+
+    @Test
+    fun qualityLabelDecodesLhdcVendorTiers() {
+        // 厂商私有实测值（OPPO/vivo 系栈）
+        assertEquals("1000kbps", Masks.qualityLabel(10, 50888712L))
+        assertEquals("自适应", Masks.qualityLabel(10, 33914889L))
+    }
+
+    @Test
+    fun qualityLabelReturnsNullForUnknownCs1() {
+        assertEquals(null, Masks.qualityLabel(10, 0L))
+        assertEquals(null, Masks.qualityLabel(4, 999L))
+    }
+
+    @Test
+    fun qualityLabelReturnsNullForUnknownCodec() {
+        assertEquals(null, Masks.qualityLabel(0, 1000L))
+        assertEquals(null, Masks.qualityLabel(99, 50888712L))
+    }
 }
