@@ -45,16 +45,20 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.asComposePath
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -62,7 +66,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
@@ -93,6 +96,8 @@ internal object DockMath {
     const val BarPadding = 4f
     const val EdgeMargin = 21f
     const val ShadowRoom = 8f
+    const val HitSlop = 8f
+    const val TouchSlop = 18f
     const val MaxItemExtent = 86f
     const val MinLensWidth = 84f
     const val FullWidthCount = 5
@@ -438,7 +443,8 @@ fun NavigationDock(
     val density = LocalDensity.current
     val controller = remember { DockController(selected) }
     val haptics = LocalHapticFeedback.current
-    val touchSlop = LocalViewConfiguration.current.touchSlop
+    // 原作 kTouchSlop=18 逻辑像素（Flutter 常量），替代 ViewConfiguration.touchSlop（≈8dp）。
+    val touchSlop = with(density) { DockMath.TouchSlop.dp.toPx() }
     val currentSelected = rememberUpdatedState(selected)
     val currentOnSelected = rememberUpdatedState(onSelected)
     val colorScheme = MaterialTheme.colorScheme
@@ -488,54 +494,78 @@ fun NavigationDock(
     val maxPressGrowthPx = with(density) { DockMath.MaxPressGrowth.dp.toPx() }
     val isDark = colorScheme.surface.luminance() < 0.5f
     val strength = if (isDark) 3f else 1f
-    // material3 1.4 已移除 ColorScheme.shadow（M3 方案里 shadow 恒为黑色）。
-    val shadowColor = Color.Black
+    // 栏高随字体缩放：原作 heightOf = 62 + textScaler.scale(10) − 10（10sp 的 dp 值随 fontScale 线性放缩）。
+    val fontScale = density.fontScale
+    val labelExtra = DockMath.LabelSize.dp * (fontScale - 1f)
+    val barHeight = DockMath.BarHeight.dp + labelExtra
+    // 手绘双阴影（对照 dockShadows：blur 24/offset 8/α0.08，blur 3/offset 1/α0.04，深色 ×3），
+    // setShadowLayer 沿超椭圆 path 投影；drawBehind 绘制在栏体背景之下。
+    val shadowBlurBig = with(density) { 24.dp.toPx() }
+    val shadowDyBig = with(density) { 8.dp.toPx() }
+    val shadowBlurSmall = with(density) { 3.dp.toPx() }
+    val shadowDySmall = with(density) { 1.dp.toPx() }
+    val dockShadowPaints = remember(shadowBlurBig, shadowDyBig, shadowBlurSmall, shadowDySmall, strength) {
+        arrayOf(
+            android.graphics.Paint().apply {
+                isAntiAlias = true
+                color = android.graphics.Color.TRANSPARENT
+                setShadowLayer(
+                    shadowBlurBig, 0f, shadowDyBig,
+                    android.graphics.Color.argb(
+                        (0.08f * strength * 255).toInt().coerceIn(0, 255), 0, 0, 0,
+                    ),
+                )
+            },
+            android.graphics.Paint().apply {
+                isAntiAlias = true
+                color = android.graphics.Color.TRANSPARENT
+                setShadowLayer(
+                    shadowBlurSmall, 0f, shadowDySmall,
+                    android.graphics.Color.argb(
+                        (0.04f * strength * 255).toInt().coerceIn(0, 255), 0, 0, 0,
+                    ),
+                )
+            },
+        )
+    }
 
     Box(
         Modifier
             .fillMaxWidth()
-            .height(DockMath.ShadowRoom.dp + DockMath.BarHeight.dp + bottomMargin),
+            .height(DockMath.ShadowRoom.dp + barHeight + bottomMargin),
     ) {
-        var barModifier = Modifier
+        var hitModifier = Modifier
             .align(Alignment.BottomCenter)
-            .padding(horizontal = DockMath.EdgeMargin.dp)
-            // 底部外边距 = max(21dp, 导航栏 inset)，贴底但留出导航手势区；ShadowRoom 是顶部阴影余量。
+            // 外边距收窄 hitSlop，使命中域比栏体四周各大 8dp（对照 _HitSlop）。
+            .padding(horizontal = DockMath.EdgeMargin.dp - DockMath.HitSlop.dp)
+            // 底部外边距 = max(21dp, 导航栏 inset)，贴底但留出导航手势区。
             .padding(bottom = bottomMargin)
-            .height(DockMath.BarHeight.dp)
+            // 顶部多占 hitSlop，恰落入 ShadowRoom。
+            .height(barHeight + DockMath.HitSlop.dp)
             .fillMaxWidth()
         if (count in 1 until DockMath.FullWidthCount) {
-            barModifier = barModifier.widthIn(
-                max = (count * DockMath.MaxItemExtent + DockMath.BarPadding * 4).dp,
+            hitModifier = hitModifier.widthIn(
+                max = (count * DockMath.MaxItemExtent + DockMath.BarPadding * 4).dp + DockMath.HitSlop.dp * 2,
             )
         }
 
-        BoxWithConstraints(
-            barModifier
-                // iOS 式双软阴影（深色强度 ×3 对照 dockShadows）；clip=false——升起的透镜允许溢出栏体。
-                .shadow(
-                    8.dp,
-                    SuperellipseShape,
-                    clip = false,
-                    ambientColor = shadowColor.copy(alpha = 0.08f * strength),
-                    spotColor = shadowColor.copy(alpha = 0.08f * strength),
-                )
-                .shadow(
-                    1.dp,
-                    SuperellipseShape,
-                    clip = false,
-                    ambientColor = shadowColor.copy(alpha = 0.04f * strength),
-                    spotColor = shadowColor.copy(alpha = 0.04f * strength),
-                )
-                .background(colorScheme.surfaceContainerHigh, SuperellipseShape)
+        // hitSlop 命中层：pointerInput 挂在这层，坐标系相对外扩盒，手势侧需按 slopPx 校正。
+        Box(
+            hitModifier
                 // Raw pointer 而非 recognizer：拖动没有 arena 要赢，tap 等待会推迟透镜升起。
                 .pointerInput(count) {
                     if (count == 0) return@pointerInput
                     // 公式常量是 dp 基准，手势侧一律换算成 px 传入。
                     val paddingPx = with(density) { DockMath.BarPadding.dp.toPx() }
                     val minLensPx = with(density) { DockMath.MinLensWidth.dp.toPx() }
+                    // 命中层比栏体左右各宽 slopPx、顶部高 slopPx。
+                    val slopPx = with(density) { DockMath.HitSlop.dp.toPx() }
+                    val barWidth = size.width - slopPx * 2
+                    val barHeightPx = size.height - slopPx
                     awaitEachGesture {
                         val down = awaitFirstDown()
-                        val span = size.width - paddingPx * 2
+                        val downX = down.position.x - slopPx
+                        val span = barWidth - paddingPx * 2
                         val (pitch, lensW, inset) = DockMath.dockLayout(
                             span,
                             count,
@@ -547,13 +577,13 @@ fun NavigationDock(
                             lens = lensW,
                             inset = inset,
                             barPadding = paddingPx,
-                            barWidth = size.width.toFloat(),
-                            barHeight = size.height.toFloat(),
+                            barWidth = barWidth,
+                            barHeight = barHeightPx,
                             lastIndex = count - 1,
                         )
                         val tracker = VelocityTracker()
                         tracker.addPosition(down.uptimeMillis, down.position)
-                        controller.press(down.position.x, layout, touchSlop)
+                        controller.press(downX, layout, touchSlop)
                         // 只跟踪按下时的主指针：其余指针的 move/release 不得劫持透镜或提前 commit。
                         val pointerId = down.id
                         var active = true
@@ -566,7 +596,7 @@ fun NavigationDock(
                                     tracker.addPosition(primary.uptimeMillis, primary.position)
                                     // 注意：系统取消不会走到这里——compose-ui 1.12 把 ACTION_CANCEL
                                     // 合成 pressed=false + changedToUp=true 的 Release 派发（见 Release 分支）。
-                                    if (controller.slide(primary.position.x, layout, touchSlop, tick)) {
+                                    if (controller.slide(primary.position.x - slopPx, layout, touchSlop, tick)) {
                                         primary.consume()
                                     }
                                 }
@@ -589,19 +619,46 @@ fun NavigationDock(
                             }
                         }
                     }
-                }
-                // ElasticPress：整栏 swell + 横向 pull（只影响绘制，命中坐标不变）。
-                .graphicsLayer {
-                    val swellV = controller.swell.value
-                    val pull = controller.stretch.value
-                    val maxGrowth = maxPressGrowthPx
-                    val growth = min(DockMath.PressGrowth * 2f, maxGrowth / size.maxDimension)
-                    val swellScale = 1f + swellV * growth
-                    scaleX = swellScale * (1f + abs(pull) / size.width * DockMath.PullStretch)
-                    scaleY = swellScale
-                    translationX = pull
                 },
         ) {
+            var barModifier = Modifier
+                .align(Alignment.BottomCenter)
+                // 收回 hitSlop，背景/内容保持原栏体尺寸。
+                .padding(horizontal = DockMath.HitSlop.dp)
+                .height(barHeight)
+                .fillMaxWidth()
+            if (count in 1 until DockMath.FullWidthCount) {
+                barModifier = barModifier.widthIn(
+                    max = (count * DockMath.MaxItemExtent + DockMath.BarPadding * 4).dp,
+                )
+            }
+
+            BoxWithConstraints(
+                barModifier
+                    .drawBehind {
+                        val path = superellipsePath(size, min(size.width, size.height) / 2f).asAndroidPath()
+                        drawIntoCanvas { canvas ->
+                            canvas.nativeCanvas.drawPath(path, dockShadowPaints[0])
+                            canvas.nativeCanvas.drawPath(path, dockShadowPaints[1])
+                        }
+                    }
+                    // 栏体色（对照 surface.dart floatingOf）：深色 surfaceContainerHigh / 浅色 surfaceBright。
+                    .background(
+                        if (isDark) colorScheme.surfaceContainerHigh else colorScheme.surfaceBright,
+                        SuperellipseShape,
+                    )
+                    // ElasticPress：整栏 swell + 横向 pull（只影响绘制，命中坐标不变）。
+                    .graphicsLayer {
+                        val swellV = controller.swell.value
+                        val pull = controller.stretch.value
+                        val maxGrowth = maxPressGrowthPx
+                        val growth = min(DockMath.PressGrowth * 2f, maxGrowth / size.maxDimension)
+                        val swellScale = 1f + swellV * growth
+                        scaleX = swellScale * (1f + abs(pull) / size.width * DockMath.PullStretch)
+                        scaleY = swellScale
+                        translationX = pull
+                    },
+            ) {
             if (count == 0) return@BoxWithConstraints
             // 绘制侧与手势侧一致：公式常量是 dp 基准，全部换算成 px 传入。
             val barPaddingPx = with(density) { DockMath.BarPadding.dp.toPx() }
@@ -616,7 +673,10 @@ fun NavigationDock(
             )
             val core = Modifier.matchParentSize().padding(DockMath.BarPadding.dp)
             val insetDp = with(density) { inset.toDp() }
-            val lensColor = colorScheme.secondaryContainer.copy(alpha = 0.85f)
+            // 透镜静置色 = 栏体色下一表面层级（对照 D2/spec 4.3）：深 surfaceContainerHighest / 浅 surfaceContainerHigh。
+            val lensRestColor =
+                if (isDark) colorScheme.surfaceContainerHighest else colorScheme.surfaceContainerHigh
+            val lensTint = colorScheme.onSurface
 
             // 透镜矩形现算：动画期状态读取全部下沉到绘制阶段（graphicsLayer/draw lambda），
             // 组合期不读任何 Animatable 值，动画帧只触发重绘不触发重组。
@@ -638,10 +698,13 @@ fun NavigationDock(
                 }
             }
 
-            // 透镜底（secondaryContainer alpha 0.85，对照 HCT tone 90/4 裁决）。
+            // 透镜底：静置 = 栏色下一层级；随 lift 叠 onSurface α0.08×lift 压暗（对照 D L1350-1359）。
+            // 颜色在 draw 阶段随 lift 现算，组合期不读动画状态。
             Canvas(core) {
                 val r = lensRectNow(size.height)
-                drawPath(path = lensPath(r), color = lensColor)
+                val lift = controller.lift.value
+                val color = lensTint.copy(alpha = 0.08f * lift).compositeOver(lensRestColor)
+                drawPath(path = lensPath(r), color = color)
             }
             // 底层 items：原色（onSurfaceVariant）。透镜区域挖空（evenOdd 裁剪），
             // 透镜下内容只由上层绘制（对照原作 _LensTint.paint 的 outside 层）。
@@ -683,6 +746,7 @@ fun NavigationDock(
                     modifier = Modifier.matchParentSize(),
                 )
             }
+        }
         }
     }
 }
@@ -745,6 +809,9 @@ private fun DockItems(
                         text = destination.label,
                         color = tint,
                         fontSize = DockMath.LabelSize.sp,
+                        // 对照 AppTextStyle.custom(10, leading 14.5)：行高 1.45em、字距 0（D1）。
+                        lineHeight = 14.5.sp,
+                        letterSpacing = 0.sp,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
