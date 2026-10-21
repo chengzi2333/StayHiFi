@@ -673,9 +673,10 @@ fun NavigationDock(
             )
             val core = Modifier.matchParentSize().padding(DockMath.BarPadding.dp)
             val insetDp = with(density) { inset.toDp() }
-            // 透镜静置色 = 栏体色下一表面层级（对照 D2/spec 4.3）：深 surfaceContainerHighest / 浅 surfaceContainerHigh。
+            // 透镜静置色 = 栏体色下一表面层级（对照 D2/spec 4.3 + surface.dart 真值）：
+            // 深 surfaceContainerHighest（block.next→inset）/ 浅 surfaceContainer（card.next→block）。
             val lensRestColor =
-                if (isDark) colorScheme.surfaceContainerHighest else colorScheme.surfaceContainerHigh
+                if (isDark) colorScheme.surfaceContainerHighest else colorScheme.surfaceContainer
             val lensTint = colorScheme.onSurface
 
             // 透镜矩形现算：动画期状态读取全部下沉到绘制阶段（graphicsLayer/draw lambda），
