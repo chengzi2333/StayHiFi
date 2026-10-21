@@ -1,8 +1,10 @@
-# 音质满格 FullBars
+# StayHiFi 音质常驻
 
-**耳机一连，音质满血。**
+**一次设置，持续生效。**
 
 连接耳机后，自动把蓝牙音频（A2DP codec）参数拉到这台设备协商得出的上限——全程无感，不用再每次进开发者选项手动调。
+
+（传播语：耳机一连，音质满血。）
 
 ## 为什么会有这个 App
 
@@ -11,7 +13,7 @@
 - 每次连接后钻进 **开发者选项** 手动调 codec / 采样率 / 位深；
 - 而且 **断连重连、关掉开发者选项都会回滚**，第二天一切重来。
 
-音质满格只做一件事：连上耳机的一瞬间，替你把参数写回去。
+StayHiFi 只做一件事：连上耳机的一瞬间，替你把参数写回去。
 
 ## 原理
 
@@ -29,8 +31,8 @@
 
 官方渠道仅此两处（酷安 / GitHub），其他来源的 APK 请勿安装：
 
-- **酷安**：应用市场内搜索「音质满格」
-- **GitHub Releases**：<https://github.com/chengzi/fullbars/releases>（页面附 APK SHA-256，安装前请核对）
+- **酷安**：应用市场内搜索「音质常驻」
+- **GitHub Releases**：<https://github.com/chengzi/StayHiFi/releases>（页面附 APK SHA-256，安装前请核对）
 
 前置条件：安装 **Shizuku** 或 **Stellar** 管理器，并按其指引激活（无线调试 / 有线 adb 启动，无需 root）。
 
@@ -60,15 +62,15 @@ GPL-3.0-or-later，详见 [LICENSE](LICENSE)。第三方组件声明见 [NOTICE]
 
 ---
 
-# FullBars (English)
+# StayHiFi (English)
 
-**Plug in your earbuds, get full-quality sound — automatically.**
+**Set it once — it stays that way.**
 
-FullBars writes your Bluetooth A2DP codec configuration (codec / sample rate / bit depth / quality tier) to the negotiated maximum every time your headset connects. No more digging into Developer Options on every reconnect.
+StayHiFi writes your Bluetooth A2DP codec configuration (codec / sample rate / bit depth / quality tier) to the negotiated maximum every time your headset connects. No more digging into Developer Options on every reconnect.
 
 ## How it works
 
-Using **Shizuku or Stellar** (either one) as a privileged carrier, FullBars calls the system Bluetooth stack's public `setCodecConfigPreference()`. It does **not** patch the system or unlock hidden codecs, and it only reacts to connection events — no polling, no extra battery drain. Devices without a known preset can be calibrated once with the built-in record wizard.
+Using **Shizuku or Stellar** (either one) as a privileged carrier, StayHiFi calls the system Bluetooth stack's public `setCodecConfigPreference()`. It does **not** patch the system or unlock hidden codecs, and it only reacts to connection events — no polling, no extra battery drain. Devices without a known preset can be calibrated once with the built-in record wizard.
 
 ## Install
 

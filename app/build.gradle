@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace 'com.chengzi.btmax'
+    namespace 'com.chengzi.stayhifi'
     compileSdk 37
 
     defaultConfig {
-        applicationId 'com.chengzi.btmax'
+        applicationId 'com.chengzi.stayhifi'
         minSdk 29
         targetSdk 37
         versionCode 1

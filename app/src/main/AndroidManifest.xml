@@ -21,7 +21,7 @@
 
     <application
         android:name=".FullBarsApp"
-        android:label="音质满格"
+        android:label="StayHiFi"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false">
 
@@ -61,7 +61,7 @@
         <!-- 快捷设置磁贴：一键拉满 -->
         <service
             android:name=".notify.QsTileService"
-            android:label="音质满格"
+            android:label="StayHiFi"
             android:icon="@drawable/ic_qs_tile"
             android:exported="true"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
