@@ -102,8 +102,9 @@ fun OnboardingScreen(
     state: OnboardingUiState,
     onAction: (OnboardingAction) -> Unit,
     modifier: Modifier = Modifier,
+    initialPage: Int = 0,
 ) {
-    val pagerState = rememberPagerState(pageCount = { PAGE_COUNT })
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { PAGE_COUNT })
     val scope = rememberCoroutineScope()
 
     Scaffold(modifier = modifier) { innerPadding ->
@@ -126,11 +127,19 @@ fun OnboardingScreen(
             }
 
             val isLastPage = pagerState.currentPage == PAGE_COUNT - 1
+            // 硬门槛：第 1 页要求至少一个特权载体就绪，第 2 页要求耳机已连接；
+            // 未达标时「下一步」置灰，但保留「稍后再说」逃生口，避免用户被卡死。
+            val nextEnabled = when (pagerState.currentPage) {
+                1 -> state.shizuku.ready || state.stellar.ready
+                2 -> state.headsetConnected
+                else -> true
+            }
             OnboardingBottomBar(
                 showBack = pagerState.currentPage > 0,
                 isLastPage = isLastPage,
                 currentPage = pagerState.currentPage,
                 pageCount = PAGE_COUNT,
+                nextEnabled = nextEnabled,
                 onBack = {
                     if (pagerState.currentPage > 0) {
                         scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
@@ -525,6 +534,7 @@ private fun OnboardingBottomBar(
     isLastPage: Boolean,
     currentPage: Int,
     pageCount: Int,
+    nextEnabled: Boolean,
     onBack: () -> Unit,
     onNext: () -> Unit,
 ) {
@@ -565,8 +575,16 @@ private fun OnboardingBottomBar(
                 }
             }
             Spacer(Modifier.weight(1f))
+            if (!nextEnabled) {
+                // 逃生口：核心功能未就绪时仍允许跳过，防止用户被卡死。
+                TextButton(
+                    onClick = onNext,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) { Text("稍后再说") }
+            }
             Button(
                 onClick = onNext,
+                enabled = nextEnabled,
                 modifier = Modifier
                     .heightIn(min = 48.dp)
                     .padding(start = 8.dp),
@@ -575,16 +593,34 @@ private fun OnboardingBottomBar(
     }
 }
 
-@Preview(showBackground = true, name = "引导页-浅色")
+@Preview(showBackground = true, name = "引导页-载体未就绪（下一步置灰+逃生口）")
 @Composable
-private fun OnboardingScreenPreviewLight() {
+private fun OnboardingScreenPreviewCarrierNotReady() {
+    FullBarsTheme(dynamicColor = false) {
+        OnboardingScreen(
+            state = OnboardingUiState(
+                shizuku = CarrierUiState(CarrierKind.SHIZUKU, installed = true, running = false, granted = false),
+                stellar = CarrierUiState(CarrierKind.STELLAR, installed = false, running = false, granted = false),
+            ),
+            onAction = {},
+            initialPage = 1,
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "引导页-就绪态")
+@Composable
+private fun OnboardingScreenPreviewReady() {
     FullBarsTheme(dynamicColor = false) {
         OnboardingScreen(
             state = OnboardingUiState(
                 shizuku = CarrierUiState(CarrierKind.SHIZUKU, installed = true, running = true, granted = true),
                 stellar = CarrierUiState(CarrierKind.STELLAR, installed = true, running = false, granted = false),
+                headsetConnected = true,
+                headsetName = "OPPO Enco X3",
             ),
             onAction = {},
+            initialPage = 2,
         )
     }
 }
