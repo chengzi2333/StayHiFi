@@ -22,9 +22,6 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -57,6 +54,8 @@ import com.chengzi.stayhifi.ui.home.HomeUiState
 import com.chengzi.stayhifi.ui.logs.LogsAction
 import com.chengzi.stayhifi.ui.logs.LogsScreen
 import com.chengzi.stayhifi.ui.logs.LogsUiState
+import com.chengzi.stayhifi.ui.nav.DockDestination
+import com.chengzi.stayhifi.ui.nav.NavigationDock
 import com.chengzi.stayhifi.ui.onboarding.CarrierKind
 import com.chengzi.stayhifi.ui.onboarding.CarrierUiState
 import com.chengzi.stayhifi.ui.onboarding.CodecConfigSummary
@@ -173,6 +172,12 @@ class MainActivity : ComponentActivity() {
     // ================= 三 tab 主导航（Task 6） =================
 
     /** 首页 / 设备 / 设置 三 tab；日志页全屏覆盖，设置页进入。 */
+    private val mainTabsDestinations = listOf(
+        DockDestination(Icons.Default.Home, "首页"),
+        DockDestination(Icons.Default.List, "设备"),
+        DockDestination(Icons.Default.Settings, "设置"),
+    )
+
     @Composable
     private fun MainTabs(autoApplyEnabled: Boolean) {
         val profileList by profileRepo.all.collectAsState(initial = emptyList())
@@ -190,26 +195,11 @@ class MainActivity : ComponentActivity() {
         Scaffold(
             bottomBar = {
                 if (!logsVisible) {
-                    NavigationBar {
-                        NavigationBarItem(
-                            selected = selectedTab == 0,
-                            onClick = { selectedTab = 0 },
-                            icon = { Icon(Icons.Default.Home, contentDescription = null) },
-                            label = { Text("首页") },
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == 1,
-                            onClick = { selectedTab = 1 },
-                            icon = { Icon(Icons.Default.List, contentDescription = null) },
-                            label = { Text("设备") },
-                        )
-                        NavigationBarItem(
-                            selected = selectedTab == 2,
-                            onClick = { selectedTab = 2 },
-                            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                            label = { Text("设置") },
-                        )
-                    }
+                    NavigationDock(
+                        destinations = mainTabsDestinations,
+                        selectedIndex = selectedTab,
+                        onSelected = { selectedTab = it },
+                    )
                 }
             },
         ) { innerPadding ->
