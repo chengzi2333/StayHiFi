@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Build
 import android.app.Service
 import android.content.pm.ServiceInfo
 import androidx.core.app.ServiceCompat
@@ -98,12 +97,11 @@ class ListenerService : Service() {
             addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(receiver, filter)
-        }
+        // ACL_CONNECTED 的发送方是 com.android.bluetooth（uid 1002，非 system_server）：
+        // Android 13+ 下 RECEIVER_NOT_EXPORTED 的运行时 receiver 收不到非 system uid 进程的广播
+        //（真机实证零送达）。必须 EXPORTED；伪造广播的代价只是多跑一次无害的 ApplyWorker。
+        ContextCompat.registerReceiver(
+            this, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
         LogStore.log("ListenerService 前台服务已启动（FGS 主触发）")
     }
 

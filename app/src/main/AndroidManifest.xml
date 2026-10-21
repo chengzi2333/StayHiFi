@@ -32,8 +32,14 @@
             </intent-filter>
         </activity>
 
-        <!-- 连接触发自动拉满（设计 §4.3，goAsync 短任务零驻留） -->
-        <receiver android:name=".trigger.ConnectionReceiver" android:exported="false">
+        <!-- 连接触发自动拉满（设计 §4.3，goAsync 短任务零驻留）。
+             发送方是蓝牙栈（com.android.bluetooth，uid 1002，非 system_server）：
+             Android 13+ 下 exported=false 收不到非 system uid 进程的广播（真机实证），
+             必须 exported=true；用 BLUETOOTH_CONNECT 权限做防护（蓝牙栈持有，普通 App 没有）。 -->
+        <receiver
+            android:name=".trigger.ConnectionReceiver"
+            android:exported="true"
+            android:permission="android.permission.BLUETOOTH_CONNECT">
             <intent-filter>
                 <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
             </intent-filter>
