@@ -242,6 +242,10 @@ private class DockLayout(
  * 不重启 ticker（即不起协程）。每次 springTo 以当前值/速度重建 TargetBasedAnimation，
  * 由常驻帧循环 onFrame 推进；120Hz Move 事件流下逐帧 retarget 也能立即生效。
  * value/target 用 mutableFloatStateOf：快照可观察，draw 阶段读取兼容。
+ *
+ * 时钟基准必须始终是帧时钟（原作 _start/_now 都是 ticker 帧时间）：
+ * playTime 为负时欠阻尼弹簧解析式（x(-t) 含 e^{+ζω|t|} 项）会反向爆炸，
+ * 故所有 playTime 一律钳制 >= 0，springTo 也用 lastFrameNanos 锚定而非 System.nanoTime()。
  */
 private class SpringValue(initial: Float) {
     var value by mutableFloatStateOf(initial)
@@ -251,14 +255,16 @@ private class SpringValue(initial: Float) {
     private var anim: TargetBasedAnimation<Float, AnimationVector1D>? = null
     private var startNanos = 0L
 
-    val velocity: Float
-        get() = anim?.getVelocityVectorFromNanos(System.nanoTime() - startNanos)?.value ?: 0f
+    private fun playTime(nowNanos: Long) = (nowNanos - startNanos).coerceAtLeast(0L)
 
-    fun springTo(target: Float, spec: SpringSpec<Float>) {
-        val velocity = anim?.getVelocityVectorFromNanos(System.nanoTime() - startNanos)?.value ?: 0f
+    val velocity: Float
+        get() = anim?.getVelocityVectorFromNanos(playTime(System.nanoTime()))?.value ?: 0f
+
+    fun springTo(target: Float, spec: SpringSpec<Float>, anchorNanos: Long) {
+        val velocity = anim?.getVelocityVectorFromNanos(playTime(anchorNanos))?.value ?: 0f
         anim = TargetBasedAnimation(spec, Float.VectorConverter, value, target, velocity)
         this.target = target
-        startNanos = System.nanoTime()
+        startNanos = anchorNanos
     }
 
     fun jumpTo(value: Float) {
@@ -269,8 +275,8 @@ private class SpringValue(initial: Float) {
 
     fun onFrame(nowNanos: Long) {
         val animation = anim ?: return
-        value = animation.getValueFromNanos(nowNanos - startNanos)
-        if (animation.isFinishedFromNanos(nowNanos - startNanos)) {
+        value = animation.getValueFromNanos(playTime(nowNanos))
+        if (animation.isFinishedFromNanos(playTime(nowNanos))) {
             value = target
             anim = null
         }
@@ -303,7 +309,14 @@ private class DockController(
     private var released = false
     private var pressX = 0f
 
+    // 帧时钟锚点（onFrame 更新）：springTo 一律用它锚定 startNanos，
+    // 与原作 _Spring 以 ticker 帧时间锚定 _start 一致；首帧前退回 System.nanoTime()。
+    private var lastFrameNanos = 0L
+    private val anchorNanos: Long
+        get() = if (lastFrameNanos != 0L) lastFrameNanos else System.nanoTime()
+
     fun onFrame(nowNanos: Long) {
+        lastFrameNanos = nowNanos
         lens.onFrame(nowNanos)
         lift.onFrame(nowNanos)
         swell.onFrame(nowNanos)
@@ -313,7 +326,7 @@ private class DockController(
 
     fun travel(target: Float) {
         lensTarget = target
-        lens.springTo(target, TravelSpring)
+        lens.springTo(target, TravelSpring, anchorNanos)
     }
 
     fun press(x: Float, layout: DockLayout, touchSlop: Float) {
@@ -322,13 +335,13 @@ private class DockController(
         pressX = x
         dragging = false
         dropping = false
-        swell.springTo(1f, PressSpring)
+        swell.springTo(1f, PressSpring, anchorNanos)
         val index = DockMath.indexAt(
             DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex, barPadding = layout.barPadding),
             layout.lastIndex,
         )
         pressedIndex = index
-        lift.springTo(1f, LiftSpring)
+        lift.springTo(1f, LiftSpring, anchorNanos)
         travel(index.toFloat())
     }
 
@@ -343,10 +356,11 @@ private class DockController(
         stretch.springTo(
             DockMath.rubberBand(overshoot, layout.barHeight * DockMath.PullLimit),
             TrackSpring,
+            anchorNanos,
         )
         val position = DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex, barPadding = layout.barPadding)
         lensTarget = position
-        lens.springTo(position, FollowSpring)
+        lens.springTo(position, FollowSpring, anchorNanos)
         val index = DockMath.indexAt(position, layout.lastIndex)
         if (index != pressedIndex) {
             haptic()
@@ -369,7 +383,7 @@ private class DockController(
         pointerDown = false
         released = true
         // 原作 _release：pull 立即归零，swell 不归零——由 _settle 等膨胀升到 LiftSnap 再放下。
-        stretch.springTo(0f, PressSpring)
+        stretch.springTo(0f, PressSpring, anchorNanos)
         val index = pressedIndex ?: return
         pressedIndex = null
         dragging = false
@@ -384,14 +398,14 @@ private class DockController(
         if (!dropping || pointerDown || lift.value < DockMath.LiftSnap) return
         if (abs(lensTarget - lens.value) > DockMath.LiftRelease) return
         dropping = false
-        lift.springTo(0f, LiftSpring)
+        lift.springTo(0f, LiftSpring, anchorNanos)
     }
 
     /** 原作 ElasticPress._settle：快速点按松手后膨胀先升满（>= LiftSnap）再弹回，气泡感不被掐断。 */
     fun checkSettleSwell() {
         if (!released || pointerDown || swell.value < DockMath.LiftSnap) return
         released = false
-        swell.springTo(0f, PressSpring)
+        swell.springTo(0f, PressSpring, anchorNanos)
     }
 
     fun settleToSelection(selected: Int) {
@@ -402,7 +416,7 @@ private class DockController(
 
     fun updateJelly(target: Float) {
         if (abs(target - jelly.target) > 0.001f) {
-            jelly.springTo(target, JellySpring)
+            jelly.springTo(target, JellySpring, anchorNanos)
         }
     }
 }
