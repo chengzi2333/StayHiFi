@@ -25,3 +25,9 @@ This product bundles the following third-party components:
 - NavigationDock 组件设计参考并移植自 FlClash (https://github.com/chen08209/FlClash)
   的 lib/ui/navigation_dock.dart。
   Licensed under GPL-3.0.
+
+- Material Icons (https://github.com/google/material-design-icons)
+  Headphones 图标 path 数据取自该仓库 src/hardware/headphones/materialicons/24px.svg，
+  内联于 com.chengzi.stayhifi.ui.nav.StayHiFiIcons.Headphones（Task 22）。
+  Licensed under the Apache License, Version 2.0.
+  See https://www.apache.org/licenses/LICENSE-2.0 for the full text.

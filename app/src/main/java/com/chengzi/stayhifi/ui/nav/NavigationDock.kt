@@ -29,7 +29,6 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -758,7 +757,7 @@ private fun DockItems(
 
 private val previewDestinations = listOf(
     DockDestination(Icons.Filled.Home, "首页"),
-    DockDestination(Icons.Filled.Headphones, "设备"),
+    DockDestination(StayHiFiIcons.Headphones, "设备"),
     DockDestination(Icons.Filled.Settings, "设置"),
 )
 

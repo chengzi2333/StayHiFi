@@ -32,8 +32,9 @@ android {
 dependencies {
     implementation platform('androidx.compose:compose-bom:2026.09.00')
     implementation 'androidx.compose.material3:material3'
+    // Task 22：只保留 icons-core（Home/Settings 在内）；Headphones 已内联为 StayHiFiIcons.Headphones，
+    // 移除 icons-extended（~2000 枚图标类全量进 dex，曾致 debug 包 77.8M）。
     implementation 'androidx.compose.material:material-icons-core'
-    implementation 'androidx.compose.material:material-icons-extended'
     implementation 'androidx.graphics:graphics-shapes:1.0.1'
     implementation 'androidx.compose.ui:ui-tooling-preview'
     implementation 'androidx.activity:activity-compose:1.13.0'
