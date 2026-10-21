@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
+import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Presets
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
@@ -284,6 +285,21 @@ class MainActivity : ComponentActivity() {
                 logs = LogStore.snapshot().asReversed()
                 logsVisible = true
             }
+            SettingsAction.CheckUpdate -> onCheckUpdate()
+        }
+    }
+
+    /** 纯浏览器跳 GitHub Releases，不申请 INTERNET 权限。 */
+    private fun onCheckUpdate() {
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://github.com/chengzi2333/StayHiFi/releases"),
+                ),
+            )
+        } catch (t: Throwable) {
+            LogStore.log("打开 Releases 失败: $t")
         }
     }
 
@@ -409,14 +425,19 @@ class MainActivity : ComponentActivity() {
                 LogStore.log("已连接: $name ($mac)，当前 ${current.summary()}")
 
                 // Review Focus #3：识别到已知设备 → 预置确认弹窗
-                val preset = Presets.match(name, current.codecType)
-                val hasProfile = withContext(Dispatchers.IO) { profileRepo.profileFor(mac) } != null
-                if (preset != null && !hasProfile) {
-                    presetOffer = PresetOffer(name = name, mac = mac, config = preset)
-                }
+                maybeOfferPreset(name, mac, current.codecType)
             } catch (t: Throwable) {
                 LogStore.log("刷新连接失败: $t")
             }
+        }
+    }
+
+    /** 命中内置预设且无档案时弹预置确认；引导页刷新与首页刷新共用。 */
+    private suspend fun maybeOfferPreset(name: String, mac: String, codecType: Int) {
+        val preset = Presets.match(name, codecType) ?: return
+        val hasProfile = withContext(Dispatchers.IO) { profileRepo.profileFor(mac) } != null
+        if (!hasProfile) {
+            presetOffer = PresetOffer(name = name, mac = mac, config = preset)
         }
     }
 
@@ -548,6 +569,7 @@ class MainActivity : ComponentActivity() {
             }
             HomeAction.ApplyNow -> onApplyNow()
             HomeAction.FixCarrier -> openCarrierManager()
+            HomeAction.GoRecord -> selectedTab = 1
         }
     }
 
@@ -559,7 +581,11 @@ class MainActivity : ComponentActivity() {
                 homeState = homeState.copy(
                     carrierAlert = "Shizuku/Stellar 未运行，点我修复",
                     headsetName = null,
-                    configSummary = null,
+                    codec = null,
+                    rate = null,
+                    bits = null,
+                    quality = null,
+                    hasProfile = false,
                     fullBars = false,
                 )
                 connectedMac = null
@@ -576,7 +602,8 @@ class MainActivity : ComponentActivity() {
                 val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
                 if (arr.length() == 0) {
                     homeState = homeState.copy(
-                        headsetName = null, configSummary = null, fullBars = false,
+                        headsetName = null, codec = null, rate = null,
+                        bits = null, quality = null, hasProfile = false, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -599,11 +626,18 @@ class MainActivity : ComponentActivity() {
                     current.bitsPerSample == profile.config.bitsPerSample
                 homeState = homeState.copy(
                     headsetName = name,
-                    configSummary = current.summary(),
+                    codec = Masks.codecName(current.codecType),
+                    rate = Masks.rateHz(current.sampleRate),
+                    bits = Masks.bitsDepth(current.bitsPerSample),
+                    quality = Masks.qualityLabel(current.codecType, current.cs1),
+                    hasProfile = profile != null,
                     fullBars = fullBars,
                 )
                 connectedMac = mac
                 connectedName = name
+
+                // 预置识别前移：引导页被跳过时，首页首次读到设备也要弹预置确认
+                maybeOfferPreset(name, mac, current.codecType)
             } catch (t: Throwable) {
                 LogStore.log("首页刷新失败: $t")
             }

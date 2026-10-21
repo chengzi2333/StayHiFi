@@ -1,9 +1,12 @@
 package com.chengzi.stayhifi.ui.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,8 +35,16 @@ import com.chengzi.stayhifi.ui.theme.FullBarsTheme
 data class HomeUiState(
     /** 耳机名；null 表示当前未连接耳机。 */
     val headsetName: String? = null,
-    /** 当前参数摘要，形如 "LHDC·192kHz·24bit"；null 表示未知。 */
-    val configSummary: String? = null,
+    /** 编码器名（如 "LHDC"）；null 表示未知。 */
+    val codec: String? = null,
+    /** 采样率（如 "192kHz"）；null 表示未知。 */
+    val rate: String? = null,
+    /** 位深（如 "24bit"）；null 表示未知。 */
+    val bits: String? = null,
+    /** 码率质量档（如 "1000kbps"/"自适应"）；null 表示未识别。 */
+    val quality: String? = null,
+    /** 是否已有该设备的参数档案（false 时提示去录制模板）。 */
+    val hasProfile: Boolean = false,
     /** 是否已拉到已知最强参数（满血）。 */
     val fullBars: Boolean = false,
     /** 「自动拉满」总开关。 */
@@ -48,6 +59,8 @@ sealed interface HomeAction {
     data object ApplyNow : HomeAction
     /** 点击红色警示横幅去修复载体。 */
     data object FixCarrier : HomeAction
+    /** 点击「码率档位未锁定」提示行跳设备页录制模板。 */
+    data object GoRecord : HomeAction
 }
 
 /**
@@ -72,7 +85,7 @@ fun HomeScreen(
                 CarrierAlertBanner(text = alert, onClick = { onAction(HomeAction.FixCarrier) })
             }
 
-            StatusCard(state)
+            StatusCard(state, onGoRecord = { onAction(HomeAction.GoRecord) })
 
             Spacer(Modifier.weight(1f))
 
@@ -150,7 +163,7 @@ private fun CarrierAlertBanner(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StatusCard(state: HomeUiState) {
+private fun StatusCard(state: HomeUiState, onGoRecord: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -170,17 +183,128 @@ private fun StatusCard(state: HomeUiState) {
                 )
                 FullBarsBadge(fullBars = state.fullBars)
             }
+            ConfigSummary(state)
+            DetailGrid(state)
+            if (state.headsetName != null && !state.hasProfile) {
+                NoProfileHint(onClick = onGoRecord)
+            }
+        }
+    }
+}
+
+/** 主参数四段摘要；每段整体换行（段内永不折断），圆点分隔。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ConfigSummary(state: HomeUiState) {
+    val segments = listOf(state.codec, state.rate, state.bits, state.quality)
+        .filterNotNull()
+    if (segments.isEmpty()) {
+        Text(
+            text = "连接后显示当前音质参数",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        segments.forEachIndexed { index, segment ->
+            if (index > 0) SummaryDot()
             Text(
-                text = state.configSummary ?: "连接后显示当前音质参数",
+                text = segment,
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
-                color = if (state.configSummary != null) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                maxLines = 1,
+                softWrap = false,
             )
         }
+    }
+}
+
+@Composable
+private fun SummaryDot() {
+    Box(
+        modifier = Modifier
+            .padding(top = 12.dp)
+            .size(6.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+    )
+}
+
+/** 2×2 明细格：编码器 / 采样率 / 位深 / 码率，各格 label + 值（未知显示 "—"）。 */
+@Composable
+private fun DetailGrid(state: HomeUiState) {
+    val cells = listOf(
+        "编码器" to state.codec,
+        "采样率" to state.rate,
+        "位深" to state.bits,
+        "码率" to state.quality,
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        cells.chunked(2).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                row.forEach { (label, value) ->
+                    DetailCell(label = label, value = value, modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailCell(label: String, value: String?, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value ?: "—",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+/** 未锁定码率提示：无档案时引导去设备页录制模板。 */
+@Composable
+private fun NoProfileHint(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.tertiaryContainer)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "码率档位未锁定，去设备页录制模板可拉满",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onTertiaryContainer,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = "去设备页",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.tertiary,
+        )
     }
 }
 
@@ -226,7 +350,11 @@ private fun HomeScreenPreviewLight() {
         HomeScreen(
             state = HomeUiState(
                 headsetName = "OPPO Enco X3",
-                configSummary = "LHDC·192kHz·24bit",
+                codec = "LHDC",
+                rate = "192kHz",
+                bits = "24bit",
+                quality = "1000kbps",
+                hasProfile = true,
                 fullBars = true,
                 autoApplyEnabled = true,
             ),
@@ -242,7 +370,11 @@ private fun HomeScreenPreviewDark() {
         HomeScreen(
             state = HomeUiState(
                 headsetName = "OPPO Enco X3",
-                configSummary = "SBC·44.1kHz·16bit",
+                codec = "SBC",
+                rate = "44.1kHz",
+                bits = "16bit",
+                quality = null,
+                hasProfile = false,
                 fullBars = false,
                 autoApplyEnabled = false,
                 carrierAlert = "Shizuku 未运行，点我修复",

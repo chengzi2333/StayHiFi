@@ -44,6 +44,8 @@ sealed interface SettingsAction {
     data object OpenBatteryWhitelist : SettingsAction
     data object OpenBackgroundPower : SettingsAction
     data object OpenLogs : SettingsAction
+    /** 浏览器跳转 GitHub Releases 检查更新。 */
+    data object CheckUpdate : SettingsAction
 }
 
 /**
@@ -185,6 +187,35 @@ fun SettingsScreen(
             }
 
             SectionTitle("关于")
+            Card(
+                onClick = { onAction(SettingsAction.CheckUpdate) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "检查更新",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = "当前 v0.9.0 · 前往 GitHub Releases",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        text = "去查看",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
