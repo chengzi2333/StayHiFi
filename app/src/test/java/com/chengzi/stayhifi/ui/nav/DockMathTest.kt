@@ -5,6 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
+/** DockMath 纯函数单测。默认常量即原作 dp 基准值；px 调用侧按 density 换算后显式传入。 */
 class DockMathTest {
 
     @Test
@@ -31,6 +32,28 @@ class DockMathTest {
         assertEquals(29f, pitch, 1e-4f)
         assertEquals(84f, lens, 1e-4f)
         assertEquals(27.5f, inset, 1e-4f)
+    }
+
+    @Test
+    fun dockLayoutAcceptsPxConstants() {
+        // px 调用侧契约：默认值是 dp 基准；px 侧按 density 换算后显式传入（density=3 → 4dp=12px、84dp=252px）。
+        val (pitch, lens, inset) = DockMath.dockLayout(1200f, 5, barPadding = 12f, minLensWidth = 252f)
+        assertEquals(235.2f, pitch, 1e-3f)
+        assertEquals(259.2f, lens, 1e-3f)
+        assertEquals(12f, inset, 1e-3f)
+        // 收紧分支：span=600px(200dp) → lens=252px，而非 dp 基准下的 84
+        val (p2, l2, i2) = DockMath.dockLayout(600f, 5, barPadding = 12f, minLensWidth = 252f)
+        assertEquals(87f, p2, 1e-3f)
+        assertEquals(252f, l2, 1e-3f)
+        assertEquals(82.5f, i2, 1e-3f)
+    }
+
+    @Test
+    fun lensRectUsesPxGrowth() {
+        // lift=1 时 growth = 2*lensGrowth(px)；传 dp 值 8 会得到错误的小膨胀。
+        val rect = DockMath.lensRect(position = 0f, stretch = 0f, pitch = 100f, width = 84f, height = 54f, lift = 1f, inset = 4f, lensGrowth = 24f)
+        assertEquals(4f + 50f - (84f + 48f) / 2, rect.left, 1e-3f)
+        assertEquals(132f, rect.width, 1e-3f)
     }
 
     @Test

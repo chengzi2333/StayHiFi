@@ -3,6 +3,7 @@
 package com.chengzi.stayhifi.ui.nav
 
 import android.content.res.Configuration
+import android.view.MotionEvent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.SpringSpec
@@ -82,7 +83,8 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sign
 
-/** 布局与物理公式，移植自 FlClash `navigation_dock.dart`，纯函数可单测。单位由调用方自定（dp 或 px）。 */
+/** 布局与物理公式，移植自 FlClash `navigation_dock.dart`，纯函数可单测。
+ * 公式单位无关：以下常量是原作 dp 基准值，px 调用侧必须按 density 换算后显式传入。 */
 internal object DockMath {
     const val BarHeight = 62f
     const val BarPadding = 4f
@@ -120,14 +122,20 @@ internal object DockMath {
         return limit * pull * sign(overshoot)
     }
 
-    /** iOS 式间距：静置透镜比 item 宽 2*BarPadding，且不小于 MinLensWidth。返回 Triple(pitch, lens, inset)。 */
-    fun dockLayout(span: Float, count: Int): Triple<Float, Float, Float> {
-        if (count <= 1) return Triple(span - BarPadding * 2, span, BarPadding)
-        val pitch = (span - BarPadding * 2) / count
-        if (pitch + BarPadding * 2 >= MinLensWidth) {
-            return Triple(pitch, pitch + BarPadding * 2, BarPadding)
+    /** iOS 式间距：静置透镜比 item 宽 2*barPadding，且不小于 minLensWidth。返回 Triple(pitch, lens, inset)。
+     * 单位无关：调用方传入与 span 一致的单位（dp 或 px），barPadding/minLensWidth 用同单位。 */
+    fun dockLayout(
+        span: Float,
+        count: Int,
+        barPadding: Float = BarPadding,
+        minLensWidth: Float = MinLensWidth,
+    ): Triple<Float, Float, Float> {
+        if (count <= 1) return Triple(span - barPadding * 2, span, barPadding)
+        val pitch = (span - barPadding * 2) / count
+        if (pitch + barPadding * 2 >= minLensWidth) {
+            return Triple(pitch, pitch + barPadding * 2, barPadding)
         }
-        val lens = min(MinLensWidth, span)
+        val lens = min(minLensWidth, span)
         val closed = (span - lens) / (count - 1)
         return Triple(closed, lens, (lens - closed) / 2)
     }
@@ -135,12 +143,19 @@ internal object DockMath {
     fun indexAt(position: Float, lastIndex: Int): Int =
         floor(position + 0.5).toInt().coerceIn(0, lastIndex)
 
-    /** 手指 x（栏坐标系，含 BarPadding）→ 透镜位置；两端过界走 rubberBand。 */
-    fun positionAt(dx: Float, pitch: Float, inset: Float, lastIndex: Int): Float {
-        val position = (dx - BarPadding - inset) / pitch - 0.5f
+    /** 手指 x（栏坐标系，含 barPadding）→ 透镜位置；两端过界走 rubberBand。 */
+    fun positionAt(
+        dx: Float,
+        pitch: Float,
+        inset: Float,
+        lastIndex: Int,
+        barPadding: Float = BarPadding,
+        overdrag: Float = Overdrag,
+    ): Float {
+        val position = (dx - barPadding - inset) / pitch - 0.5f
         return when {
-            position < 0f -> rubberBand(position, Overdrag)
-            position > lastIndex -> lastIndex + rubberBand(position - lastIndex, Overdrag)
+            position < 0f -> rubberBand(position, overdrag)
+            position > lastIndex -> lastIndex + rubberBand(position - lastIndex, overdrag)
             else -> position
         }
     }
@@ -159,10 +174,12 @@ internal object DockMath {
         height: Float,
         lift: Float,
         inset: Float,
+        lensGrowth: Float = LensGrowth,
+        jellyAspect: Float = JellyAspect,
     ): LensRect {
-        val growth = LensGrowth * 2 * lift
+        val growth = lensGrowth * 2 * lift
         val lensWidth = (width + growth) * (1 + stretch)
-        val lensHeight = (height + growth) * (1 - stretch * JellyAspect)
+        val lensHeight = (height + growth) * (1 - stretch * jellyAspect)
         return LensRect(
             left = (position + 0.5f) * pitch - lensWidth / 2 + inset,
             top = (height - lensHeight) / 2,
@@ -190,11 +207,12 @@ private val PillShape = RoundedCornerShape(percent = 50)
 
 class DockDestination(val icon: ImageVector, val label: String)
 
-/** 一次手势里的布局参数（px）。 */
+/** 一次手势里的布局参数（px，全 px 单位）。 */
 private class DockLayout(
     val pitch: Float,
     val lens: Float,
     val inset: Float,
+    val barPadding: Float,
     val barWidth: Float,
     val barHeight: Float,
     val lastIndex: Int,
@@ -259,7 +277,7 @@ private class DockController(
         dropping = false
         retarget(swell, swellSlot, 1f, PressSpring)
         val index = DockMath.indexAt(
-            DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex),
+            DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex, barPadding = layout.barPadding),
             layout.lastIndex,
         )
         pressedIndex = index
@@ -281,7 +299,7 @@ private class DockController(
             DockMath.rubberBand(overshoot, layout.barHeight * DockMath.PullLimit),
             TrackSpring,
         )
-        val position = DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex)
+        val position = DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex, barPadding = layout.barPadding)
         lensTarget = position
         retarget(lens, lensSlot, position, FollowSpring)
         val index = DockMath.indexAt(position, layout.lastIndex)
@@ -407,6 +425,8 @@ fun NavigationDock(
         var barModifier = Modifier
             .align(Alignment.BottomCenter)
             .padding(horizontal = DockMath.EdgeMargin.dp)
+            // 底部外边距 = max(21dp, 导航栏 inset)，贴底但留出导航手势区；ShadowRoom 是顶部阴影余量。
+            .padding(bottom = bottomMargin)
             .height(DockMath.BarHeight.dp)
             .fillMaxWidth()
         if (count in 1 until DockMath.FullWidthCount) {
@@ -435,15 +455,23 @@ fun NavigationDock(
                 // Raw pointer 而非 recognizer：拖动没有 arena 要赢，tap 等待会推迟透镜升起。
                 .pointerInput(count) {
                     if (count == 0) return@pointerInput
+                    // 公式常量是 dp 基准，手势侧一律换算成 px 传入。
                     val paddingPx = with(density) { DockMath.BarPadding.dp.toPx() }
+                    val minLensPx = with(density) { DockMath.MinLensWidth.dp.toPx() }
                     awaitEachGesture {
                         val down = awaitFirstDown()
                         val span = size.width - paddingPx * 2
-                        val (pitch, lensW, inset) = DockMath.dockLayout(span, count)
+                        val (pitch, lensW, inset) = DockMath.dockLayout(
+                            span,
+                            count,
+                            barPadding = paddingPx,
+                            minLensWidth = minLensPx,
+                        )
                         val layout = DockLayout(
                             pitch = pitch,
                             lens = lensW,
                             inset = inset,
+                            barPadding = paddingPx,
                             barWidth = size.width.toFloat(),
                             barHeight = size.height.toFloat(),
                             lastIndex = count - 1,
@@ -461,12 +489,8 @@ fun NavigationDock(
                                 PointerEventType.Move -> {
                                     if (primary == null) continue
                                     tracker.addPosition(primary.uptimeMillis, primary.position)
-                                    // Compose 1.12 无 PointerEventType.Cancel：主指针按压丢失按取消处理。
-                                    if (!primary.pressed) {
-                                        controller.release(false, currentSelected.value, currentOnSelected.value)
-                                        active = false
-                                        continue
-                                    }
+                                    // 注意：系统取消不会走到这里——compose-ui 1.12 把 ACTION_CANCEL
+                                    // 合成 pressed=false + changedToUp=true 的 Release 派发（见 Release 分支）。
                                     if (controller.slide(primary.position.x, layout, touchSlop, tick)) {
                                         primary.consume()
                                     }
@@ -474,8 +498,16 @@ fun NavigationDock(
                                 PointerEventType.Release -> {
                                     // 主指针以外的指针抬起忽略，继续等待主指针。
                                     if (primary == null || primary.pressed) continue
-                                    controller.fling(tracker.calculateVelocity().x, layout, tick)
-                                    controller.release(true, currentSelected.value, currentOnSelected.value)
+                                    // ACTION_CANCEL（来电/通知栏下拉/系统对话框打断）同样以 Release 到达，
+                                    // 必须回查原始 motionEvent：只有真抬起才 fling + 提交选中，
+                                    // 取消时透镜回弹不提交（对应原作 commit: event is PointerUpEvent）。
+                                    val action = event.motionEvent?.actionMasked
+                                    val isUp = action == MotionEvent.ACTION_UP ||
+                                        action == MotionEvent.ACTION_POINTER_UP
+                                    if (isUp) {
+                                        controller.fling(tracker.calculateVelocity().x, layout, tick)
+                                    }
+                                    controller.release(isUp, currentSelected.value, currentOnSelected.value)
                                     active = false
                                 }
                                 else -> Unit
@@ -496,10 +528,18 @@ fun NavigationDock(
                 },
         ) {
             if (count == 0) return@BoxWithConstraints
+            // 绘制侧与手势侧一致：公式常量是 dp 基准，全部换算成 px 传入。
             val barPaddingPx = with(density) { DockMath.BarPadding.dp.toPx() }
+            val minLensPx = with(density) { DockMath.MinLensWidth.dp.toPx() }
+            val lensGrowthPx = with(density) { DockMath.LensGrowth.dp.toPx() }
             val span = constraints.maxWidth - barPaddingPx * 2
             val coreHeight = constraints.maxHeight - barPaddingPx * 2
-            val (pitch, lensWidth, inset) = DockMath.dockLayout(span, count)
+            val (pitch, lensWidth, inset) = DockMath.dockLayout(
+                span.toFloat(),
+                count,
+                barPadding = barPaddingPx,
+                minLensWidth = minLensPx,
+            )
             val core = Modifier.matchParentSize().padding(DockMath.BarPadding.dp)
             val insetDp = with(density) { inset.toDp() }
 
@@ -512,6 +552,7 @@ fun NavigationDock(
                 height = coreHeight,
                 lift = liftV,
                 inset = inset,
+                lensGrowth = lensGrowthPx,
             )
 
             // 透镜底（secondaryContainer alpha 0.85，对照 HCT tone 90/4 裁决）。
