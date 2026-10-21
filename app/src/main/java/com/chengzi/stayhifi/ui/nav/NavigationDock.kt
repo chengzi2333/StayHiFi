@@ -4,9 +4,10 @@ package com.chengzi.stayhifi.ui.nav
 
 import android.content.res.Configuration
 import android.view.MotionEvent
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.SpringSpec
+import androidx.compose.animation.core.TargetBasedAnimation
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -36,8 +37,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -77,9 +80,6 @@ import androidx.graphics.shapes.RoundedPolygon
 import androidx.graphics.shapes.rectangle
 import androidx.graphics.shapes.toPath
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.floor
@@ -238,19 +238,58 @@ private class DockLayout(
 )
 
 /**
+ * 忠实移植原作 `_Spring`（navigation_dock.dart L150-217）：springTo 只换动画对象、
+ * 不重启 ticker（即不起协程）。每次 springTo 以当前值/速度重建 TargetBasedAnimation，
+ * 由常驻帧循环 onFrame 推进；120Hz Move 事件流下逐帧 retarget 也能立即生效。
+ * value/target 用 mutableFloatStateOf：快照可观察，draw 阶段读取兼容。
+ */
+private class SpringValue(initial: Float) {
+    var value by mutableFloatStateOf(initial)
+        private set
+    var target = initial
+        private set
+    private var anim: TargetBasedAnimation<Float, AnimationVector1D>? = null
+    private var startNanos = 0L
+
+    val velocity: Float
+        get() = anim?.getVelocityVectorFromNanos(System.nanoTime() - startNanos)?.value ?: 0f
+
+    fun springTo(target: Float, spec: SpringSpec<Float>) {
+        val velocity = anim?.getVelocityVectorFromNanos(System.nanoTime() - startNanos)?.value ?: 0f
+        anim = TargetBasedAnimation(spec, Float.VectorConverter, value, target, velocity)
+        this.target = target
+        startNanos = System.nanoTime()
+    }
+
+    fun jumpTo(value: Float) {
+        anim = null
+        this.value = value
+        this.target = value
+    }
+
+    fun onFrame(nowNanos: Long) {
+        val animation = anim ?: return
+        value = animation.getValueFromNanos(nowNanos - startNanos)
+        if (animation.isFinishedFromNanos(nowNanos - startNanos)) {
+            value = target
+            anim = null
+        }
+    }
+}
+
+/**
  * 一组弹簧状态的持有者。对应原作的 `_Spring` 列表：
- * 每个 retarget 先取消旧 Job（保留当前速度），再以当前速度起新动画，
- * 等价于原作 `springTo` 的"手指每帧改目标"语义。
+ * 每个 springTo 保留当前速度、只换目标（等价原作 springTo 的换 SpringSimulation），
+ * 推进统一由 NavigationDock 的常驻帧循环驱动，不起任何协程。
  */
 private class DockController(
-    private val scope: CoroutineScope,
     selectedIndex: Int,
 ) {
-    val lens = Animatable(selectedIndex.toFloat())
-    val lift = Animatable(0f)
-    val swell = Animatable(0f)
-    val stretch = Animatable(0f)
-    val jelly = Animatable(0f)
+    val lens = SpringValue(selectedIndex.toFloat())
+    val lift = SpringValue(0f)
+    val swell = SpringValue(0f)
+    val stretch = SpringValue(0f)
+    val jelly = SpringValue(0f)
 
     var lensTarget = selectedIndex.toFloat()
         private set
@@ -264,30 +303,17 @@ private class DockController(
     private var released = false
     private var pressX = 0f
 
-    private class Slot {
-        var job: Job? = null
-    }
-
-    private val lensSlot = Slot()
-    private val liftSlot = Slot()
-    private val swellSlot = Slot()
-    private val stretchSlot = Slot()
-    private val jellySlot = Slot()
-
-    private fun retarget(
-        anim: Animatable<Float, AnimationVector1D>,
-        slot: Slot,
-        target: Float,
-        spec: SpringSpec<Float>,
-    ) {
-        val velocity = anim.velocity
-        slot.job?.cancel()
-        slot.job = scope.launch { anim.animateTo(target, spec, initialVelocity = velocity) }
+    fun onFrame(nowNanos: Long) {
+        lens.onFrame(nowNanos)
+        lift.onFrame(nowNanos)
+        swell.onFrame(nowNanos)
+        stretch.onFrame(nowNanos)
+        jelly.onFrame(nowNanos)
     }
 
     fun travel(target: Float) {
         lensTarget = target
-        retarget(lens, lensSlot, target, TravelSpring)
+        lens.springTo(target, TravelSpring)
     }
 
     fun press(x: Float, layout: DockLayout, touchSlop: Float) {
@@ -296,13 +322,13 @@ private class DockController(
         pressX = x
         dragging = false
         dropping = false
-        retarget(swell, swellSlot, 1f, PressSpring)
+        swell.springTo(1f, PressSpring)
         val index = DockMath.indexAt(
             DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex, barPadding = layout.barPadding),
             layout.lastIndex,
         )
         pressedIndex = index
-        retarget(lift, liftSlot, 1f, LiftSpring)
+        lift.springTo(1f, LiftSpring)
         travel(index.toFloat())
     }
 
@@ -314,15 +340,13 @@ private class DockController(
             dragging = true
         }
         val overshoot = x - x.coerceIn(0f, layout.barWidth)
-        retarget(
-            stretch,
-            stretchSlot,
+        stretch.springTo(
             DockMath.rubberBand(overshoot, layout.barHeight * DockMath.PullLimit),
             TrackSpring,
         )
         val position = DockMath.positionAt(x, layout.pitch, layout.inset, layout.lastIndex, barPadding = layout.barPadding)
         lensTarget = position
-        retarget(lens, lensSlot, position, FollowSpring)
+        lens.springTo(position, FollowSpring)
         val index = DockMath.indexAt(position, layout.lastIndex)
         if (index != pressedIndex) {
             haptic()
@@ -345,7 +369,7 @@ private class DockController(
         pointerDown = false
         released = true
         // 原作 _release：pull 立即归零，swell 不归零——由 _settle 等膨胀升到 LiftSnap 再放下。
-        retarget(stretch, stretchSlot, 0f, PressSpring)
+        stretch.springTo(0f, PressSpring)
         val index = pressedIndex ?: return
         pressedIndex = null
         dragging = false
@@ -360,14 +384,14 @@ private class DockController(
         if (!dropping || pointerDown || lift.value < DockMath.LiftSnap) return
         if (abs(lensTarget - lens.value) > DockMath.LiftRelease) return
         dropping = false
-        retarget(lift, liftSlot, 0f, LiftSpring)
+        lift.springTo(0f, LiftSpring)
     }
 
     /** 原作 ElasticPress._settle：快速点按松手后膨胀先升满（>= LiftSnap）再弹回，气泡感不被掐断。 */
     fun checkSettleSwell() {
         if (!released || pointerDown || swell.value < DockMath.LiftSnap) return
         released = false
-        retarget(swell, swellSlot, 0f, PressSpring)
+        swell.springTo(0f, PressSpring)
     }
 
     fun settleToSelection(selected: Int) {
@@ -377,8 +401,8 @@ private class DockController(
     }
 
     fun updateJelly(target: Float) {
-        if (abs(target - jelly.targetValue) > 0.001f) {
-            retarget(jelly, jellySlot, target, JellySpring)
+        if (abs(target - jelly.target) > 0.001f) {
+            jelly.springTo(target, JellySpring)
         }
     }
 }
@@ -399,8 +423,7 @@ fun NavigationDock(
     val selected = selectedIndex.coerceIn(0, lastIndex)
 
     val density = LocalDensity.current
-    val scope = rememberCoroutineScope()
-    val controller = remember { DockController(scope, selected) }
+    val controller = remember { DockController(selected) }
     val haptics = LocalHapticFeedback.current
     val touchSlop = LocalViewConfiguration.current.touchSlop
     val currentSelected = rememberUpdatedState(selected)
@@ -412,6 +435,12 @@ fun NavigationDock(
     // 外部选中项变化时透镜归位（按下/拖动中不打断）。
     LaunchedEffect(selected) {
         controller.settleToSelection(selected)
+    }
+    // 常驻帧循环：推进全部 SpringValue（原作 _Spring._tick 的单 ticker 等价）。
+    LaunchedEffect(controller) {
+        while (true) {
+            withFrameNanos { controller.onFrame(it) }
+        }
     }
     // lift 升到顶且透镜归位到位后放下透镜；松手后 swell 升满再归零（checkSettleSwell）。
     LaunchedEffect(controller) {
