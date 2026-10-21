@@ -33,7 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.chengzi.stayhifi.ui.theme.FullBarsTheme
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import kotlinx.coroutines.launch
 
 private const val PAGE_COUNT = 5
@@ -596,7 +596,7 @@ private fun OnboardingBottomBar(
 @Preview(showBackground = true, name = "引导页-载体未就绪（下一步置灰+逃生口）")
 @Composable
 private fun OnboardingScreenPreviewCarrierNotReady() {
-    FullBarsTheme(dynamicColor = false) {
+    StayHiFiTheme(dynamicColor = false) {
         OnboardingScreen(
             state = OnboardingUiState(
                 shizuku = CarrierUiState(CarrierKind.SHIZUKU, installed = true, running = false, granted = false),
@@ -611,7 +611,7 @@ private fun OnboardingScreenPreviewCarrierNotReady() {
 @Preview(showBackground = true, name = "引导页-就绪态")
 @Composable
 private fun OnboardingScreenPreviewReady() {
-    FullBarsTheme(dynamicColor = false) {
+    StayHiFiTheme(dynamicColor = false) {
         OnboardingScreen(
             state = OnboardingUiState(
                 shizuku = CarrierUiState(CarrierKind.SHIZUKU, installed = true, running = true, granted = true),
@@ -628,7 +628,7 @@ private fun OnboardingScreenPreviewReady() {
 @Preview(showBackground = true, name = "引导页-深色")
 @Composable
 private fun OnboardingScreenPreviewDark() {
-    FullBarsTheme(darkTheme = true, dynamicColor = false) {
+    StayHiFiTheme(darkTheme = true, dynamicColor = false) {
         OnboardingScreen(
             state = OnboardingUiState(
                 headsetConnected = true,

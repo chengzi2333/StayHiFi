@@ -28,7 +28,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.chengzi.stayhifi.ui.theme.FullBarsTheme
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 data class HomeUiState(
     /** 耳机名；null 表示当前未连接耳机。 */
@@ -179,7 +179,7 @@ private fun StatusCard(state: HomeUiState, onGoRecord: () -> Unit) {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
                 )
-                FullBarsBadge(fullBars = state.fullBars)
+                StayHiFiBadge(fullBars = state.fullBars)
             }
             StatusLine(state)
             DetailGrid(state)
@@ -278,7 +278,7 @@ private fun NoProfileHint(onClick: () -> Unit) {
 }
 
 @Composable
-private fun FullBarsBadge(fullBars: Boolean) {
+private fun StayHiFiBadge(fullBars: Boolean) {
     val container = if (fullBars) {
         MaterialTheme.colorScheme.primary
     } else {
@@ -315,7 +315,7 @@ private fun FullBarsBadge(fullBars: Boolean) {
 @Preview(showBackground = true, name = "首页-浅色-满血")
 @Composable
 private fun HomeScreenPreviewLight() {
-    FullBarsTheme(dynamicColor = false) {
+    StayHiFiTheme(dynamicColor = false) {
         HomeScreen(
             state = HomeUiState(
                 headsetName = "OPPO Enco X3",
@@ -335,7 +335,7 @@ private fun HomeScreenPreviewLight() {
 @Preview(showBackground = true, name = "首页-深色-异常")
 @Composable
 private fun HomeScreenPreviewDark() {
-    FullBarsTheme(darkTheme = true, dynamicColor = false) {
+    StayHiFiTheme(darkTheme = true, dynamicColor = false) {
         HomeScreen(
             state = HomeUiState(
                 headsetName = "OPPO Enco X3",

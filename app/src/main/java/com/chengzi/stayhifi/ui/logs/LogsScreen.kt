@@ -27,7 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.chengzi.stayhifi.ui.theme.FullBarsTheme
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 data class LogsUiState(
     /** 已按时间倒序的日志行。 */
@@ -121,7 +121,7 @@ fun LogsScreen(
 @Preview(showBackground = true, name = "日志页-浅色")
 @Composable
 private fun LogsScreenPreviewLight() {
-    FullBarsTheme(dynamicColor = false) {
+    StayHiFiTheme(dynamicColor = false) {
         LogsScreen(
             state = LogsUiState(
                 listOf(
@@ -139,7 +139,7 @@ private fun LogsScreenPreviewLight() {
 @Preview(showBackground = true, name = "日志页-深色-空")
 @Composable
 private fun LogsScreenPreviewDark() {
-    FullBarsTheme(darkTheme = true, dynamicColor = false) {
+    StayHiFiTheme(darkTheme = true, dynamicColor = false) {
         LogsScreen(state = LogsUiState(), onAction = {})
     }
 }

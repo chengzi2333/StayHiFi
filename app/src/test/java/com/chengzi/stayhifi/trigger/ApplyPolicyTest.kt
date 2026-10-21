@@ -36,7 +36,7 @@ class ApplyPolicyTest {
     }
 
     @Test
-    fun decideReturnsFalseWhenCurrentIsStackNormalizedFullBars() {
+    fun decideReturnsFalseWhenCurrentIsStackNormalizedStayHiFi() {
         // 对抗审查 I4（报告编号）：协议栈会规范化 priority/cs2~cs4；
         // current 是满血态的栈读回值（关键字段一致）→ 跳过写入，不再每次重连重协商
         val current = golden.copy(priority = 0, cs2 = 7L, cs3 = 42L, cs4 = 1L)

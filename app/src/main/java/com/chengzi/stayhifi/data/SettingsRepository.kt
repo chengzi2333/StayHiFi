@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 // 对抗审查 I1：写盘断电/磁盘异常可损坏 preferences 文件，未配 corruptionHandler 时
-// first() 抛 CorruptionException 在 FullBarsApp.onCreate 的 runBlocking 里直接炸进程——
+// first() 抛 CorruptionException 在 StayHiFiApp.onCreate 的 runBlocking 里直接炸进程——
 // App 再也打不开。损坏即重置为默认值（设置可重设，好过不可启动）。
 private val Context.settingsDataStore by preferencesDataStore(
     name = "settings",

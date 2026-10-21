@@ -13,7 +13,7 @@ import kotlinx.coroutines.runBlocking
  * FGS 是 OriginOS 7 上 ACL_CONNECTED 的主触发载体（广播冷启动被系统拦截，真机实证），
  * 因此在进程创建的第一时间确保它活着。
  */
-class FullBarsApp : Application() {
+class StayHiFiApp : Application() {
 
     override fun onCreate() {
         super.onCreate()

@@ -27,7 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.codec.DeviceProfile
-import com.chengzi.stayhifi.ui.theme.FullBarsTheme
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 /** 设备页单条档案的 UI 模型。 */
 data class DeviceItemUi(
@@ -189,7 +189,7 @@ private fun SourceBadge(source: DeviceProfile.Source) {
 @Preview(showBackground = true, name = "设备页-浅色")
 @Composable
 private fun DevicesScreenPreviewLight() {
-    FullBarsTheme(dynamicColor = false) {
+    StayHiFiTheme(dynamicColor = false) {
         DevicesScreen(
             state = DevicesUiState(
                 listOf(
@@ -217,7 +217,7 @@ private fun DevicesScreenPreviewLight() {
 @Preview(showBackground = true, name = "设备页-深色-空")
 @Composable
 private fun DevicesScreenPreviewDark() {
-    FullBarsTheme(darkTheme = true, dynamicColor = false) {
+    StayHiFiTheme(darkTheme = true, dynamicColor = false) {
         DevicesScreen(state = DevicesUiState(), onAction = {})
     }
 }

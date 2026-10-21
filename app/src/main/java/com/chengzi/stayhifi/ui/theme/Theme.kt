@@ -67,7 +67,7 @@ val fullbarsDarkColorScheme = darkColorScheme(
  * StayHiFi 全局主题。默认跟随系统深浅色，Android 12+ 默认启用动态取色。
  */
 @Composable
-fun FullBarsTheme(
+fun StayHiFiTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit,

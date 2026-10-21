@@ -67,7 +67,7 @@ import com.chengzi.stayhifi.ui.onboarding.RecordWizard
 import com.chengzi.stayhifi.ui.settings.SettingsAction
 import com.chengzi.stayhifi.ui.settings.SettingsScreen
 import com.chengzi.stayhifi.ui.settings.SettingsUiState
-import com.chengzi.stayhifi.ui.theme.FullBarsTheme
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.util.KeepAlive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -114,7 +114,7 @@ class MainActivity : ComponentActivity() {
         profileRepo = ProfileRepository(this)
 
         setContent {
-            FullBarsTheme {
+            StayHiFiTheme {
                 val onboarded: Boolean? by settingsRepo.onboarded
                     .collectAsState(initial = null)
                 val autoApplyEnabled by settingsRepo.autoEnabled
@@ -481,7 +481,7 @@ class MainActivity : ComponentActivity() {
                 settingsRepo.setAutoEnabled(true)
             }
             LogStore.log("Onboarding 完成：onboarded=true, autoEnabled=true")
-            // 对抗审查 C1：引导完成时进程早已存活，FullBarsApp.onCreate / 开关切换 /
+            // 对抗审查 C1：引导完成时进程早已存活，StayHiFiApp.onCreate / 开关切换 /
             // BootReceiver 三处拉起点都不会再触发；装机首个会话必须同步拉起 FGS，
             // 否则用户当场连耳机验证效果时自动拉满整体失效。
             ListenerService.start(this@MainActivity)

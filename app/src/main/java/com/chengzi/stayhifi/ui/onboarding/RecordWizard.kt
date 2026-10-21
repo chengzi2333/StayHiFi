@@ -18,7 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import com.chengzi.stayhifi.ui.theme.FullBarsTheme
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 /**
  * 抓到的参数摘要。全部用 String，不引用 codec 层类型，降低耦合。
@@ -147,7 +147,7 @@ private fun WizardStep(index: Int, text: String) {
 @Preview(showBackground = true, name = "录制向导-浅色")
 @Composable
 private fun RecordWizardPreviewLight() {
-    FullBarsTheme(dynamicColor = false) {
+    StayHiFiTheme(dynamicColor = false) {
         RecordWizard(
             visible = true,
             result = CodecConfigSummary(codec = "LHDC", sampleRate = "192kHz", bitDepth = "24bit"),
@@ -162,7 +162,7 @@ private fun RecordWizardPreviewLight() {
 @Preview(showBackground = true, name = "录制向导-深色")
 @Composable
 private fun RecordWizardPreviewDark() {
-    FullBarsTheme(darkTheme = true, dynamicColor = false) {
+    StayHiFiTheme(darkTheme = true, dynamicColor = false) {
         RecordWizard(
             visible = true,
             result = null,

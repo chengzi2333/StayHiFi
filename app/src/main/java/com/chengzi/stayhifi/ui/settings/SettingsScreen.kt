@@ -22,7 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.chengzi.stayhifi.ui.theme.FullBarsTheme
+import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 data class SettingsUiState(
     /** 拉满结果通知。 */
@@ -279,7 +279,7 @@ private fun SwitchRow(
 @Preview(showBackground = true, name = "设置页-浅色")
 @Composable
 private fun SettingsScreenPreviewLight() {
-    FullBarsTheme(dynamicColor = false) {
+    StayHiFiTheme(dynamicColor = false) {
         SettingsScreen(
             state = SettingsUiState(
                 notifyResult = true,
@@ -295,7 +295,7 @@ private fun SettingsScreenPreviewLight() {
 @Preview(showBackground = true, name = "设置页-深色")
 @Composable
 private fun SettingsScreenPreviewDark() {
-    FullBarsTheme(darkTheme = true, dynamicColor = false) {
+    StayHiFiTheme(darkTheme = true, dynamicColor = false) {
         SettingsScreen(state = SettingsUiState(), onAction = {})
     }
 }
