@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -450,29 +451,29 @@ fun NavigationDock(
                         val tracker = VelocityTracker()
                         tracker.addPosition(down.uptimeMillis, down.position)
                         controller.press(down.position.x, layout, touchSlop)
+                        // 只跟踪按下时的主指针：其余指针的 move/release 不得劫持透镜或提前 commit。
+                        val pointerId = down.id
                         var active = true
                         while (active) {
                             val event = awaitPointerEvent()
+                            val primary = event.changes.find { it.id == pointerId }
                             when (event.type) {
                                 PointerEventType.Move -> {
-                                    var pointerGone = false
-                                    for (change in event.changes) {
-                                        tracker.addPosition(change.uptimeMillis, change.position)
-                                        if (!change.pressed) {
-                                            pointerGone = true
-                                            continue
-                                        }
-                                        if (controller.slide(change.position.x, layout, touchSlop, tick)) {
-                                            change.consume()
-                                        }
-                                    }
-                                    // Compose 1.12 无 PointerEventType.Cancel：按压丢失按取消处理。
-                                    if (pointerGone) {
+                                    if (primary == null) continue
+                                    tracker.addPosition(primary.uptimeMillis, primary.position)
+                                    // Compose 1.12 无 PointerEventType.Cancel：主指针按压丢失按取消处理。
+                                    if (!primary.pressed) {
                                         controller.release(false, currentSelected.value, currentOnSelected.value)
                                         active = false
+                                        continue
+                                    }
+                                    if (controller.slide(primary.position.x, layout, touchSlop, tick)) {
+                                        primary.consume()
                                     }
                                 }
                                 PointerEventType.Release -> {
+                                    // 主指针以外的指针抬起忽略，继续等待主指针。
+                                    if (primary == null || primary.pressed) continue
                                     controller.fling(tracker.calculateVelocity().x, layout, tick)
                                     controller.release(true, currentSelected.value, currentOnSelected.value)
                                     active = false
@@ -528,6 +529,7 @@ fun NavigationDock(
                 tint = colorScheme.onSurfaceVariant,
                 inset = insetDp,
                 selectedIndex = selected,
+                onActivate = { currentOnSelected.value(it) },
                 modifier = core,
             )
             // 透镜层 items：同一 Row 再画一遍，clip 到透镜矩形、内容色 primary、随 lift 放大。
@@ -568,6 +570,7 @@ private fun DockItems(
     inset: Dp,
     modifier: Modifier = Modifier,
     selectedIndex: Int = -1,
+    onActivate: ((Int) -> Unit)? = null,
     magnify: (() -> Float)? = null,
 ) {
     Row(modifier.padding(horizontal = inset)) {
@@ -587,9 +590,15 @@ private fun DockItems(
                     .fillMaxHeight()
                     .then(
                         if (selectedIndex >= 0) {
+                            // button + onTap 语义（纯 semantics 动作，不加 clickable，
+                            // 避免与栏级 pointerInput 竞争手势 arena）。
                             Modifier.semantics(mergeDescendants = true) {
                                 contentDescription = destination.label
                                 selected = index == selectedIndex
+                                onClick(label = destination.label) {
+                                    onActivate?.invoke(index)
+                                    true
+                                }
                             }
                         } else {
                             Modifier.clearAndSetSemantics { }
