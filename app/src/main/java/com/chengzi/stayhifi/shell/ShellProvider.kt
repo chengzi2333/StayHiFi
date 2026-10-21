@@ -8,7 +8,7 @@ import com.chengzi.stayhifi.ICodecService
  * App 进程通过它绑定 shell 进程中的 [CodecService]。
  */
 interface ShellProvider {
-    /** 载体服务是否在运行（Shizuku: pingBinder；Stellar 见 FIXME(stellar)） */
+    /** 载体服务是否在运行（Shizuku/Stellar 均走 rikka 官方通道，pingBinder 即可） */
     val isRunning: Boolean
 
     /** 是否已持有特权授权 */

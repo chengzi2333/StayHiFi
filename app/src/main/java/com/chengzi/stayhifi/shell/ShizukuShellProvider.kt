@@ -16,11 +16,9 @@ import rikka.shizuku.Shizuku
 /**
  * Shizuku 通道的 [ShellProvider] 实现。
  *
- * 双通道探测说明（设计 §4.4）：Stellar（roro.stellar.manager）是 Shizuku 的
- * Android 17 兼容二开，但其 provider authority 与官方不同，rikka API 只连官方
- * 通道。这里先做单通道探测并把结果打进日志，供真机场景 B 裁决。
- * FIXME(stellar): 若 stellar_server 运行时 pingBinder 仍为 false，需在此补
- *  Stellar 专用通道（authority / binder 获取方式以实测为准）。
+ * 真机实证：Stellar（roro.stellar.manager，Shizuku 的 Android 17 兼容二开）对
+ * rikka API 透明兼容——pingBinder / bindUserService 都走官方通道即可连通，
+ * 无需 Stellar 专用通道，故此处仅实现单通道并顺带记录 Stellar 安装态。
  */
 class ShizukuShellProvider(private val context: Context) : ShellProvider {
 
@@ -110,7 +108,7 @@ class ShizukuShellProvider(private val context: Context) : ShellProvider {
         service = null
     }
 
-    /** Stellar 通道探测（仅记录安装态，连接通道待 FIXME(stellar) 裁决后实现） */
+    /** Stellar 安装态探测（仅记录；连接复用 rikka 官方通道，见类注释） */
     private fun probeStellar(): Boolean = try {
         context.packageManager.getPackageInfo(STELLAR_PACKAGE, 0)
         true
