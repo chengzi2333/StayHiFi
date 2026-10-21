@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.service.quicksettings.TileService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -127,6 +128,7 @@ class MainActivity : ComponentActivity() {
                 RecordWizard(
                     visible = wizardVisible,
                     result = wizardResult,
+                    onOpenDevOptions = ::onOpenDevOptions,
                     onCapture = ::onWizardCapture,
                     onSave = ::onWizardSave,
                     onDismiss = {
@@ -471,6 +473,14 @@ class MainActivity : ComponentActivity() {
     }
 
     // ================= RecordWizard =================
+
+    private fun onOpenDevOptions() {
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+        } catch (e: ActivityNotFoundException) {
+            LogStore.log("打开开发者选项失败: $e")
+        }
+    }
 
     private fun onWizardCapture() {
         lifecycleScope.launch {

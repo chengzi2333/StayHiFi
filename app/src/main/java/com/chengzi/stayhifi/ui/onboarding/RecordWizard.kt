@@ -40,6 +40,7 @@ data class CodecConfigSummary(
 fun RecordWizard(
     visible: Boolean,
     result: CodecConfigSummary?,
+    onOpenDevOptions: () -> Unit,
     onCapture: () -> Unit,
     onSave: () -> Unit,
     onDismiss: () -> Unit,
@@ -66,6 +67,13 @@ fun RecordWizard(
                     WizardStep(index = 1, text = "连上耳机，进入系统「开发者选项」，把蓝牙音频编码器、采样率、位深调到最高。")
                     WizardStep(index = 2, text = "调好后回到这里，点下面的「抓取当前参数」。")
                     WizardStep(index = 3, text = "确认抓到的参数没问题，保存为这台耳机的专属模板。")
+                }
+
+                TextButton(
+                    onClick = onOpenDevOptions,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text("打开开发者选项")
                 }
 
                 if (result != null) {
@@ -143,6 +151,7 @@ private fun RecordWizardPreviewLight() {
         RecordWizard(
             visible = true,
             result = CodecConfigSummary(codec = "LHDC", sampleRate = "192kHz", bitDepth = "24bit"),
+            onOpenDevOptions = {},
             onCapture = {},
             onSave = {},
             onDismiss = {},
@@ -157,6 +166,7 @@ private fun RecordWizardPreviewDark() {
         RecordWizard(
             visible = true,
             result = null,
+            onOpenDevOptions = {},
             onCapture = {},
             onSave = {},
             onDismiss = {},
