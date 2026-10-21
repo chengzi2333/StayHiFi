@@ -277,6 +277,7 @@ class MainActivity : ComponentActivity() {
             }
             SettingsAction.OpenAutostart -> onOpenAutostartSettings()
             SettingsAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
+            SettingsAction.OpenBackgroundPower -> onOpenBackgroundPower()
             SettingsAction.OpenLogs -> {
                 logs = LogStore.snapshot().asReversed()
                 logsVisible = true
@@ -329,6 +330,7 @@ class MainActivity : ComponentActivity() {
                 onboardingState = onboardingState.copy(sourceMode = action.mode)
             OnboardingAction.OpenAutostartSettings -> onOpenAutostartSettings()
             OnboardingAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
+            OnboardingAction.OpenBackgroundPower -> onOpenBackgroundPower()
             OnboardingAction.OpenRecordWizard -> {
                 wizardResult = null
                 wizardVisible = true
@@ -428,6 +430,11 @@ class MainActivity : ComponentActivity() {
                 batteryWhitelistEnabled = KeepAlive.isBatteryWhitelisted(this),
             )
         }
+    }
+
+    private fun onOpenBackgroundPower() {
+        // 与自启动同策略：系统无 API 可查，打开成功即乐观视为已引导
+        KeepAlive.openBackgroundPower(this)
     }
 
     private fun refreshBatteryState() {

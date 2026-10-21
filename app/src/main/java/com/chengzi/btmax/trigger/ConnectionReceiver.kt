@@ -21,6 +21,13 @@ class ConnectionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != BluetoothDevice.ACTION_ACL_CONNECTED) return
 
+        // 双触发互斥：FGS（ListenerService）活着时它是唯一可靠触发路径，
+        // 广播兜底让位，避免 ApplyWorker 并发跑两遍
+        if (ListenerService.isRunning) {
+            LogStore.log("FGS 存活，ACL_CONNECTED 由 ListenerService 处理，广播兜底让位")
+            return
+        }
+
         val enabled = runBlocking { SettingsRepository(context).isAutoEnabled() }
         if (!enabled) {
             LogStore.log("自动拉满开关关闭，忽略 ACL_CONNECTED")

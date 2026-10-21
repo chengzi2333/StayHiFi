@@ -38,9 +38,53 @@ object KeepAlive {
         }
     }
 
+    /**
+     * 跳「后台高耗电」管理页（第三道闸，Task 7 真机实证：自启动+白名单全开
+     * 仍会被划卡杀，活路是后台耗电放开 + 最近任务卡片锁定）。
+     * 各家 ROM 路径不一，逐一枚举尽力而为；全失败回退电池设置页，再回退本 App 详情页。
+     * 返回是否成功打开任一页面。
+     */
+    fun openBackgroundPower(context: Context): Boolean {
+        val candidates = listOf(
+            Intent().setComponent(ComponentName(
+                "com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.BgPowerConsumeManagerActivity",
+            )),
+            Intent().setComponent(ComponentName(
+                "com.iqoo.powersaving",
+                "com.iqoo.powersaving.PowerSavingManagerActivity",
+            )),
+        )
+        for (candidate in candidates) {
+            try {
+                context.startActivity(candidate.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return true
+            } catch (t: Throwable) {
+                LogStore.log("后台耗电管理页打不开（$t），尝试下一个")
+            }
+        }
+        try {
+            context.startActivity(Intent(
+                Settings.ACTION_BATTERY_SAVER_SETTINGS,
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return true
+        } catch (t: Throwable) {
+            LogStore.log("电池设置页也打不开（$t），回退本 App 详情页")
+        }
+        return try {
+            context.startActivity(Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${context.packageName}"),
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+        } catch (t: Throwable) {
+            LogStore.log("打开应用详情页也失败: $t")
+            false
+        }
+    }
+
     /** 请求忽略电池优化（白名单）。返回是否成功发出请求。 */
-    fun openBatteryWhitelist(context: Context): Boolean = try {
-        context.startActivity(Intent(
+    fun openBatteryWhitelist(context: Context): Boolean = try {        context.startActivity(Intent(
             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
             Uri.parse("package:${context.packageName}"),
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

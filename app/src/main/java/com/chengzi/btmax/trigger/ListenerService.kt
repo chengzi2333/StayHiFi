@@ -65,6 +65,7 @@ class ListenerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         settings = SettingsRepository(this)
         notifier = Notifier(this)
         provider = ShizukuShellProvider(this)
@@ -116,6 +117,7 @@ class ListenerService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         runCatching { unregisterReceiver(receiver) }
         pollJob?.cancel()
         provider.unbind()
@@ -220,6 +222,15 @@ class ListenerService : Service() {
     }
 
     companion object {
+        /**
+         * FGS 存活标志（Task 7 双触发互斥）：真机实证 ACL_CONNECTED 会同时命中
+         * 本服务的运行时 receiver 与 manifest 的 ConnectionReceiver，导致 ApplyWorker
+         * 并发跑两遍。广播兜底侧读取本标志，FGS 活着时直接让位。
+         */
+        @Volatile
+        var isRunning = false
+            private set
+
         private const val ID_LISTENER = 100
         private const val POLL_MS = 30_000L
         private const val TEXT_WAITING = "等待耳机连接"

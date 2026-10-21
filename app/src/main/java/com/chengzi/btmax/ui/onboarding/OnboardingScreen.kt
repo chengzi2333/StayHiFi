@@ -87,6 +87,8 @@ sealed interface OnboardingAction {
 
     data object OpenAutostartSettings : OnboardingAction
     data object OpenBatteryWhitelist : OnboardingAction
+    /** 第三道闸：后台高耗电（+ 卡片锁定在文案里引导，系统无 API 可查/可跳）。 */
+    data object OpenBackgroundPower : OnboardingAction
 
     data object OpenRecordWizard : OnboardingAction
 }
@@ -428,6 +430,16 @@ private fun BatteryPage(state: OnboardingUiState, onAction: (OnboardingAction) -
             done = state.batteryWhitelistEnabled,
             actionLabel = "去设置",
             onAction = { onAction(OnboardingAction.OpenBatteryWhitelist) },
+        )
+        // 第三道闸（真机实证：自启动+白名单全开仍会被划卡杀）。
+        // 「后台高耗电」可尽力跳系统页；「卡片锁定」无公开 API，纯文案引导。
+        BatteryGuideItem(
+            title = "后台高耗电 + 卡片锁定",
+            description = "在 设置→电池→后台耗电管理 中允许音质满格；" +
+                "并在最近任务里下拉卡片点「锁定」，防划卡清理。",
+            done = false,
+            actionLabel = "去设置",
+            onAction = { onAction(OnboardingAction.OpenBackgroundPower) },
         )
         if (state.sourceMode == SourceMode.RECORD_WIZARD) {
             Button(

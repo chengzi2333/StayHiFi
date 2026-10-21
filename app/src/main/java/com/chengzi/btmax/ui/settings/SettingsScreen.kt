@@ -42,6 +42,7 @@ sealed interface SettingsAction {
     data class SetQsTile(val enabled: Boolean) : SettingsAction
     data object OpenAutostart : SettingsAction
     data object OpenBatteryWhitelist : SettingsAction
+    data object OpenBackgroundPower : SettingsAction
     data object OpenLogs : SettingsAction
 }
 
@@ -139,6 +140,36 @@ fun SettingsScreen(
                         } else {
                             MaterialTheme.colorScheme.primary
                         },
+                    )
+                }
+            }
+
+            Card(
+                onClick = { onAction(SettingsAction.OpenBackgroundPower) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "后台高耗电",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = "允许后台高耗电；并在最近任务里锁定卡片防划卡清理",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        text = "去设置",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 }
             }
