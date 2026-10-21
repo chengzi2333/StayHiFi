@@ -14,9 +14,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
@@ -29,9 +33,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import kotlin.math.abs
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
@@ -203,35 +209,66 @@ class MainActivity : ComponentActivity() {
                 }
             },
         ) { innerPadding ->
+            // 翻页过渡（对照原作 _HomePageView，home.dart L238-374）：NeverScrollable + 300ms easeOut；
+            // 跨 >1 页用 order 重排把当前页换到目标相邻位，只滑一页、结束后恢复。
+            val pagerState = rememberPagerState(pageCount = { mainTabsDestinations.size })
+            var pageOrder by remember { mutableStateOf<List<Int>?>(null) }
+            LaunchedEffect(selectedTab) {
+                val target = selectedTab
+                val current = pageOrder?.get(pagerState.currentPage) ?: pagerState.currentPage
+                if (pageOrder != null) {
+                    pageOrder = null
+                    pagerState.scrollToPage(current)
+                }
+                if (target == current) return@LaunchedEffect
+                if (abs(target - current) > 1) {
+                    // 3 tab 下只有 首页↔设置 走到：order[adjacent]=current 换内容映射，
+                    // 先跳相邻位（视觉无变化）再动画一页（原作 L296-322）。
+                    val adjacent = if (target > current) target - 1 else target + 1
+                    pageOrder = List(mainTabsDestinations.size) { it }.toMutableList().apply {
+                        this[adjacent] = current
+                        this[current] = adjacent
+                    }
+                    pagerState.scrollToPage(adjacent)
+                }
+                pagerState.animateScrollToPage(target, animationSpec = tween(300, easing = EaseOut))
+                pageOrder = null
+            }
             Box(Modifier.padding(innerPadding).fillMaxSize()) {
-                when (selectedTab) {
-                    0 -> HomeScreen(
-                        state = homeState.copy(autoApplyEnabled = autoApplyEnabled),
-                        onAction = ::onHomeAction,
-                    )
-                    1 -> DevicesScreen(
-                        state = DevicesUiState(
-                            profileList.map {
-                                DeviceItemUi(
-                                    mac = it.mac,
-                                    name = it.name,
-                                    configSummary = it.config.summary(),
-                                    source = it.source,
-                                    autoApply = it.autoApply,
-                                )
-                            },
-                        ),
-                        onAction = ::onDevicesAction,
-                    )
-                    2 -> SettingsScreen(
-                        state = SettingsUiState(
-                            notifyResult = notifyResultOn,
-                            notifyPersistent = notifyPersistentOn,
-                            qsTile = qsTileOn,
-                            batteryWhitelisted = KeepAlive.isBatteryWhitelisted(this@MainActivity),
-                        ),
-                        onAction = ::onSettingsAction,
-                    )
+                HorizontalPager(
+                    state = pagerState,
+                    userScrollEnabled = false,
+                    modifier = Modifier.fillMaxSize(),
+                ) { page ->
+                    when (pageOrder?.get(page) ?: page) {
+                        0 -> HomeScreen(
+                            state = homeState.copy(autoApplyEnabled = autoApplyEnabled),
+                            onAction = ::onHomeAction,
+                        )
+                        1 -> DevicesScreen(
+                            state = DevicesUiState(
+                                profileList.map {
+                                    DeviceItemUi(
+                                        mac = it.mac,
+                                        name = it.name,
+                                        configSummary = it.config.summary(),
+                                        source = it.source,
+                                        autoApply = it.autoApply,
+                                    )
+                                },
+                            ),
+                            onAction = ::onDevicesAction,
+                        )
+                        2 -> SettingsScreen(
+                            state = SettingsUiState(
+                                notifyResult = notifyResultOn,
+                                notifyPersistent = notifyPersistentOn,
+                                qsTile = qsTileOn,
+                                batteryWhitelisted = KeepAlive.isBatteryWhitelisted(this@MainActivity),
+                            ),
+                            onAction = ::onSettingsAction,
+                        )
+                    }
                 }
                 if (logsVisible) {
                     LogsScreen(state = LogsUiState(logs), onAction = ::onLogsAction)
