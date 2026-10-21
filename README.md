@@ -1,51 +1,79 @@
-# LHDC PoC —— 蓝牙编码参数读取/写入验证（Spike，一次性验证用）
+# 音质满格 FullBars
 
-验证目标（在 iQOO 15 + Enco X3 上确认三件事）：
+**耳机一连，音质满血。**
 
-1. **读**：能读到当前 A2DP codec 配置（codecType / 采样率 / 位深 / cs1 质量档）
-2. **写**：能通过 `BluetoothA2dp.setCodecConfigPreference` 写入目标参数
-3. **验证**：写入后读回，确认参数生效且不被 OriginOS 拦截
+连接耳机后，自动把蓝牙音频（A2DP codec）参数拉到这台设备协商得出的上限——全程无感，不用再每次进开发者选项手动调。
 
-三个都通过 → 再做完整 App（自动监听连接、自动回放）。
+## 为什么会有这个 App
 
-## 构建
+厂商出于兼容与功耗考虑，蓝牙编码默认走保守参数（如 SBC / 48kHz / 自适应码率）。想跑满耳机的真实能力，只能：
 
-```bash
-gradle assembleDebug
-# 产物: app/build/outputs/apk/debug/app-debug.apk
-```
+- 每次连接后钻进 **开发者选项** 手动调 codec / 采样率 / 位深；
+- 而且 **断连重连、关掉开发者选项都会回滚**，第二天一切重来。
 
-## 安装到手机
+音质满格只做一件事：连上耳机的一瞬间，替你把参数写回去。
 
-手机开 USB 调试，数据线连 Mac：
+## 原理
 
-```bash
-~/Library/Android/sdk/platform-tools/adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
+通过 **Shizuku 或 Stellar**（任选其一）获得 shell 级特权，调用系统蓝牙栈公开的 `setCodecConfigPreference()` 写入 A2DP codec 配置。
 
-## 测试步骤
+- **不 patch 系统、不解锁隐藏 codec**，不突破硬件已协商的能力上限
+- 只响应连接事件，**零轮询、零额外耗电**
+- 没有现成参数模板的设备，可用 App 内的「录制向导」抓一次当前参数，存成专属模板
 
-前置：Shizuku 已启动（无线调试或有线 adb 激活），Enco X3 已连接手机。
+## 截图
 
-1. 打开 App → 按 **① 检查 Shizuku 并连接服务** → 弹窗里允许权限 → 看到「特权服务已连接 ✓」
-2. 按 **② 枚举已连接设备** → 确认能看到 Enco X3 和它的 MAC（可把 MAC 填进输入框，不填默认操作第一台设备）
-3. **手动**去开发者选项把参数调到目标状态：LHDC V5 / 192kHz / 24bit / 音质优先(1000kbps)
-4. 回到 App 按 **③ 读取当前参数** → 日志里应看到 `codec=vendor(N) rate=192k bits=24bit cs1=...`，以及一行 `CONFIG|...`
-   - 同时注意「可选择的编码能力」列表 —— 这里能直接看到 LHDC V5 的厂商 codecType 编号
-5. 按 **④ 保存为模板**
-6. 断开耳机重连（或把开发者选项拨回 48k/自适应，模拟回滚）
-7. 按 **⑤ 写入模板参数** → 观察日志里「读回 #N」是否出现 `✓ 一致`
+> 截图占位：发布前补充 ≥4 张（首页状态卡 / 引导页 / 写入成功 / 设置页），存至 `docs/screenshots/`。
 
-## 结果判读
+## 安装
 
-| 现象 | 结论 |
-|---|---|
-| ③ 读出完整参数 | 读链路通（getCodecStatus 可用） |
-| ⑤ 读回 ✓ 一致 | **全链路通，完整 App 可行** |
-| ⑤ 一直 ✗ 未生效 | OriginOS 蓝牙栈拦截或参数组合被拒 → 看错误日志再定策略 |
-| ① 报 SecurityException | shell 身份在 OriginOS 上没拿到 BLUETOOTH_PRIVILEGED → 需要临时 root 方案 |
+官方渠道仅此两处（酷安 / GitHub），其他来源的 APK 请勿安装：
 
-## 关键参考实现
+- **酷安**：应用市场内搜索「音质满格」
+- **GitHub Releases**：<https://github.com/chengzi/fullbars/releases>（页面附 APK SHA-256，安装前请核对）
 
-- [bschmidt5493/bluetooth-codec-switcher-android](https://github.com/bschmidt5493/bluetooth-codec-switcher-android) —— 本 PoC 的 Shizuku UserService 模式来源
-- [CodecTweaker](https://github.com/timschneeb/awesome-shizuku)（awesome-shizuku 列表内）—— HyperOS 上同思路的重连恢复工具
+前置条件：安装 **Shizuku** 或 **Stellar** 管理器，并按其指引激活（无线调试 / 有线 adb 启动，无需 root）。
+
+## 使用
+
+1. 首次打开跟随 **Onboarding 五步引导**：选择特权载体（Shizuku/Stellar）→ 授权 → 连接耳机 → 选择参数来源 → 保活设置
+2. 保活设置「三道闸」（国产 ROM 杀后台严格，全做才稳）：
+   - **允许自启动**（系统设置 → 应用管理）
+   - **加入电池白名单**（关闭电池优化）
+   - **后台高耗电 + 卡片锁定**：设置 → 电池 → 后台耗电管理 中允许本应用；并在最近任务里下拉卡片点「锁定」，防划卡清理
+3. 之后正常用即可：耳机一连，参数自动拉满；通知栏常驻一条静默通知（可选显示实时参数）
+
+新设备适配：没有内置模板时，Onboarding 里的「录制向导」会引导你先在开发者选项手动调到满血，再一键抓取保存。
+
+## 隐私
+
+- **零数据采集**：所有数据只保存在本机，无网络上传、无统计埋点、无账号体系
+- 唯一的外部交互是与 Shizuku/Stellar 的本机 IPC
+
+## 免责声明
+
+本项目与 **Shizuku、Stellar、OPPO、vivo** 及其关联方无任何隶属、赞助或认可关系；所有商标归其各自所有者。仅在你自己的设备上调整系统公开接口的参数，请自行评估风险。
+
+## 开源
+
+GPL-3.0-or-later，详见 [LICENSE](LICENSE)。第三方组件声明见 [NOTICE](NOTICE)。设备档案贡献指引见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+---
+
+# FullBars (English)
+
+**Plug in your earbuds, get full-quality sound — automatically.**
+
+FullBars writes your Bluetooth A2DP codec configuration (codec / sample rate / bit depth / quality tier) to the negotiated maximum every time your headset connects. No more digging into Developer Options on every reconnect.
+
+## How it works
+
+Using **Shizuku or Stellar** (either one) as a privileged carrier, FullBars calls the system Bluetooth stack's public `setCodecConfigPreference()`. It does **not** patch the system or unlock hidden codecs, and it only reacts to connection events — no polling, no extra battery drain. Devices without a known preset can be calibrated once with the built-in record wizard.
+
+## Install
+
+Official channels only (CoolApk / GitHub Releases). Requires Shizuku or Stellar activated on your device. No root needed.
+
+## Privacy & disclaimers
+
+Zero data collection — everything stays on your device. Not affiliated with Shizuku, Stellar, OPPO, or vivo. GPL-3.0-or-later.

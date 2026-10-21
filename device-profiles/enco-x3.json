@@ -1,0 +1,25 @@
+{
+  "device": {
+    "name": "OPPO Enco X3",
+    "codecType": 10,
+    "codecName": "LHDC V5"
+  },
+  "config": {
+    "codecType": 10,
+    "priority": 1000000,
+    "sampleRate": 32,
+    "bitsPerSample": 2,
+    "channelMode": 2,
+    "cs1": 50888712,
+    "cs2": 0,
+    "cs3": 1543503872,
+    "cs4": 0
+  },
+  "meta": {
+    "source": "captured",
+    "date": "2026-10-20",
+    "phone": "iQOO 15",
+    "rom": "OriginOS 7",
+    "notes": "开发者选项手动调到 LHDC V5 / 192kHz / 24bit / 音质优先(1000kbps) 后经 readConfig 实测捕获；sampleRate=32 为 192kHz 位掩码，bitsPerSample=2 为 24bit 位掩码，channelMode=2 为立体声，cs1=50888712(0x03088008) 为 LHDC 音质优先档。"
+  }
+}
