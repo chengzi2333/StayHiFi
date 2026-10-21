@@ -71,6 +71,39 @@ class ApplyPolicyTest {
     }
 
     @Test
+    fun autoTargetForcesLdacQualityHigh() {
+        // LDAC（codecType=4，cs1=1003 自适应）→ 自动拉满到 AOSP 标准 LDAC_QUALITY_HIGH（1000 = 990kbps）
+        val current = golden.copy(codecType = 4, cs1 = 1003L, sampleRate = 2, priority = 0)
+        val capability = CodecConfig(
+            codecType = 4, priority = 0,
+            sampleRate = 43, bitsPerSample = 3, channelMode = 2,
+            cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+        )
+
+        val target = ApplyPolicy.autoTarget(current, listOf(capability))
+
+        assertEquals(1000L, target.cs1)
+        assertEquals(32, target.sampleRate)
+        assertEquals(2, target.bitsPerSample)
+        assertEquals(1_000_000, target.priority)
+    }
+
+    @Test
+    fun autoTargetKeepsCs1ForNonLdac() {
+        // 回归保护：非 LDAC（codecType=10）的 cs1 继承 current，不被覆盖
+        val current = golden.copy(cs1 = 50888712L, sampleRate = 2, priority = 0)
+        val capability = CodecConfig(
+            codecType = 10, priority = 0,
+            sampleRate = 43, bitsPerSample = 3, channelMode = 2,
+            cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+        )
+
+        val target = ApplyPolicy.autoTarget(current, listOf(capability))
+
+        assertEquals(50888712L, target.cs1)
+    }
+
+    @Test
     fun autoTargetKeepsCurrentRateBitsWhenCodecMissingInSelectable() {
         val current = golden.copy(sampleRate = 2, priority = 0)
         val otherCodec = CodecConfig(

@@ -29,13 +29,21 @@ object ApplyPolicy {
      * 无档案新设备的全局默认策略：codecType / channelMode / cs1~cs4 保持 current 不变，
      * rate / bits 取 [selectable] 中当前 codec 能力掩码的最高位，priority 置 1000000。
      * [selectable] 中没有当前 codec 的能力条目时，rate / bits 保持 current。
+     *
+     * LDAC 例外（codecType == 4）：cs1 强制为 1000L（AOSP 标准 BluetoothCodecConfig
+     * LDAC_QUALITY_HIGH = 990kbps 最高音质档）。LDAC 质量档取值是 AOSP 标准、跨厂商通用，
+     * 无档案新设备可直接自动拉满码率，不必保持系统默认的自适应档（1003）。
      */
     fun autoTarget(current: CodecConfig, selectable: List<CodecConfig>): CodecConfig {
         val cap = selectable.firstOrNull { it.codecType == current.codecType }
         val rate = cap?.sampleRate?.let { highestBit(it) } ?: current.sampleRate
         val bits = cap?.bitsPerSample?.let { highestBit(it) } ?: current.bitsPerSample
-        return current.copy(priority = 1_000_000, sampleRate = rate, bitsPerSample = bits)
+        val cs1 = if (current.codecType == LDAC_CODEC_TYPE) LDAC_QUALITY_HIGH else current.cs1
+        return current.copy(priority = 1_000_000, sampleRate = rate, bitsPerSample = bits, cs1 = cs1)
     }
+
+    private const val LDAC_CODEC_TYPE = 4
+    private const val LDAC_QUALITY_HIGH = 1000L
 
     /** 掩码最高位（43 = 32+8+2+1 → 32）。掩码 ≤ 0 时原样返回（调用方兜底）。 */
     private fun highestBit(mask: Int): Int {
