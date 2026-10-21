@@ -473,6 +473,10 @@ class MainActivity : ComponentActivity() {
                 settingsRepo.setAutoEnabled(true)
             }
             LogStore.log("Onboarding 完成：onboarded=true, autoEnabled=true")
+            // 对抗审查 C1：引导完成时进程早已存活，FullBarsApp.onCreate / 开关切换 /
+            // BootReceiver 三处拉起点都不会再触发；装机首个会话必须同步拉起 FGS，
+            // 否则用户当场连耳机验证效果时自动拉满整体失效。
+            ListenerService.start(this@MainActivity)
             refreshHome()
         }
     }
@@ -649,7 +653,8 @@ class MainActivity : ComponentActivity() {
         val name = connectedName
         lifecycleScope.launch {
             try {
-                ApplyWorker(this@MainActivity).run(mac, name)
+                // 对抗审查 I2：手动入口传 force=true，不被 autoApply=false 静默拦截
+                ApplyWorker(this@MainActivity).run(mac, name, force = true)
             } catch (t: Throwable) {
                 LogStore.log("立即满血失败: $t")
             }

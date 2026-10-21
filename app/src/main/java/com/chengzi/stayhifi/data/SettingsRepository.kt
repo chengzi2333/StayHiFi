@@ -1,14 +1,22 @@
 package com.chengzi.stayhifi.data
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
-private val Context.settingsDataStore by preferencesDataStore(name = "settings")
+// 对抗审查 I1：写盘断电/磁盘异常可损坏 preferences 文件，未配 corruptionHandler 时
+// first() 抛 CorruptionException 在 FullBarsApp.onCreate 的 runBlocking 里直接炸进程——
+// App 再也打不开。损坏即重置为默认值（设置可重设，好过不可启动）。
+private val Context.settingsDataStore by preferencesDataStore(
+    name = "settings",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 /**
  * 全局设置（DataStore Preferences，设计 §4.6）。

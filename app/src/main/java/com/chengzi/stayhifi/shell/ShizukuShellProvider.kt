@@ -73,6 +73,12 @@ class ShizukuShellProvider(private val context: Context) : ShellProvider {
         }
     }
 
+    /**
+     * check-then-act 必须原子化（对抗审查 I3）：并发 bind 会各建一个 ServiceConnection，
+     * 先建的那个泄漏永不 unbind。@Synchronized 下后到线程阻塞至绑定完成，
+     * 返回时 service 必然已就绪。
+     */
+    @Synchronized
     override fun bind(): ICodecService {
         service?.let { return it }
         val latch = CountDownLatch(1)

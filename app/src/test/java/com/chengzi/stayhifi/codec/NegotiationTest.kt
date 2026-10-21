@@ -19,11 +19,10 @@ class NegotiationTest {
 
     @Test
     fun descendingRatesFromGolden() {
+        // 对抗审查 C3：RATE_STEPS 必须补全 16(176.4k)/4(88.2k)/1(44.1k)，base 自身恒为首选
         val candidates = Negotiation.descending(golden)
-        assertEquals(3, candidates.size)
-        assertEquals(32, candidates[0].sampleRate)
-        assertEquals(8, candidates[1].sampleRate)
-        assertEquals(2, candidates[2].sampleRate)
+        assertEquals(6, candidates.size)
+        assertEquals(listOf(32, 16, 8, 4, 2, 1), candidates.map { it.sampleRate })
     }
 
     @Test
@@ -41,17 +40,23 @@ class NegotiationTest {
     }
 
     @Test
-    fun baseRateTwoYieldsSingleCandidate() {
-        val candidates = Negotiation.descending(golden.copy(sampleRate = 2))
-        assertEquals(1, candidates.size)
-        assertEquals(2, candidates[0].sampleRate)
+    fun baseRateSixteenYieldsFiveCandidates() {
+        // 对抗审查 C3 场景 a：176.4k（=16）档案此前被静默降到 96k，修复后 base 自身必须入选
+        val candidates = Negotiation.descending(golden.copy(sampleRate = 16))
+        assertEquals(listOf(16, 8, 4, 2, 1), candidates.map { it.sampleRate })
     }
 
     @Test
-    fun baseRateEightYieldsTwoCandidates() {
-        val candidates = Negotiation.descending(golden.copy(sampleRate = 8))
-        assertEquals(2, candidates.size)
-        assertEquals(8, candidates[0].sampleRate)
-        assertEquals(2, candidates[1].sampleRate)
+    fun baseRateOneYieldsSingleCandidate() {
+        // 对抗审查 C3 场景 b：44.1k（=1）档案此前候选为空直接误报失败，修复后 base 自身兜底
+        val candidates = Negotiation.descending(golden.copy(sampleRate = 1))
+        assertEquals(1, candidates.size)
+        assertEquals(1, candidates[0].sampleRate)
+    }
+
+    @Test
+    fun baseRateTwoIncludesFortyFourKFallback() {
+        val candidates = Negotiation.descending(golden.copy(sampleRate = 2))
+        assertEquals(listOf(2, 1), candidates.map { it.sampleRate })
     }
 }

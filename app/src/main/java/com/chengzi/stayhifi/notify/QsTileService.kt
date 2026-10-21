@@ -46,7 +46,8 @@ class QsTileService : TileService() {
                     val mac = arr.getJSONObject(0).getString("mac")
                     val name = arr.getJSONObject(0).getString("name")
                     LogStore.log("QS 磁贴触发拉满: $name ($mac)")
-                    ApplyWorker(this@QsTileService).run(mac, name)
+                    // 对抗审查 I2：手动入口传 force=true，不被 autoApply=false 静默拦截
+                    ApplyWorker(this@QsTileService).run(mac, name, force = true)
                 } finally {
                     provider.unbind()
                 }

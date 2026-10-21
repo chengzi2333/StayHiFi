@@ -11,6 +11,7 @@ import com.chengzi.stayhifi.notify.Notifier
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -23,6 +24,9 @@ import org.json.JSONObject
  *
  * 有档案：按 [Negotiation.descending] 逐候选写入，直到读回一致；
  * 无档案：[ApplyPolicy.autoTarget] 全局默认策略写入一次并验证。
+ *
+ * 对抗审查 I3：run 主体持 [ApplyLock.mutex]，三路触发互斥串行。
+ * 对抗审查 I2：force=true（手动入口）跳过 autoApply=false 的自动触发拦截。
  */
 class ApplyWorker(context: Context) {
 
@@ -34,16 +38,32 @@ class ApplyWorker(context: Context) {
 
     private fun log(msg: String) = LogStore.log(msg)
 
-    suspend fun run(mac: String?, name: String?) {
-        if (mac.isNullOrBlank()) {
+    suspend fun run(mac: String?, name: String?, force: Boolean = false) {
+        val target = mac?.takeIf { it.isNotBlank() } ?: run {
             log("ACL_CONNECTED 无设备地址，跳过")
             return
         }
-        log("设备已连接: ${name ?: "?"} ($mac)")
+        log("设备已连接: ${name ?: "?"} ($target)")
+        if (ApplyLock.mutex.isLocked) {
+            log("等待上一次拉满完成…")
+        }
+        ApplyLock.mutex.withLock {
+            runLocked(target, name, force)
+        }
+    }
+
+    private suspend fun runLocked(mac: String, name: String?, force: Boolean) {
         try {
             if (!waitForShell()) {
                 log("Shizuku 未运行，发一键修复通知")
                 notifier.notifyFixRequired("Shizuku 未运行")
+                return
+            }
+            // 对抗审查 I5：pingBinder 只证明 server 活着，不证明本 App 仍被授权。
+            // 授权被撤后 bind 会抛异常并被误报成「拉满失败」，先查 hasPermission 引导修复。
+            if (!provider.hasPermission) {
+                log("特权授权已被撤销，发引导修复通知")
+                notifier.notifyFixRequired("特权授权已被撤销")
                 return
             }
             val service = withContext(Dispatchers.IO) { provider.bind() }
@@ -60,7 +80,7 @@ class ApplyWorker(context: Context) {
 
             val profile = profiles.profileFor(mac)
             when {
-                profile != null && !profile.autoApply ->
+                !force && profile != null && !profile.autoApply ->
                     log("已有档案但 autoApply=false，跳过写入")
                 profile != null ->
                     applyProfile(service, mac, name, settled.current, profile.config)

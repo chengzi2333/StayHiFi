@@ -5,8 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -183,7 +181,7 @@ private fun StatusCard(state: HomeUiState, onGoRecord: () -> Unit) {
                 )
                 FullBarsBadge(fullBars = state.fullBars)
             }
-            ConfigSummary(state)
+            StatusLine(state)
             DetailGrid(state)
             if (state.headsetName != null && !state.hasProfile) {
                 NoProfileHint(onClick = onGoRecord)
@@ -192,47 +190,18 @@ private fun StatusCard(state: HomeUiState, onGoRecord: () -> Unit) {
     }
 }
 
-/** 主参数四段摘要；每段整体换行（段内永不折断），圆点分隔。 */
-@OptIn(ExperimentalLayoutApi::class)
+/** 状态卡唯一的状态文案：明细参数请看下方 2×2 明细格。 */
 @Composable
-private fun ConfigSummary(state: HomeUiState) {
-    val segments = listOf(state.codec, state.rate, state.bits, state.quality)
-        .filterNotNull()
-    if (segments.isEmpty()) {
-        Text(
-            text = "连接后显示当前音质参数",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        return
+private fun StatusLine(state: HomeUiState) {
+    val text = when {
+        state.headsetName == null -> "等待耳机连接"
+        state.fullBars -> "已达最强参数"
+        else -> "当前参数未拉满"
     }
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        segments.forEachIndexed { index, segment ->
-            if (index > 0) SummaryDot()
-            Text(
-                text = segment,
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                maxLines = 1,
-                softWrap = false,
-            )
-        }
-    }
-}
-
-@Composable
-private fun SummaryDot() {
-    Box(
-        modifier = Modifier
-            .padding(top = 12.dp)
-            .size(6.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onPrimaryContainer,
     )
 }
 

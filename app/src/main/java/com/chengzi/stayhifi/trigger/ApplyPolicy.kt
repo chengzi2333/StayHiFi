@@ -9,8 +9,12 @@ import com.chengzi.stayhifi.codec.CodecConfig
  */
 object ApplyPolicy {
 
-    /** 是否需要写入：current 与 target 不一致才返回 true。 */
-    fun decide(current: CodecConfig, target: CodecConfig): Boolean = current != target
+    /**
+     * 是否需要写入：与 [matches] 同一生效语义（codecType + rate + bits + cs1）取反。
+     * 对抗审查 I4：协议栈会规范化 priority/cs2~cs4，全字段相等使跳过分支成为死代码，
+     * 每次重连都无谓重协商；改用 matches 语义后栈读回值可正确命中跳过。
+     */
+    fun decide(current: CodecConfig, target: CodecConfig): Boolean = !matches(target, current)
 
     /**
      * 生效判定（与服务端 CodecService.writeConfig 的 match 语义一致）：

@@ -70,11 +70,21 @@ class ListenerService : Service() {
         notifier = Notifier(this)
         provider = ShizukuShellProvider(this)
 
-        ServiceCompat.startForeground(
-            this, ID_LISTENER,
-            notifier.persistentNotification(TEXT_WAITING),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-        )
+        // 对抗审查 C2：connectedDevice 类型 FGS 要求 BLUETOOTH_CONNECT，权限缺失时
+        // startForeground 抛 SecurityException——无 try/catch 会连带进程崩溃死循环。
+        // 捕获后记录原因并 stopSelf，不再注册 receiver，服务干净退出。
+        try {
+            ServiceCompat.startForeground(
+                this, ID_LISTENER,
+                notifier.persistentNotification(TEXT_WAITING),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
+        } catch (se: SecurityException) {
+            LogStore.log("ListenerService startForeground 失败（BLUETOOTH_CONNECT 等权限缺失）: $se")
+            isRunning = false
+            stopSelf()
+            return
+        }
 
         // 开关被关掉 → 立即退出
         scope.launch {
