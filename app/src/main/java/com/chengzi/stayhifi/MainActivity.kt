@@ -231,6 +231,8 @@ class MainActivity : ComponentActivity() {
                 HorizontalPager(
                     state = pagerState,
                     userScrollEnabled = false,
+                    // Task 30：空闲预组合相邻页——切 tab 时目标页已就绪，不把首组合砸在切换帧上。
+                    beyondViewportPageCount = 1,
                     modifier = Modifier.fillMaxSize(),
                 ) { page ->
                     when (pageOrder?.get(page) ?: page) {
