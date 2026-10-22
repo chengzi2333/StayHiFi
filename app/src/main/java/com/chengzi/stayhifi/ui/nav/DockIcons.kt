@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
  */
 object StayHiFiIcons {
     private var _headphones: ImageVector? = null
+    private var _smartphone: ImageVector? = null
 
     val Headphones: ImageVector
         get() {
@@ -74,5 +75,48 @@ object StayHiFiIcons {
                 }
             }.build()
             return _headphones!!
+        }
+
+    /**
+     * 圆角矩形手机（Task 28 修正轮 F1）：Icons.Default.Phone 是电话听筒、
+     * Icons.Default.PhoneAndroid 在已删的 material-icons-extended，故内联。
+     * Path 取自官方仓库 src/hardware/smartphone/materialicons/24px.svg（Apache-2.0）：
+     * M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-1.99-2-1.99zM17 19H7V5h10v14z
+     */
+    val Smartphone: ImageVector
+        get() {
+            if (_smartphone != null) return _smartphone!!
+            _smartphone = ImageVector.Builder(
+                name = "StayHiFiIcons.Smartphone",
+                defaultWidth = 24.dp,
+                defaultHeight = 24.dp,
+                viewportWidth = 24f,
+                viewportHeight = 24f,
+            ).apply {
+                path(
+                    fill = SolidColor(Color.Black),
+                    pathFillType = PathFillType.NonZero,
+                ) {
+                    // M17,1.01 L7,1 c-1.1,0 -2,0.9 -2,2 v18 c0,1.1 0.9,2 2,2 h10 c1.1,0 2,-0.9 2,-2 V3 c0,-1.1 -0.9,-1.99 -2,-1.99 z
+                    moveTo(17f, 1.01f)
+                    lineTo(7f, 1f)
+                    curveToRelative(-1.1f, 0f, -2f, 0.9f, -2f, 2f)
+                    verticalLineToRelative(18f)
+                    curveToRelative(0f, 1.1f, 0.9f, 2f, 2f, 2f)
+                    horizontalLineToRelative(10f)
+                    curveToRelative(1.1f, 0f, 2f, -0.9f, 2f, -2f)
+                    verticalLineTo(3f)
+                    curveToRelative(0f, -1.1f, -0.9f, -1.99f, -2f, -1.99f)
+                    close()
+                    // M17,19 H7 V5 h10 v14 z
+                    moveTo(17f, 19f)
+                    horizontalLineTo(7f)
+                    verticalLineTo(5f)
+                    horizontalLineToRelative(10f)
+                    verticalLineToRelative(14f)
+                    close()
+                }
+            }.build()
+            return _smartphone!!
         }
 }

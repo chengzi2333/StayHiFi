@@ -26,6 +26,9 @@ object DeviceNames {
         return Build.MODEL
     }
 
+    /** 状态卡机型行文案（Task 28 F2）："iQOO 15（Android 17）"。 */
+    fun marketModelWithAndroid(): String = "${marketModel()}（Android ${Build.VERSION.RELEASE}）"
+
     private fun getSystemProperty(key: String): String? = try {
         val sp = Class.forName("android.os.SystemProperties")
         val get = sp.getMethod("get", String::class.java)

@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -31,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.ui.nav.StayHiFiIcons
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.util.DeviceNames
 
@@ -192,19 +191,17 @@ private fun StatusCard(state: HomeUiState) {
                 )
                 StayHiFiBadge(fullBars = state.fullBars)
             }
-            // 机型行（Task 28）：面客机型名（SystemProperties 市场名键链），标识"本机"。
+            // 机型行（Task 28）：面客机型名 + Android 版（SystemProperties 市场名键链）。
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    // PhoneAndroid 在 material-icons-extended（Task 22 已删依赖瘦身），
-                    // core 集用 Phone 近似（同为填充手机听筒形）。
-                    imageVector = Icons.Default.Phone,
+                    imageVector = StayHiFiIcons.Smartphone,
                     contentDescription = null,
                     modifier = Modifier.size(14.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
-                    text = DeviceNames.marketModel(),
+                    text = DeviceNames.marketModelWithAndroid(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
