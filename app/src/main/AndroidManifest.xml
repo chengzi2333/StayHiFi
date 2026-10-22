@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- ACL_CONNECTED 广播里读取 BluetoothDevice（Android 12+ 运行时权限，Onboarding 首次进入时申请） -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
@@ -72,11 +73,13 @@
             </intent-filter>
         </service>
 
-        <!-- Shizuku 拉起的特权 UserService（独立进程 :codec，身份 adb shell） -->
+        <!-- Shizuku 拉起的特权 UserService（独立进程 :codec，身份 adb shell）；
+             Instantiatable：Shizuku UserService 由 Shizuku 进程反射实例化，非系统 Service 组件 -->
         <service
             android:name=".shell.CodecService"
             android:exported="false"
-            android:process=":codec" />
+            android:process=":codec"
+            tools:ignore="Instantiatable" />
 
         <!-- Shizuku binder 接收器（必须手动声明，provider 工件不会自动合并） -->
         <provider

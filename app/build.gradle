@@ -13,8 +13,29 @@ android {
         applicationId 'com.chengzi.stayhifi'
         minSdk 29
         targetSdk 37
-        versionCode 2
-        versionName '0.9.0'
+        versionCode 3
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        // Task 29：release 签名全走环境变量（CI/本地发布机注入），不写死任何路径/密码。
+        // 环境变量缺失时占位（配置期不炸），等任务图确定要构建 release 时再报清晰错误；
+        // debug 走 AGP 默认签名，完全不受影响。
+        release {
+            storeFile file(System.getenv('STAYHIFI_KEYSTORE') ?: 'release-signing-not-configured')
+            storePassword System.getenv('STAYHIFI_STORE_PASSWORD') ?: ''
+            keyAlias System.getenv('STAYHIFI_KEY_ALIAS') ?: ''
+            keyPassword System.getenv('STAYHIFI_KEY_PASSWORD') ?: ''
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
     }
 
     buildFeatures {
@@ -26,6 +47,32 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// Task 29：任务图确定要构建 release 但签名环境变量缺失 → 报清晰错误（debug 任务图不触发）。
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { it.name.toLowerCase().contains('release') }) {
+        def missing = [
+            'STAYHIFI_KEYSTORE', 'STAYHIFI_STORE_PASSWORD',
+            'STAYHIFI_KEY_ALIAS', 'STAYHIFI_KEY_PASSWORD',
+        ].findAll { System.getenv(it) == null }
+        if (!missing.isEmpty()) {
+            throw new GradleException(
+                "release 签名环境变量缺失: ${missing.join(', ')}（debug 构建无需设置）")
+        }
+    }
+}
+
+// Task 29：AGP 9.4.1 的 compose group mapping 工具默认索要 compose-group-mapping:2.2.10
+//（AGP 出厂默认 Kotlin 版本），该版本从未发布到 Maven Central（现有 2.3.0+）；
+// 对齐本项目 Kotlin 2.4.x 线强升到 2.4.20。仅影响 release 的 compose 组映射工具，不进 APK。
+configurations.named('composeMappingProducerClasspath') {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'org.jetbrains.kotlin' &&
+            details.requested.name == 'compose-group-mapping') {
+            details.useVersion '2.4.20'
+        }
     }
 }
 

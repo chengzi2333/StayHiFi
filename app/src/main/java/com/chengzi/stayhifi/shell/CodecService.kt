@@ -271,7 +271,9 @@ class CodecService : ICodecService.Stub() {
         }
     }
 
-    /** 复刻 BluetoothAdapter.createAdapter：从 binder 手工构造（本机签名 (IBluetoothManager, Context)） */
+    /** 复刻 BluetoothAdapter.createAdapter：从 binder 手工构造（本机签名 (IBluetoothManager, Context)）。
+     *  BlockedPrivateApi：aidb shell 身份的 :codec 进程走 hidden API 无需豁免，lint 压制。 */
+    @android.annotation.SuppressLint("BlockedPrivateApi")
     private fun adapterFromBinder(diag: StringBuilder): BluetoothAdapter? {
         try {
             val sm = Class.forName("android.os.ServiceManager")
