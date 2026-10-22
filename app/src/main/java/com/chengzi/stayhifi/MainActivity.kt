@@ -24,10 +24,8 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -41,11 +39,11 @@ import kotlin.math.abs
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
-import com.chengzi.stayhifi.codec.Presets
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.QsTileService
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
+import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyWorker
 import com.chengzi.stayhifi.trigger.HeadsetEvents
 import com.chengzi.stayhifi.trigger.ListenerService
@@ -80,6 +78,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Task 5b：正式入口。首次启动走五页 Onboarding，完成后进 Home。
@@ -93,7 +94,6 @@ class MainActivity : ComponentActivity() {
 
     // ---- Onboarding 状态 ----
     private var onboardingState by mutableStateOf(OnboardingUiState())
-    private var presetOffer by mutableStateOf<PresetOffer?>(null)
 
     // ---- RecordWizard 状态 ----
     private var wizardVisible by mutableStateOf(false)
@@ -143,14 +143,6 @@ class MainActivity : ComponentActivity() {
                         wizardResult = null
                     },
                 )
-
-                presetOffer?.let { offer ->
-                    PresetOfferDialog(
-                        offer = offer,
-                        onApply = { onAcceptPreset(offer) },
-                        onDismiss = { presetOffer = null },
-                    )
-                }
             }
         }
     }
@@ -254,6 +246,7 @@ class MainActivity : ComponentActivity() {
                                         configSummary = it.config.summary(),
                                         source = it.source,
                                         autoApply = it.autoApply,
+                                        provenance = it.provenanceLine(),
                                     )
                                 },
                             ),
@@ -458,21 +451,9 @@ class MainActivity : ComponentActivity() {
                 val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
                 onboardingState = onboardingState.copy(headsetConnected = true, headsetName = name)
                 LogStore.log("已连接: $name ($mac)，当前 ${current.summary()}")
-
-                // Review Focus #3：识别到已知设备 → 预置确认弹窗
-                maybeOfferPreset(name, mac, current.codecType)
             } catch (t: Throwable) {
                 LogStore.log("刷新连接失败: $t")
             }
-        }
-    }
-
-    /** 命中内置预设且无档案时弹预置确认；引导页刷新与首页刷新共用。 */
-    private suspend fun maybeOfferPreset(name: String, mac: String, codecType: Int) {
-        val preset = Presets.match(name, codecType) ?: return
-        val hasProfile = withContext(Dispatchers.IO) { profileRepo.profileFor(mac) } != null
-        if (!hasProfile) {
-            presetOffer = PresetOffer(name = name, mac = mac, config = preset)
         }
     }
 
@@ -513,22 +494,6 @@ class MainActivity : ComponentActivity() {
             // 否则用户当场连耳机验证效果时自动拉满整体失效。
             ListenerService.start(this@MainActivity)
             refreshHome()
-        }
-    }
-
-    private fun onAcceptPreset(offer: PresetOffer) {
-        lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
-                profileRepo.save(DeviceProfile(
-                    mac = offer.mac,
-                    name = offer.name,
-                    config = offer.config,
-                    source = DeviceProfile.Source.PRESET,
-                    autoApply = true,
-                ))
-            }
-            LogStore.log("已应用内置预设: ${offer.name} (${offer.mac}) ${offer.config.summary()}")
-            presetOffer = null
         }
     }
 
@@ -584,6 +549,11 @@ class MainActivity : ComponentActivity() {
                     config = config,
                     source = DeviceProfile.Source.CAPTURED,
                     autoApply = true,
+                    // 出处四字段（Task 27）：录制设备 / Android 版本 / ROM 构建号 / 时间。
+                    recordedOnModel = Build.MODEL,
+                    recordedAndroidVersion = Build.VERSION.RELEASE,
+                    recordedBuildDisplay = Build.DISPLAY,
+                    recordedAtMillis = System.currentTimeMillis(),
                 ))
             }
             LogStore.log("已保存录制档案: ${capturedName ?: mac} ($mac) ${config.summary()}")
@@ -608,7 +578,6 @@ class MainActivity : ComponentActivity() {
             }
             HomeAction.ApplyNow -> onApplyNow()
             HomeAction.FixCarrier -> openCarrierManager()
-            HomeAction.GoRecord -> selectedTab = 1
         }
     }
 
@@ -624,7 +593,6 @@ class MainActivity : ComponentActivity() {
                     rate = null,
                     bits = null,
                     quality = null,
-                    hasProfile = false,
                     fullBars = false,
                 )
                 connectedMac = null
@@ -642,7 +610,7 @@ class MainActivity : ComponentActivity() {
                 if (arr.length() == 0) {
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
-                        bits = null, quality = null, hasProfile = false, fullBars = false,
+                        bits = null, quality = null, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -657,26 +625,26 @@ class MainActivity : ComponentActivity() {
                     return@launch
                 }
                 val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
-                // 栈可能规范化 priority/cs1~cs4，满血按 codecType+采样率+位深三项判定
-                val profile = withContext(Dispatchers.IO) { profileRepo.profileFor(mac) }
-                val fullBars = profile != null &&
-                    current.codecType == profile.config.codecType &&
-                    current.sampleRate == profile.config.sampleRate &&
-                    current.bitsPerSample == profile.config.bitsPerSample
+                // Task 27 两态裁决：fullBars = 与 ApplyWorker 同一份 deriveTarget 判定
+                // （readConfig 响应已含 selectable），四字段相等即"已达本机最高音质输出"。
+                val selectable = obj.optJSONArray("selectable")?.let { arr ->
+                    (0 until arr.length()).map {
+                        CodecConfig.fromJson(arr.getJSONObject(it).toString())
+                    }
+                } ?: emptyList()
+                val fullBars = ApplyPolicy.matches(
+                    ApplyPolicy.deriveTarget(current, selectable), current,
+                )
                 homeState = homeState.copy(
                     headsetName = name,
                     codec = Masks.codecName(current.codecType),
                     rate = Masks.rateHz(current.sampleRate),
                     bits = Masks.bitsDepth(current.bitsPerSample),
                     quality = Masks.qualityLabel(current.codecType, current.cs1),
-                    hasProfile = profile != null,
                     fullBars = fullBars,
                 )
                 connectedMac = mac
                 connectedName = name
-
-                // 预置识别前移：引导页被跳过时，首页首次读到设备也要弹预置确认
-                maybeOfferPreset(name, mac, current.codecType)
             } catch (t: Throwable) {
                 LogStore.log("首页刷新失败: $t")
             }
@@ -765,29 +733,13 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private data class PresetOffer(
-        val name: String,
-        val mac: String,
-        val config: CodecConfig,
-    )
-
-    @Composable
-    private fun PresetOfferDialog(
-        offer: PresetOffer,
-        onApply: () -> Unit,
-        onDismiss: () -> Unit,
-    ) {
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text("识别到 ${offer.name}") },
-            text = { Text("这台设备有已知满血参数（${offer.config.summary()}），连上后自动应用，现在保存吗？") },
-            confirmButton = {
-                TextButton(onClick = onApply) { Text("应用") }
-            },
-            dismissButton = {
-                TextButton(onClick = onDismiss) { Text("暂不需要") }
-            },
-        )
+    /** 档案出处四字段 → 设备页展示行；旧档案无出处时返回空（不显示）。 */
+    private fun DeviceProfile.provenanceLine(): String {
+        if (recordedAtMillis == 0L) return ""
+        val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(recordedAtMillis))
+        return listOf("记录于 $recordedOnModel", "Android $recordedAndroidVersion", recordedBuildDisplay, date)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
     }
 
     companion object {

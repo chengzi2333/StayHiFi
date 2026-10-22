@@ -40,8 +40,8 @@ private const val PAGE_COUNT = 5
 
 /** 参数来源选择。 */
 enum class SourceMode(val title: String, val description: String) {
-    AUTO_FULL("自动拉满（推荐）", "连上耳机就用这台设备已知的最强参数，全程无感。"),
-    RECORD_WIZARD("录制向导", "没有现成模板时，抓一次当前参数，存成这台耳机的专属模板。"),
+    AUTO_FULL("自动拉满（推荐）", "连上耳机就把本机当前能谈出的最高音质参数写上去并验证，全程无感。"),
+    RECORD_WIZARD("录制向导", "诊断工具：抓一次当前参数存作本机记录，不参与拉满决策。"),
 }
 
 /** 特权载体类型。 */

@@ -38,6 +38,8 @@ data class DeviceItemUi(
     val source: DeviceProfile.Source,
     /** 单设备自动应用开关。 */
     val autoApply: Boolean,
+    /** 录制出处行（Task 27，如 "记录于 V2505A · Android 15 · PD2505_A_xxx · 2026-10-21"）；空则不显示。 */
+    val provenance: String = "",
 )
 
 data class DevicesUiState(
@@ -73,7 +75,7 @@ fun DevicesScreen(
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                text = "连上已知设备时按档案参数自动拉满",
+                text = "档案仅作本机记录；拉满目标由本机现场派生",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -137,6 +139,14 @@ private fun DeviceCard(item: DeviceItemUi, onAction: (DevicesAction) -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // 出处行（Task 27）：纯本机记录，不参与拉满决策。
+            if (item.provenance.isNotEmpty()) {
+                Text(
+                    text = item.provenance,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -206,6 +216,7 @@ private fun DevicesScreenPreviewLight() {
                         configSummary = "LDAC·96kHz·24bit",
                         source = DeviceProfile.Source.CAPTURED,
                         autoApply = false,
+                        provenance = "记录于 V2505A · Android 15 · PD2505_A_15.1.23.2 · 2026-10-21",
                     ),
                 ),
             ),

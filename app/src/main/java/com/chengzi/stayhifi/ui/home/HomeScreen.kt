@@ -1,7 +1,6 @@
 package com.chengzi.stayhifi.ui.home
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,9 +40,7 @@ data class HomeUiState(
     val bits: String? = null,
     /** 码率质量档（如 "1000kbps"/"自适应"）；null 表示未识别。 */
     val quality: String? = null,
-    /** 是否已有该设备的参数档案（false 时提示去录制模板）。 */
-    val hasProfile: Boolean = false,
-    /** 是否已拉到已知最强参数（满血）。 */
+    /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
     val fullBars: Boolean = false,
     /** 「自动拉满」总开关。 */
     val autoApplyEnabled: Boolean = true,
@@ -57,8 +54,6 @@ sealed interface HomeAction {
     data object ApplyNow : HomeAction
     /** 点击红色警示横幅去修复载体。 */
     data object FixCarrier : HomeAction
-    /** 点击「码率档位未锁定」提示行跳设备页录制模板。 */
-    data object GoRecord : HomeAction
 }
 
 /**
@@ -93,7 +88,7 @@ fun HomeScreen(
                 CarrierAlertBanner(text = alert, onClick = { onAction(HomeAction.FixCarrier) })
             }
 
-            StatusCard(state, onGoRecord = { onAction(HomeAction.GoRecord) })
+            StatusCard(state)
 
             Spacer(Modifier.weight(1f))
 
@@ -104,7 +99,7 @@ fun HomeScreen(
                 Column(Modifier.weight(1f)) {
                     Text("自动拉满", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "连上耳机时自动应用最强参数",
+                        text = "连上耳机时自动写入本机最高音质参数",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -123,7 +118,8 @@ fun HomeScreen(
                     .heightIn(min = 56.dp),
             ) {
                 Text(
-                    text = if (state.fullBars) "已是满血，再拉一次" else "立即满血",
+                    // 两态文案（Task 27）：无对比行、无"最高/最强参数"字样；"满血"仅徽标保留。
+                    text = if (state.fullBars) "重新拉满" else "立即拉满",
                     style = MaterialTheme.typography.titleMedium,
                 )
             }
@@ -171,7 +167,7 @@ private fun CarrierAlertBanner(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StatusCard(state: HomeUiState, onGoRecord: () -> Unit) {
+private fun StatusCard(state: HomeUiState) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -193,20 +189,17 @@ private fun StatusCard(state: HomeUiState, onGoRecord: () -> Unit) {
             }
             StatusLine(state)
             DetailGrid(state)
-            if (state.headsetName != null && !state.hasProfile) {
-                NoProfileHint(onClick = onGoRecord)
-            }
         }
     }
 }
 
-/** 状态卡唯一的状态文案：明细参数请看下方 2×2 明细格。 */
+/** 状态卡唯一的状态文案：两态（Task 27）——真话文案，明细参数看下方 2×2 明细格。 */
 @Composable
 private fun StatusLine(state: HomeUiState) {
     val text = when {
         state.headsetName == null -> "等待耳机连接"
-        state.fullBars -> "已达最强参数"
-        else -> "当前参数未拉满"
+        state.fullBars -> "已达本机最高音质输出"
+        else -> "未拉满 · 点击重试"
     }
     Text(
         text = text,
@@ -259,34 +252,6 @@ private fun DetailCell(label: String, value: String?, modifier: Modifier = Modif
     }
 }
 
-/** 未锁定码率提示：无档案时引导去设备页录制模板。 */
-@Composable
-private fun NoProfileHint(onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.tertiaryContainer)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            text = "码率档位未锁定，去设备页录制模板可拉满",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onTertiaryContainer,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = "去设备页",
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.tertiary,
-        )
-    }
-}
-
 @Composable
 private fun StayHiFiBadge(fullBars: Boolean) {
     val container = if (fullBars) {
@@ -333,7 +298,6 @@ private fun HomeScreenPreviewLight() {
                 rate = "192kHz",
                 bits = "24bit",
                 quality = "1000kbps",
-                hasProfile = true,
                 fullBars = true,
                 autoApplyEnabled = true,
             ),
@@ -353,7 +317,6 @@ private fun HomeScreenPreviewDark() {
                 rate = "44.1kHz",
                 bits = "16bit",
                 quality = null,
-                hasProfile = false,
                 fullBars = false,
                 autoApplyEnabled = false,
                 carrierAlert = "Shizuku 未运行，点我修复",

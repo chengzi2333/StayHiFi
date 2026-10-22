@@ -22,8 +22,9 @@ import org.json.JSONObject
  * → 延迟 1.5s 等协议栈协商稳定 → 写入 → 读回验证（writeConfig 内部 500ms×8，
  * 外层再 1s×3 兜底重试）→ 按 notifyResult 发通知 → unbind，零驻留。
  *
- * 有档案：按 [Negotiation.descending] 逐候选写入，直到读回一致；
- * 无档案：[ApplyPolicy.autoTarget] 全局默认策略写入一次并验证。
+ * Task 27 两态裁决：目标唯一来源 = [ApplyPolicy.deriveTarget]（现场派生本机最高），
+ * 所有设备统一路径，按 [Negotiation.descending] 逐候选写入直到读回一致；
+ * 档案不参与拉满决策（仅设备页展示），仅保留 autoApply=false 的自动触发拦截。
  *
  * 对抗审查 I3：run 主体持 [ApplyLock.mutex]，三路触发互斥串行。
  * 对抗审查 I2：force=true（手动入口）跳过 autoApply=false 的自动触发拦截。
@@ -79,15 +80,11 @@ class ApplyWorker(context: Context) {
             log("当前配置: ${settled.current.summary()}")
 
             val profile = profiles.profileFor(mac)
-            when {
-                !force && profile != null && !profile.autoApply ->
-                    log("已有档案但 autoApply=false，跳过写入")
-                profile != null ->
-                    applyProfile(service, mac, name, settled.current, profile.config)
-                else -> {
-                    log("无档案新设备，走全局默认策略")
-                    applyDefault(service, mac, name, settled.current, settled.selectable)
-                }
+            if (!force && profile != null && !profile.autoApply) {
+                log("已有档案但 autoApply=false，跳过写入")
+            } else {
+                log("派生本机最高目标")
+                applyDerived(service, mac, name, settled.current, settled.selectable)
             }
         } catch (t: Throwable) {
             log("自动拉满失败: $t")
@@ -97,15 +94,16 @@ class ApplyWorker(context: Context) {
         }
     }
 
-    /** 有档案：按降档序列逐候选写入，直到读回一致（设计 §4.2.1）。 */
-    private suspend fun applyProfile(
+    /** 统一路径：deriveTarget 派生本机最高目标，按降档序列逐候选写入，直到读回一致（设计 §4.2.1）。 */
+    private suspend fun applyDerived(
         service: ICodecService, mac: String, name: String?,
-        current: CodecConfig, golden: CodecConfig,
+        current: CodecConfig, selectable: List<CodecConfig>,
     ) {
+        val golden = ApplyPolicy.deriveTarget(current, selectable)
         for (candidate in Negotiation.descending(golden)) {
             if (!ApplyPolicy.decide(current, candidate)) {
-                log("当前已是目标配置 ${candidate.summary()}，跳过写入")
-                notifyResult("音质已拉满", "${name ?: mac} 无需写入")
+                log("当前已是本机最高 ${candidate.summary()}，跳过写入")
+                notifyResult("音质已拉满", "${name ?: mac} 已是本机最高音质输出")
                 return
             }
             log("写入候选: ${candidate.summary()}")
@@ -117,25 +115,6 @@ class ApplyWorker(context: Context) {
         }
         log("所有候选均失败")
         notifier.notifyResult("音质拉满失败", "${name ?: mac}：所有候选读回不一致")
-    }
-
-    /** 无档案：全局默认策略写入一次并验证。 */
-    private suspend fun applyDefault(
-        service: ICodecService, mac: String, name: String?,
-        current: CodecConfig, selectable: List<CodecConfig>,
-    ) {
-        val target = ApplyPolicy.autoTarget(current, selectable)
-        if (!ApplyPolicy.decide(current, target)) {
-            log("当前已符合默认策略 ${target.summary()}，跳过写入")
-            notifyResult("音质已拉满", "${name ?: mac} 已符合默认策略")
-            return
-        }
-        log("按默认策略写入: ${target.summary()}")
-        if (writeVerified(service, mac, target)) {
-            notifyResult("音质拉满成功", "${name ?: mac} → ${target.summary()}")
-        } else {
-            notifier.notifyResult("音质拉满失败", "${name ?: mac}：读回不一致")
-        }
     }
 
     /** writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。 */
