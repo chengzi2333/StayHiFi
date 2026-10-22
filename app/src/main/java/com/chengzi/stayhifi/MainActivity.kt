@@ -71,6 +71,7 @@ import com.chengzi.stayhifi.ui.settings.SettingsAction
 import com.chengzi.stayhifi.ui.settings.SettingsScreen
 import com.chengzi.stayhifi.ui.settings.SettingsUiState
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
+import com.chengzi.stayhifi.util.DeviceNames
 import com.chengzi.stayhifi.util.KeepAlive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -550,7 +551,8 @@ class MainActivity : ComponentActivity() {
                     source = DeviceProfile.Source.CAPTURED,
                     autoApply = true,
                     // 出处四字段（Task 27）：录制设备 / Android 版本 / ROM 构建号 / 时间。
-                    recordedOnModel = Build.MODEL,
+                    // Task 28：录制设备用面客机型名（市场名键链），与状态卡机型行同源。
+                    recordedOnModel = DeviceNames.marketModel(),
                     recordedAndroidVersion = Build.VERSION.RELEASE,
                     recordedBuildDisplay = Build.DISPLAY,
                     recordedAtMillis = System.currentTimeMillis(),

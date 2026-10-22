@@ -11,11 +11,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -28,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
+import com.chengzi.stayhifi.util.DeviceNames
 
 data class HomeUiState(
     /** 耳机名；null 表示当前未连接耳机。 */
@@ -186,6 +191,23 @@ private fun StatusCard(state: HomeUiState) {
                     modifier = Modifier.weight(1f),
                 )
                 StayHiFiBadge(fullBars = state.fullBars)
+            }
+            // 机型行（Task 28）：面客机型名（SystemProperties 市场名键链），标识"本机"。
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    // PhoneAndroid 在 material-icons-extended（Task 22 已删依赖瘦身），
+                    // core 集用 Phone 近似（同为填充手机听筒形）。
+                    imageVector = Icons.Default.Phone,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = DeviceNames.marketModel(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             StatusLine(state)
             DetailGrid(state)
