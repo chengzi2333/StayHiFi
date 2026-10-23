@@ -20,8 +20,8 @@ object ApplyPolicy {
     /**
      * 生效判定（与服务端 CodecService.writeConfig 的 match 语义一致）：
      * codecType 相等 &&（target 采样率为 0 或相等）&&（target 位深为 0 或相等）&& cs1 相等。
-     * 档案/PRESET 目标的 cs1 是用户指定的音质档，栈未套用则视为未生效；
-     * autoTarget 的 cs1 继承 current，比对天然通过。priority/cs2~cs4 等栈管理字段
+     * 目标一律由 [deriveTarget] 现场派生（Task 27 口径，档案不参与拉满决策）：cs1 继承 current
+     * 或取内置最佳档位表，栈未套用则视为未生效。priority/cs2~cs4 等栈管理字段
      * 可能被栈规范化，不参与判定。
      */
     fun matches(target: CodecConfig, actual: CodecConfig): Boolean =

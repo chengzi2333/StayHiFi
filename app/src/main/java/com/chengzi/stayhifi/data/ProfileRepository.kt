@@ -15,9 +15,13 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 
 // 对抗审查 I1：同 SettingsRepository——preferences 文件损坏时重置，避免启动崩溃死循环。
+// Task 33：文件级损坏重置为空表时留警告日志（JSON 级损坏在 save 里有，文件级原来没有）。
 private val Context.profileDataStore by preferencesDataStore(
     name = "profiles",
-    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+    corruptionHandler = ReplaceFileCorruptionHandler {
+        LogStore.log("警告：profiles 存储文件损坏，已重置为空档案表")
+        emptyPreferences()
+    },
 )
 
 /**

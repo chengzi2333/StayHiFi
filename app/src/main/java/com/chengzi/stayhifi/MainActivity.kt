@@ -8,7 +8,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.service.quicksettings.TileService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -99,6 +98,12 @@ class MainActivity : ComponentActivity() {
     // ---- RecordWizard 状态 ----
     private var wizardVisible by mutableStateOf(false)
     private var wizardResult by mutableStateOf<CodecConfigSummary?>(null)
+    // 结果卡片设备名 / 内联错误 / 成功态（Task 33）
+    private var wizardDeviceLabel by mutableStateOf<String?>(null)
+    private var wizardError by mutableStateOf<String?>(null)
+    private var wizardSaved by mutableStateOf(false)
+    // 重录入口锁定的目标 MAC（Task 33）：抓取时按 MAC 匹配，防止抓到另一台设备。
+    private var wizardTargetMac: String? = null
     private var capturedMac: String? = null
     private var capturedName: String? = null
     private var capturedConfig: CodecConfig? = null
@@ -136,13 +141,12 @@ class MainActivity : ComponentActivity() {
                 RecordWizard(
                     visible = wizardVisible,
                     result = wizardResult,
-                    onOpenDevOptions = ::onOpenDevOptions,
+                    deviceLabel = wizardDeviceLabel,
+                    error = wizardError,
+                    saved = wizardSaved,
                     onCapture = ::onWizardCapture,
                     onSave = ::onWizardSave,
-                    onDismiss = {
-                        wizardVisible = false
-                        wizardResult = null
-                    },
+                    onDismiss = ::onWizardDismiss,
                 )
             }
         }
@@ -276,16 +280,26 @@ class MainActivity : ComponentActivity() {
     private fun onDevicesAction(action: DevicesAction) {
         when (action) {
             is DevicesAction.SetAutoApply -> lifecycleScope.launch {
-                val profile = withContext(Dispatchers.IO) { profileRepo.profileFor(action.mac) }
-                    ?: return@launch
-                withContext(Dispatchers.IO) {
-                    profileRepo.save(profile.copy(autoApply = action.enabled))
+                // Task 33：runBlocking + DataStore edit 的 IO 异常会抛到 lifecycleScope 闪退，包一层保护。
+                try {
+                    val profile = withContext(Dispatchers.IO) { profileRepo.profileFor(action.mac) }
+                        ?: return@launch
+                    withContext(Dispatchers.IO) {
+                        profileRepo.save(profile.copy(autoApply = action.enabled))
+                    }
+                    LogStore.log("${profile.name} 自动应用 = ${action.enabled}")
+                } catch (t: Throwable) {
+                    LogStore.log("修改自动应用失败: $t")
                 }
-                LogStore.log("${profile.name} 自动应用 = ${action.enabled}")
             }
             is DevicesAction.ReRecord -> {
-                // 复用 RecordWizard；保存按 MAC 覆盖原档案
+                // 复用 RecordWizard；保存按 MAC 覆盖原档案。
+                // Task 33：锁定目标 MAC，抓取时按 MAC 匹配而不是无脑取 dumpDevices 第一台。
                 wizardResult = null
+                wizardDeviceLabel = null
+                wizardError = null
+                wizardSaved = false
+                wizardTargetMac = action.mac
                 wizardVisible = true
             }
         }
@@ -381,7 +395,12 @@ class MainActivity : ComponentActivity() {
             OnboardingAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
             OnboardingAction.OpenBackgroundPower -> onOpenBackgroundPower()
             OnboardingAction.OpenRecordWizard -> {
+                // Task 33：Onboarding 入口不带目标 MAC 约束，清空重录锁定的 MAC。
                 wizardResult = null
+                wizardDeviceLabel = null
+                wizardError = null
+                wizardSaved = false
+                wizardTargetMac = null
                 wizardVisible = true
             }
         }
@@ -502,29 +521,63 @@ class MainActivity : ComponentActivity() {
 
     // ================= RecordWizard =================
 
-    private fun onOpenDevOptions() {
-        try {
-            startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
-        } catch (e: ActivityNotFoundException) {
-            LogStore.log("打开开发者选项失败: $e")
-        }
+    /** 关闭弹层：状态全清零，包括重录锁定的目标 MAC（Task 33）。 */
+    private fun onWizardDismiss() {
+        wizardVisible = false
+        wizardResult = null
+        wizardDeviceLabel = null
+        wizardError = null
+        wizardSaved = false
+        wizardTargetMac = null
     }
 
     private fun onWizardCapture() {
+        // 每次抓取先清内联错误（Task 33）
+        wizardError = null
         lifecycleScope.launch {
             try {
-                if (!ensureCarrierReady()) return@launch
+                // 载体/授权判定内联展开（对照 ensureCarrierReady）：向导要区分两种人话文案。
+                if (!withContext(Dispatchers.IO) { provider.isRunning }) {
+                    wizardError = "Shizuku/Stellar 未运行，请先修复授权"
+                    LogStore.log("录制向导：特权载体未运行")
+                    return@launch
+                }
+                if (!withContext(Dispatchers.IO) { provider.hasPermission }) {
+                    val ok = withContext(Dispatchers.IO) { provider.requestPermission(this@MainActivity) }
+                    if (!ok) {
+                        wizardError = "特权授权未授予"
+                        LogStore.log("录制向导：特权授权未授予")
+                        return@launch
+                    }
+                }
                 val svc = withContext(Dispatchers.IO) { provider.bind() }
                 val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
                 if (arr.length() == 0) {
+                    wizardError = "未检测到已连接的耳机，请先连接"
                     LogStore.log("录制向导：无已连接 A2DP 设备")
                     return@launch
                 }
-                val mac = arr.getJSONObject(0).getString("mac")
-                val name = arr.getJSONObject(0).getString("name")
+                // Task 33：重录入口已锁定目标 MAC，按 MAC 匹配而不是取 [0]；
+                // 匹配不到说明目标耳机没连上，报错而不是抓别的设备。
+                val targetMac = wizardTargetMac
+                val idx = if (targetMac == null) {
+                    0
+                } else {
+                    (0 until arr.length()).firstOrNull {
+                        arr.getJSONObject(it).getString("mac").equals(targetMac, ignoreCase = true)
+                    }
+                }
+                if (idx == null) {
+                    wizardError = "目标耳机未连接"
+                    LogStore.log("录制向导：目标耳机 $targetMac 不在已连接设备列表")
+                    return@launch
+                }
+                val mac = arr.getJSONObject(idx).getString("mac")
+                val name = arr.getJSONObject(idx).getString("name")
                 val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
                 val obj = JSONObject(stateJson)
                 if (obj.has("error")) {
+                    wizardError = obj.optString("error")
                     LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
                     return@launch
                 }
@@ -533,8 +586,10 @@ class MainActivity : ComponentActivity() {
                 capturedName = name
                 capturedConfig = current
                 wizardResult = summaryToUi(current.summary())
+                wizardDeviceLabel = "$name ($mac)"
                 LogStore.log("录制向导抓到: $name ($mac) ${current.summary()}")
             } catch (t: Throwable) {
+                wizardError = "抓取失败：${t.message ?: t.toString()}"
                 LogStore.log("录制向导抓取失败: $t")
             }
         }
@@ -545,24 +600,30 @@ class MainActivity : ComponentActivity() {
         val config = capturedConfig
         if (mac == null || config == null) return
         lifecycleScope.launch {
-            withContext(Dispatchers.IO) {
-                profileRepo.save(DeviceProfile(
-                    mac = mac,
-                    name = capturedName ?: mac,
-                    config = config,
-                    source = DeviceProfile.Source.CAPTURED,
-                    autoApply = true,
-                    // 出处四字段（Task 27）：录制设备 / Android 版本 / ROM 构建号 / 时间。
-                    // Task 28：录制设备用面客机型名（市场名键链），与状态卡机型行同源。
-                    recordedOnModel = DeviceNames.marketModel(),
-                    recordedAndroidVersion = Build.VERSION.RELEASE,
-                    recordedBuildDisplay = Build.DISPLAY,
-                    recordedAtMillis = System.currentTimeMillis(),
-                ))
+            // Task 33：save 是 runBlocking + DataStore edit，IO 异常上抛会闪退，包 try/catch。
+            try {
+                withContext(Dispatchers.IO) {
+                    profileRepo.save(DeviceProfile(
+                        mac = mac,
+                        name = capturedName ?: mac,
+                        config = config,
+                        source = DeviceProfile.Source.CAPTURED,
+                        autoApply = true,
+                        // 出处四字段（Task 27）：录制设备 / Android 版本 / ROM 构建号 / 时间。
+                        // Task 28：录制设备用面客机型名（市场名键链），与状态卡机型行同源。
+                        recordedOnModel = DeviceNames.marketModel(),
+                        recordedAndroidVersion = Build.VERSION.RELEASE,
+                        recordedBuildDisplay = Build.DISPLAY,
+                        recordedAtMillis = System.currentTimeMillis(),
+                    ))
+                }
+                LogStore.log("已保存录制档案: ${capturedName ?: mac} ($mac) ${config.summary()}")
+                // 弹层内轻量成功态（Task 33），由用户点「完成」关闭。
+                wizardSaved = true
+            } catch (t: Throwable) {
+                wizardError = "保存失败：${t.message ?: t.toString()}"
+                LogStore.log("录制向导保存失败: $t")
             }
-            LogStore.log("已保存录制档案: ${capturedName ?: mac} ($mac) ${config.summary()}")
-            wizardVisible = false
-            wizardResult = null
         }
     }
 
