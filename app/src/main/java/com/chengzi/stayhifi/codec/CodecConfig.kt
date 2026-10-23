@@ -70,6 +70,23 @@ object Masks {
         else -> "vendor($type)"
     }
 
+    /** OPPO/OnePlus 新 ColorOS 厂商栈把 LHDC 家族放在 0x10..0x1F（旧栈为 8/9/10/13），
+     *  子编号随手机栈 build 变；需能力佐证，不能裸认。 */
+    fun isVendorLhdcRange(type: Int): Boolean = type in 0x10..0x1F
+
+    /** 佐证版：capsRateMask 为该 codecType 在 selectable 中所有条目的 sampleRate 位或集；
+     *  含 ≥176.4kHz 位（16 或 32）才可认 LHDC——这是 LHDC 5.0 独有能力签名
+     *  （LDAC 上限 96kHz，aptX/LC3 更低）。佐证失败回落单参 codecName（显示 vendor(N)）。
+     *  用 and 判位，禁止相等比较（capsRateMask 是多比特或集）。 */
+    fun codecName(type: Int, capsRateMask: Int): String =
+        if (isVendorLhdcRange(type) && capsRateMask and (16 or 32) != 0) "LHDC"
+        else codecName(type)
+
+    /** 把 selectable 中 codecType 相同的条目 sampleRate 位或起来，得能力掩码。
+     *  sampleRate 字段在 selectable 语境是多比特掩码（可含 43 这类叠加值），或集天然兼容。 */
+    fun capsRateMask(type: Int, selectable: List<CodecConfig>): Int =
+        selectable.filter { it.codecType == type }.fold(0) { acc, c -> acc or c.sampleRate }
+
     /**
      * cs1（codec-specific 1）质量档到人类可读标签；未知编号返回 null（调用方保持三段显示）。
      * 4=LDAC 用 AOSP 标准值（见 BluetoothCodecConfig 注释）：

@@ -73,4 +73,39 @@ class MasksTest {
         assertEquals(null, Masks.qualityLabel(0, 1000L))
         assertEquals(null, Masks.qualityLabel(99, 50888712L))
     }
+
+    @Test
+    fun codecNameWithCapsAcceptsLhdcOn192kBit() {
+        // ColorOS 新栈 0x13 + 仅 192kHz 位（32）→ LHDC 能力签名成立
+        assertEquals("LHDC", Masks.codecName(0x13, 32))
+    }
+
+    @Test
+    fun codecNameWithCapsAcceptsLhdcOnMultiBitMask() {
+        // 43 = 32+8+2+1 多比特叠加，仍含 32 位 → and 判位必须认
+        assertEquals("LHDC", Masks.codecName(0x13, 43))
+    }
+
+    @Test
+    fun codecNameWithCapsRejectsLhdcBelow176k() {
+        // 最高 96kHz（8）→ 佐证失败，回落 vendor 显示
+        assertEquals("vendor(19)", Masks.codecName(0x13, 8))
+    }
+
+    @Test
+    fun codecNameWithCapsRejectsOutsideVendorRange() {
+        // 区间边界：0x0F 与 0x20 即使带 192k 位也不认（vendor(N) 为十进制，0x20=32）
+        assertEquals("vendor(15)", Masks.codecName(0x0F, 32))
+        assertEquals("vendor(32)", Masks.codecName(0x20, 32))
+    }
+
+    @Test
+    fun capsRateMaskAggregatesSelectableEntries() {
+        // 两条 19 号条目（48k + 192k）位或 = 34
+        val selectable = listOf(
+            CodecConfig(19, 0, 2, 0, 0, 0L, 0L, 0L, 0L),
+            CodecConfig(19, 0, 32, 0, 0, 0L, 0L, 0L, 0L),
+        )
+        assertEquals(34, Masks.capsRateMask(19, selectable))
+    }
 }
