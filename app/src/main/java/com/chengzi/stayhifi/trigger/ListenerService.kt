@@ -47,6 +47,8 @@ import org.json.JSONObject
  *   Task 31 浸泡实测裁决：后台断开判定以「本机 A2DP API + 30s 轮询」为主路径
  *   （不依赖特权载体，不受系统冻结 codec 进程影响）；ACL/A2DP 断开广播为加速信号
  *   （OriginOS 对后台应用延迟投递，到达即刷，不到达轮询兜底）。
+ *   Task 32：notifyPersistent 关 = 静态一次性通知（不轮询不重 post，用户划除即消失
+ *   至进程重启）；开 = 事件驱动 + 30s 轮询参数行。
  */
 class ListenerService : Service() {
 
@@ -235,12 +237,16 @@ class ListenerService : Service() {
         pollJob = null
     }
 
+    /**
+     * 常驻通知刷新。Task 32 语义裁决：notifyPersistent=false = 静态一次性通知
+     * （onCreate 首贴即法定存在，正文「音质满格运行中」从不变化），用户划除后即消失
+     * 至进程重启——任何事件（连接/断开/collect）都不得重 post，否则每次
+     * startForeground 都会撤销用户的划除。notifyPersistent=true 行为不变：
+     * 事件驱动 + 30s 轮询实时刷新参数行。
+     */
     private suspend fun refreshNotification() {
-        val content = if (!notifyPersistent) {
-            TEXT_RUNNING
-        } else {
-            readConnectedSummary() ?: TEXT_WAITING
-        }
+        if (!notifyPersistent) return
+        val content = readConnectedSummary() ?: TEXT_WAITING
         runCatching {
             ServiceCompat.startForeground(
                 this, ID_LISTENER,

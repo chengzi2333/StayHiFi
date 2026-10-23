@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.BuildConfig
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 data class SettingsUiState(
@@ -204,7 +205,7 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         Text(
-                            text = "当前 v0.9.0 · 前往 GitHub Releases",
+                            text = "当前 v${BuildConfig.VERSION_NAME} · 前往 GitHub Releases",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
