@@ -1,3 +1,5 @@
+[中文] | [English](README.en.md) | [한국어](README.ko.md)
+
 # StayHiFi 音质常驻
 
 **一次设置，持续生效。**
@@ -17,7 +19,7 @@ StayHiFi 只做一件事：连上耳机的一瞬间，替你把参数写回去�
 
 ## 原理
 
-通过 **Shizuku 或 Stellar**（任选其一）获得 shell 级特权，调用系统蓝牙栈公开的 `setCodecConfigPreference()` 写入 A2DP codec 配置。
+通过 **Shizuku 或 Stellar**（任选其一）获得 shell 级特权，调用系统蓝牙栈的隐藏接口 `setCodecConfigPreference()`（反射调用） 写入 A2DP codec 配置。
 
 - **不 patch 系统、不解锁隐藏 codec**，不突破硬件已协商的能力上限
 - 常驻前台服务监听连接事件，近零额外耗电（无轮询循环）
@@ -25,14 +27,16 @@ StayHiFi 只做一件事：连上耳机的一瞬间，替你把参数写回去�
 
 ## 截图
 
-> 截图占位：发布前补充 ≥4 张（首页状态卡 / 引导页 / 写入成功 / 设置页），存至 `docs/screenshots/`。
+<img src="docs/marketing/screenshots/01-home.png" width="280" alt="首页状态卡">
+<img src="docs/marketing/screenshots/02-devices.png" width="280" alt="设备页">
+<img src="docs/marketing/screenshots/03-settings.png" width="280" alt="设置页">
 
 ## 安装
 
 官方渠道仅此两处（酷安 / GitHub），其他来源的 APK 请勿安装：
 
 - **酷安**：应用市场内搜索「音质常驻」
-- **GitHub Releases**：<https://github.com/chengzi/StayHiFi/releases>（页面附 APK SHA-256，安装前请核对）
+- **GitHub Releases**：<https://github.com/chengzi2333/StayHiFi/releases>（页面附 APK SHA-256，安装前请核对）
 
 前置条件：安装 **Shizuku** 或 **Stellar** 管理器，并按其指引激活（无线调试 / 有线 adb 启动，无需 root）。
 
@@ -59,23 +63,3 @@ StayHiFi 只做一件事：连上耳机的一瞬间，替你把参数写回去�
 ## 开源
 
 GPL-3.0-or-later，详见 [LICENSE](LICENSE)。第三方组件声明见 [NOTICE](NOTICE)。设备档案贡献指引见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
----
-
-# StayHiFi (English)
-
-**Set it once — it stays that way.**
-
-StayHiFi writes your Bluetooth A2DP codec configuration (codec / sample rate / bit depth / quality tier) to the negotiated maximum every time your headset connects. No more digging into Developer Options on every reconnect.
-
-## How it works
-
-Using **Shizuku or Stellar** (either one) as a privileged carrier, StayHiFi calls the system Bluetooth stack's public `setCodecConfigPreference()`. It does **not** patch the system or unlock hidden codecs, and it only reacts to connection events — no polling, no extra battery drain. Devices without a known preset can be calibrated once with the built-in record wizard.
-
-## Install
-
-Official channels only (CoolApk / GitHub Releases). Requires Shizuku or Stellar activated on your device. No root needed.
-
-## Privacy & disclaimers
-
-Zero data collection — everything stays on your device. Not affiliated with Shizuku, Stellar, OPPO, or vivo. GPL-3.0-or-later.
