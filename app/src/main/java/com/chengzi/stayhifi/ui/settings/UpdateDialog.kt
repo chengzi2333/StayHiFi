@@ -11,6 +11,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import java.util.Locale
@@ -60,9 +61,12 @@ fun UpdateDialog(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 if (state.notes.isNotBlank()) {
+                    // Task 40：更新说明走轻量 Markdown 渲染（粗体/标题/链接/行内代码），
+                    // 不再原样贴 raw Markdown（`**粗体**` 曾显示成字面星号）
+                    val notes = remember(state.notes) { renderMarkdownLite(state.notes) }
                     // Task 39：更新说明单独成可滚动块，超长说明不再把进度区顶到折叠线以下
                     Text(
-                        text = state.notes,
+                        text = notes,
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier
                             .heightIn(max = 240.dp)
