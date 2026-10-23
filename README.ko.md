@@ -1,4 +1,4 @@
-[中文](README.md) | [English](README.en.md) | [한국어]
+[简体中文](README.md) | [繁體中文](README.zh-TW.md) | [English](README.en.md) | [한국어]
 
 # StayHiFi 音质常驻
 
