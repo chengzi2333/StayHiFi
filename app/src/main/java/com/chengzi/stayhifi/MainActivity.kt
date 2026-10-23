@@ -89,6 +89,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -921,7 +922,25 @@ class MainActivity : ComponentActivity() {
             }
             try {
                 val svc = withContext(Dispatchers.IO) { provider.bind() }
-                val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                // Task 45：ColorOS 可能冻结载体进程使 binder 永久阻塞（ListenerService
+                // 浸泡实测已踩过），dumpDevices/readConfig 各包 8s 超时（同
+                // ListenerService 兜底口径）；超时按「本轮读不到」走与无设备相同的
+                // 清空/早退路径，避免首页协程挂起停旧数据被误诊为「参数显示不出来」。
+                val devicesJson = withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(8_000) { svc.dumpDevices() }
+                }
+                if (devicesJson == null) {
+                    LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+                    homeState = homeState.copy(
+                        headsetName = null, codec = null, rate = null,
+                        bits = null, quality = null,
+                        realtimeKbps = null, realtimeQualityMode = null, fullBars = false,
+                    )
+                    connectedMac = null
+                    connectedName = null
+                    return@launch
+                }
+                val arr = JSONArray(devicesJson)
                 if (arr.length() == 0) {
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
@@ -935,7 +954,20 @@ class MainActivity : ComponentActivity() {
                 }
                 val mac = arr.getJSONObject(0).getString("mac")
                 val name = arr.getJSONObject(0).getString("name")
-                val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
+                val stateJson = withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(8_000) { svc.readConfig(mac) }
+                }
+                if (stateJson == null) {
+                    LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+                    homeState = homeState.copy(
+                        headsetName = null, codec = null, rate = null,
+                        bits = null, quality = null,
+                        realtimeKbps = null, realtimeQualityMode = null, fullBars = false,
+                    )
+                    connectedMac = null
+                    connectedName = null
+                    return@launch
+                }
                 val obj = JSONObject(stateJson)
                 if (obj.has("error")) {
                     LogStore.log("首页 readConfig error: ${obj.optString("error")}")
