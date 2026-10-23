@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import kotlin.math.abs
+import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
@@ -865,6 +866,7 @@ class MainActivity : ComponentActivity() {
                     rate = null,
                     bits = null,
                     quality = null,
+                    realtimeBitrate = null,
                     fullBars = false,
                 )
                 connectedMac = null
@@ -882,7 +884,7 @@ class MainActivity : ComponentActivity() {
                 if (arr.length() == 0) {
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
-                        bits = null, quality = null, fullBars = false,
+                        bits = null, quality = null, realtimeBitrate = null, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -907,12 +909,28 @@ class MainActivity : ComponentActivity() {
                 val fullBars = ApplyPolicy.matches(
                     ApplyPolicy.deriveTarget(current, selectable), current,
                 )
+                // Task 43：同批拉传输层实况（载体本来就绑着，多一次 binder 调用而已）。
+                // 仅 vivo 栈实证可读；其他栈/未流式解析不到 → null，第六格显示「—」。
+                val realtime = try {
+                    val btObj = JSONObject(withContext(Dispatchers.IO) { svc.dumpBtState() })
+                    if (btObj.has("error")) {
+                        null
+                    } else {
+                        BtStateParser.parse(
+                            btObj.optString("dump"), Masks.codecName(current.codecType),
+                        )?.let { BtStateParser.formatDisplay(it) }
+                    }
+                } catch (t: Throwable) {
+                    LogStore.log("传输层实况读取失败（第六格降级显示—）: $t")
+                    null
+                }
                 homeState = homeState.copy(
                     headsetName = name,
                     codec = Masks.codecName(current.codecType),
                     rate = Masks.rateHz(current.sampleRate),
                     bits = Masks.bitsDepth(current.bitsPerSample),
                     quality = Masks.qualityLabel(current.codecType, current.cs1),
+                    realtimeBitrate = realtime,
                     fullBars = fullBars,
                 )
                 connectedMac = mac

@@ -153,6 +153,51 @@ class CodecService : ICodecService.Stub() {
         Log.i(TAG, "destroy")
     }
 
+    // Task 43：传输层实况读取——dumpsys bluetooth_manager 的 "A2DP <codec> State:" 段
+    // 暴露真实传输码率/调度策略（vivo 栈实证：LHDC quality mode=ABR、
+    // transmission bitrate=400000 即 400kbps）。shell uid 有权限跑 dumpsys。
+    // 只回传 State:/quality/bitrate 相关行，减小 binder 负载；解析归 app 侧 BtStateParser。
+    override fun dumpBtState(): String = try {
+        buildJsonObject {
+            put("dump", runDumpsysFiltered(DUMP_TIMEOUT_MS))
+        }.toString()
+    } catch (t: Throwable) {
+        errorJson("dumpBtState", t)
+    }
+
+    /**
+     * 跑 dumpsys bluetooth_manager 并流式过滤（边读边筛）。
+     * stdout/stderr 都必须边跑边读：输出超过管道缓冲区（64KB）时先 waitFor 会双向死锁。
+     * 5s 超时兜底（Task 43）：dumpsys 偶发卡死，超时强杀进程走 errorJson。
+     */
+    private fun runDumpsysFiltered(timeoutMs: Long): String {
+        val proc = Runtime.getRuntime().exec(arrayOf("dumpsys", "bluetooth_manager"))
+        val kept = StringBuilder()
+        val reader = Thread {
+            proc.inputStream.bufferedReader().useLines { lines ->
+                for (line in lines) {
+                    if (line.contains("State:") ||
+                        line.contains("quality", ignoreCase = true) ||
+                        line.contains("bitrate", ignoreCase = true)
+                    ) {
+                        synchronized(kept) { kept.append(line).append('\n') }
+                    }
+                }
+            }
+        }.apply { isDaemon = true; start() }
+        val errDrainer = Thread {
+            proc.errorStream.bufferedReader().readText()
+        }.apply { isDaemon = true; start() }
+        val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+        if (!finished) {
+            proc.destroyForcibly()
+            throw Exception("dumpsys bluetooth_manager 超时（>${timeoutMs}ms）")
+        }
+        reader.join(2_000)
+        errDrainer.join(2_000)
+        return synchronized(kept) { kept.toString() }
+    }
+
     // ─────────────────────────── 内部实现（PoC 一一对应） ───────────────────────────
 
     private fun getA2dp(): BluetoothA2dp {
@@ -399,6 +444,7 @@ class CodecService : ICodecService.Stub() {
 
     companion object {
         private const val TAG = "CodecService"
+        private const val DUMP_TIMEOUT_MS = 5_000L   // Task 43：dumpsys 超时保护
 
         private fun rootCause(t: Throwable): String {
             var cause = t

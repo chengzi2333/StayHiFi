@@ -14,5 +14,10 @@ interface ICodecService {
     // 返回 JSON {applied:Boolean, readbacks:[CodecConfig], final:CodecConfig}，失败 {error:"..."}
     String writeConfig(String mac, String configJson);
 
+    // Task 43：传输层实况——shell uid 跑 dumpsys bluetooth_manager，
+    // 只回传 State:/quality/bitrate 相关行（减小 binder 负载），
+    // 返回 JSON {dump:"..."}，失败 {error:"..."}；解析在 app 侧 BtStateParser。
+    String dumpBtState();
+
     void destroy();
 }

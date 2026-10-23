@@ -341,7 +341,12 @@ class ListenerService : Service() {
                         val name = arr.getJSONObject(0).getString("name")
                         val obj = JSONObject(withContext(Dispatchers.IO) { svc.readConfig(mac) })
                         if (obj.has("error")) null
-                        else "$name · ${CodecConfig.fromJson(obj.getJSONObject("current").toString()).summary()}"
+                        else {
+                            val current =
+                                CodecConfig.fromJson(obj.getJSONObject("current").toString())
+                            checkDrift(mac, name, current)
+                            "$name · ${current.summary()}"
+                        }
                     }
                 } finally {
                     provider.unbind()
@@ -353,6 +358,34 @@ class ListenerService : Service() {
         } catch (t: Throwable) {
             LogStore.log("常驻通知读取参数失败: $t")
             null
+        }
+    }
+
+    /**
+     * Task 43 参数漂移提醒：轮询读回与「最近一次已验证生效目标」不一致时，
+     * 弹一条结果通知「检测到系统改回了参数」+ 记 LogStore；每轮漂移期只弹一次，
+     * 读回恢复一致（系统协商回来/用户重新拉满）后重置标志，下次漂移可再提醒。
+     *
+     * 取舍：漂移判定只挂在 notifyPersistent=on 的 30s 轮询路径上（off 时没有轮询，
+     * 靠连接事件自然重拉即可，不为漂移提醒额外唤醒载体）；通知本身受 notifyResult 开关控制。
+     */
+    private suspend fun checkDrift(mac: String, name: String, current: CodecConfig) {
+        val target = VerifiedTargetStore.targetFor(mac) ?: return
+        if (ApplyPolicy.matches(target, current)) {
+            if (VerifiedTargetStore.isNotified(mac)) {
+                VerifiedTargetStore.resetNotified(mac)
+                LogStore.log("$name 参数已恢复与拉满目标一致")
+            }
+            return
+        }
+        if (VerifiedTargetStore.isNotified(mac)) return
+        VerifiedTargetStore.markNotified(mac)
+        LogStore.log("检测到参数漂移: $name ($mac) 目标 ${target.summary()}，读回 ${current.summary()}")
+        if (settings.isNotifyResult()) {
+            notifier.notifyResult(
+                "检测到系统改回了参数",
+                "$name 当前 ${current.summary()}，与已拉满目标 ${target.summary()} 不符",
+            )
         }
     }
 

@@ -1,0 +1,90 @@
+package com.chengzi.stayhifi.codec
+
+/**
+ * Task 43：解析 dumpsys bluetooth_manager 中 "A2DP <codec> State:" 段落的传输层实况，
+ * 给首页第六格「实际传输」供数。纯函数、无 Android 依赖，单测覆盖（BtStateParserTest）。
+ *
+ * 实证样本（iQOO 15 / OriginOS 7，2026-10-23 真机取证）：
+ *   A2DP LHDC V5 State:
+ *     LHDC quality mode            : ABR
+ *     LHDC transmission bitrate (Kbps) :400000   ← 字段名标错了，值实为 bps，400000=400kbps
+ *     Packet counts (expected/dropped) : 0 / 8077
+ *
+ * 已知边界（诚实原则）：该段落仅 vivo 栈实证可读；其他厂商栈没有此段落或格式不同 → 返回
+ * null，UI 降级显示「—」。bitrate = -1 表示未在流式传输（实证于 LDAC 段）。
+ */
+object BtStateParser {
+
+    /** 一段传输层实况：qualityMode 如 "ABR"/"HIGH"；bitrateKbps 归一化后的 kbps，null=未流式/读不到。 */
+    data class BtState(
+        val codec: String,
+        val qualityMode: String?,
+        val bitrateKbps: Int?,
+    )
+
+    private val SECTION_HEADER = Regex("^A2DP\\s+(.+?)\\s+State:")
+
+    /**
+     * 从 dumpsys 文本中找 [codecName]（如 "LHDC"/"LDAC"，与 Masks.codecName 输出一致）对应段落，
+     * 提取 quality mode 与 transmission bitrate；段落不存在 → null。
+     * 段名匹配用「去空格/连字符后 contains」：覆盖 "LHDC V5" 这类带后缀的段名，
+     * 也兼容 "aptX HD" 与 codecName "aptX-HD" 的写法差异。
+     */
+    fun parse(dump: String, codecName: String): BtState? {
+        val wanted = normalize(codecName)
+        if (wanted.isEmpty()) return null
+        var inSection = false
+        var found = false
+        var qualityMode: String? = null
+        var bitrateKbps: Int? = null
+        for (raw in dump.lineSequence()) {
+            val line = raw.trim()
+            val header = SECTION_HEADER.find(line)
+            if (header != null) {
+                inSection = normalize(header.groupValues[1]).contains(wanted)
+                if (inSection) found = true
+                continue
+            }
+            if (!inSection) continue
+            if (line.contains("quality mode", ignoreCase = true)) {
+                val v = line.substringAfterLast(':').trim()
+                if (v.isNotEmpty()) qualityMode = v
+            } else if (line.contains("transmission bitrate", ignoreCase = true)) {
+                // 非数字值（如 AAC 的 "bitrate mode : Constant" 不匹配本分支）跳过；
+                // 数字非法也跳过，不污染已解析到的值
+                val v = line.substringAfterLast(':').trim().toLongOrNull() ?: continue
+                bitrateKbps = normalizeBitrate(v)
+            }
+        }
+        if (!found) return null
+        return BtState(codecName, qualityMode, bitrateKbps)
+    }
+
+    /**
+     * 首页第六格显示文案：读不到/未流式 → null（UI 显示「—」，cell 占位不动）。
+     * quality mode 含 ABR 时带后缀（如「400k · ABR」——ABR=自适应调度，是
+     * 「设置层拉满但传输层没拉满」的关键证据），否则纯码率。
+     */
+    fun formatDisplay(state: BtState): String? {
+        val kbps = state.bitrateKbps ?: return null
+        val qm = state.qualityMode
+        return if (qm != null && qm.contains("ABR", ignoreCase = true)) {
+            "${kbps}k · $qm"
+        } else {
+            "${kbps}k"
+        }
+    }
+
+    /**
+     * 归一化为 kbps：值 >10000 判定为 bps 单位 ÷1000（vivo 栈字段名误标 "(Kbps)"，
+     * 实测 400000 对应 400kbps）；≤0（如 -1）表示未在流式传输 → null；其余按 kbps 原样。
+     */
+    private fun normalizeBitrate(raw: Long): Int? = when {
+        raw <= 0 -> null
+        raw > 10_000 -> (raw / 1000).toInt()
+        else -> raw.toInt()
+    }
+
+    private fun normalize(s: String): String =
+        s.replace(" ", "").replace("-", "").uppercase()
+}

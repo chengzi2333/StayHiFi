@@ -110,6 +110,8 @@ class ApplyWorker(context: Context) {
             if (!ApplyPolicy.decide(current, candidate)) {
                 log("当前已是本机最高 ${candidate.summary()}，跳过写入")
                 notifyResult("音质已拉满", "${name ?: mac} 已是本机最高音质输出")
+                // Task 43：早退=读回已验证与本机最高一致，记入漂移基准（漂移提醒用）。
+                VerifiedTargetStore.record(mac, candidate)
                 // Task 36 Bug C：老用户重装后参数已被上次装机拉满（蓝牙栈保存），必命中此早退分支，
                 // 此前直接 return 不走 autoCreateProfile，设备页永远空白。
                 // 读回即验证：current 是 settled 阶段读回的真实生效配置，
@@ -125,6 +127,10 @@ class ApplyWorker(context: Context) {
             log("写入候选: ${candidate.summary()}")
             if (writeVerified(service, mac, candidate)) {
                 notifyResult("音质拉满成功", "${name ?: mac} → ${candidate.summary()}")
+                // Task 43：写入+读回验证通过 → 记入漂移基准（漂移提醒用）。
+                // 注意：漂移比对用 ApplyPolicy.matches（含 cs1），而服务端 applied 判定
+                // 不含 cs1——栈未套用 cs1 的罕见情况会被判成漂移，属可接受的保守误报。
+                VerifiedTargetStore.record(mac, candidate)
                 // Task 35：确认实际生效（写入+读回验证通过）后才建档，不是写完就建；
                 // 档案 config 记录读回的真实落点（非派生目标）。
                 autoCreateProfile(mac, name, readState(service, mac)?.current ?: candidate, origin = current)
@@ -246,6 +252,8 @@ class ApplyWorker(context: Context) {
                 val actual = readState(service, mac)?.current
                 if (actual != null && ApplyPolicy.matches(origin, actual)) {
                     log("恢复默认成功 ✓ 读回=${actual.summary()}")
+                    // Task 43：后悔药生效后旧的拉满目标作废，否则轮询立刻把默认参数误报成漂移
+                    VerifiedTargetStore.clear(mac)
                     notifyResult("已恢复默认参数", "$name → ${actual.summary()}")
                     true
                 } else {

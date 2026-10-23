@@ -45,6 +45,11 @@ data class HomeUiState(
     val bits: String? = null,
     /** 码率质量档（如 "1000kbps"/"自适应"）；null 表示未识别。 */
     val quality: String? = null,
+    /**
+     * Task 43：传输层实况（如 "400k · ABR"），来自 dumpsys 的 "A2DP State:" 段。
+     * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null，第六格显示「—」（诚实原则）。
+     */
+    val realtimeBitrate: String? = null,
     /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
     val fullBars: Boolean = false,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
@@ -234,7 +239,7 @@ private fun StatusCard(state: HomeUiState) {
     }
 }
 
-/** 状态卡唯一的状态文案：两态（Task 27）——真话文案，明细参数看下方 2×2 明细格。 */
+/** 状态卡唯一的状态文案：两态（Task 27）——真话文案，明细参数看下方 2×3 明细格。 */
 @Composable
 private fun StatusLine(state: HomeUiState) {
     val text = when {
@@ -249,26 +254,38 @@ private fun StatusLine(state: HomeUiState) {
     )
 }
 
-/** 2×2 明细格：编码器 / 采样率 / 位深 / 码率，各格 label + 值（未知显示 "—"）。 */
+/**
+ * 明细格：编码器 / 采样率 / 位深 / 码率 + 第六格「实际传输」（Task 43，2×2 → 2×3）。
+ * 各格 label + 值（未知显示 "—"）；第六格读不到传输层实况时也常驻占位，
+ * 六格结构稳定不跳动（左下留空，实际传输固定右下=第六格）。
+ */
 @Composable
 private fun DetailGrid(state: HomeUiState) {
-    val cells = listOf(
-        "编码器" to state.codec,
-        "采样率" to state.rate,
-        "位深" to state.bits,
-        "码率" to state.quality,
-    )
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        cells.chunked(2).forEach { row ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                row.forEach { (label, value) ->
-                    DetailCell(label = label, value = value, modifier = Modifier.weight(1f))
-                }
-            }
+        DetailRow("编码器" to state.codec, "采样率" to state.rate)
+        DetailRow("位深" to state.bits, "码率" to state.quality)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Spacer(Modifier.weight(1f))
+            DetailCell(
+                label = "实际传输",
+                value = state.realtimeBitrate,
+                modifier = Modifier.weight(1f),
+            )
         }
+    }
+}
+
+@Composable
+private fun DetailRow(left: Pair<String, String?>, right: Pair<String, String?>) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        DetailCell(label = left.first, value = left.second, modifier = Modifier.weight(1f))
+        DetailCell(label = right.first, value = right.second, modifier = Modifier.weight(1f))
     }
 }
 
@@ -339,6 +356,7 @@ private fun HomeScreenPreviewLight() {
                 rate = "192kHz",
                 bits = "24bit",
                 quality = "1000kbps",
+                realtimeBitrate = "400k · ABR",
                 fullBars = true,
                 autoApplyEnabled = true,
             ),
