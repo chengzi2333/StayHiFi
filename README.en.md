@@ -40,7 +40,7 @@ StayHiFi does exactly one thing: the instant a headset connects, it writes the p
 StayHiFi obtains shell-level privileges through **Shizuku or Stellar** (either one), then calls the system Bluetooth stack's hidden `setCodecConfigPreference()` API via reflection to write the A2DP codec configuration.
 
 - It does **not** patch the system, unlock hidden codecs, or exceed the hardware-negotiated capability ceiling
-- The only external interaction is local IPC with Shizuku/Stellar — zero network requests
+- The only feature-level external interaction is local IPC with Shizuku/Stellar; the sole network request is the GitHub Releases version check
 
 ## Install
 
@@ -71,7 +71,8 @@ There are countless device models out there and vendor ROMs vary wildly, so some
 ## Privacy
 
 - **Zero data collection**: all data stays on your device only — no network uploads, no analytics, no account system
-- The only external interaction is local IPC with Shizuku/Stellar
+- **The only network request** is the GitHub Releases version check — it compares version numbers only and carries no device information (at most one silent check per day, or manually from the Settings page)
+- All other external interaction is local IPC with Shizuku/Stellar
 
 ## Disclaimer
 

@@ -40,7 +40,7 @@ StayHiFi 只做一件事：连上耳机的一瞬间，替你把参数写回这�
 通过 **Shizuku 或 Stellar**（任选其一）获得 shell 级特权，反射调用系统蓝牙栈的隐藏接口 `setCodecConfigPreference()` 写入 A2DP codec 配置。
 
 - **不 patch 系统、不解锁隐藏 codec**，不突破硬件已协商的能力上限
-- 唯一的外部交互是与 Shizuku/Stellar 的本机 IPC，零网络请求
+- 功能层面的外部交互仅是与 Shizuku/Stellar 的本机 IPC；唯一网络请求是 GitHub Releases 版本检查
 
 ## 安装
 
@@ -71,7 +71,8 @@ StayHiFi 只做一件事：连上耳机的一瞬间，替你把参数写回这�
 ## 隐私
 
 - **零数据采集**：所有数据只保存在本机，无网络上传、无统计埋点、无账号体系
-- 唯一的外部交互是与 Shizuku/Stellar 的本机 IPC
+- **唯一网络请求** = GitHub Releases 版本检查（仅版本号比对，不携带任何设备信息；每天至多一次静默检查，也可在设置页手动触发）
+- 其余唯一的外部交互是与 Shizuku/Stellar 的本机 IPC
 
 ## 免责声明
 

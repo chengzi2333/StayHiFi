@@ -5,6 +5,7 @@ import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -30,6 +31,8 @@ class SettingsRepository(private val context: Context) {
         val NOTIFY_PERSISTENT = booleanPreferencesKey("notifyPersistent")
         val QS_TILE = booleanPreferencesKey("qsTile")
         val ONBOARDED = booleanPreferencesKey("onboarded")
+        // Task 38：上次更新检查时间戳（24h 节流，毫秒）
+        val LAST_UPDATE_CHECK = longPreferencesKey("lastUpdateCheckMillis")
     }
 
     val autoEnabled: Flow<Boolean> = context.settingsDataStore.data
@@ -42,6 +45,9 @@ class SettingsRepository(private val context: Context) {
         .map { it[K.QS_TILE] ?: false }
     val onboarded: Flow<Boolean> = context.settingsDataStore.data
         .map { it[K.ONBOARDED] ?: false }
+    /** Task 38：上次更新检查时间戳（0 = 从未检查）。 */
+    val lastUpdateCheckMillis: Flow<Long> = context.settingsDataStore.data
+        .map { it[K.LAST_UPDATE_CHECK] ?: 0L }
 
     suspend fun isAutoEnabled(): Boolean = autoEnabled.first()
     suspend fun isNotifyResult(): Boolean = notifyResult.first()
@@ -51,6 +57,11 @@ class SettingsRepository(private val context: Context) {
     suspend fun setNotifyPersistent(v: Boolean) = put(K.NOTIFY_PERSISTENT, v)
     suspend fun setQsTile(v: Boolean) = put(K.QS_TILE, v)
     suspend fun setOnboarded(v: Boolean) = put(K.ONBOARDED, v)
+
+    /** Task 38：记录一次更新检查（成功/失败都记，保证 24h 内不重复联网）。 */
+    suspend fun setLastUpdateCheckMillis(v: Long) {
+        context.settingsDataStore.edit { it[K.LAST_UPDATE_CHECK] = v }
+    }
 
     private suspend fun put(key: androidx.datastore.preferences.core.Preferences.Key<Boolean>, v: Boolean) {
         context.settingsDataStore.edit { it[key] = v }

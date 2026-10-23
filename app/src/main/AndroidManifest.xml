@@ -13,6 +13,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <!-- 开机拉起 ListenerService -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Task 38：GitHub Releases 版本检查 / 应用内下载 APK（全应用唯一网络用途，隐私口径见 README） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Task 38：下载完成后拉起系统安装器（同签名覆盖装，系统会要一次「安装未知应用」授权） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- 包可见性：真机实测缺它导致 Shizuku/Stellar 安装探测误报 -->
     <queries>
@@ -89,5 +93,16 @@
             android:exported="true"
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!-- Task 38：自更新 APK 的 FileProvider，仅暴露应用专属外部 Download 目录 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

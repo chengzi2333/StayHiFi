@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.service.quicksettings.TileService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -33,6 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import kotlin.math.abs
 import com.chengzi.stayhifi.codec.CodecConfig
@@ -69,15 +71,20 @@ import com.chengzi.stayhifi.ui.onboarding.RecordWizard
 import com.chengzi.stayhifi.ui.settings.SettingsAction
 import com.chengzi.stayhifi.ui.settings.SettingsScreen
 import com.chengzi.stayhifi.ui.settings.SettingsUiState
+import com.chengzi.stayhifi.ui.settings.UpdateDialog
+import com.chengzi.stayhifi.ui.settings.UpdateDialogUi
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
+import com.chengzi.stayhifi.updater.UpdateChecker
 import com.chengzi.stayhifi.util.DeviceNames
 import com.chengzi.stayhifi.util.KeepAlive
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -118,6 +125,12 @@ class MainActivity : ComponentActivity() {
     private var logsVisible by mutableStateOf(false)
     private var logs by mutableStateOf<List<String>>(emptyList())
 
+    // ---- 自更新（Task 38） ----
+    private var updateChecking by mutableStateOf(false)
+    private var updateMessage by mutableStateOf<String?>(null)
+    private var updateDialog by mutableStateOf<UpdateDialogUi?>(null)
+    private var updateDownloadJob: Job? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         provider = ShizukuShellProvider(this)
@@ -148,8 +161,20 @@ class MainActivity : ComponentActivity() {
                     onSave = ::onWizardSave,
                     onDismiss = ::onWizardDismiss,
                 )
+
+                // Task 38：更新弹窗挂在根组合——自动检查弹窗不依赖用户正停留在设置页
+                updateDialog?.let { dialog ->
+                    UpdateDialog(
+                        state = dialog,
+                        onConfirm = ::onUpdateConfirm,
+                        onDismiss = ::onUpdateDismiss,
+                    )
+                }
             }
         }
+
+        // Task 38：自动更新检查——距上次 ≥24h 才联网，静默；仅新版本时弹窗（每进程最多一次）
+        autoCheckUpdate()
     }
 
     override fun onResume() {
@@ -265,6 +290,8 @@ class MainActivity : ComponentActivity() {
                                 notifyPersistent = notifyPersistentOn,
                                 qsTile = qsTileOn,
                                 batteryWhitelisted = KeepAlive.isBatteryWhitelisted(this@MainActivity),
+                                checkingUpdate = updateChecking,
+                                updateMessage = updateMessage,
                             ),
                             onAction = ::onSettingsAction,
                         )
@@ -331,20 +358,149 @@ class MainActivity : ComponentActivity() {
                 logsVisible = true
             }
             SettingsAction.CheckUpdate -> onCheckUpdate()
+            SettingsAction.DismissUpdateMessage -> updateMessage = null
         }
     }
 
-    /** 纯浏览器跳 GitHub Releases，不申请 INTERNET 权限。 */
+    // ================= 自更新（Task 38） =================
+
+    /**
+     * 手动检查更新（设置页「检查更新」）：
+     * Latest → 内联提示「已是最新版本」；NewAvailable → 弹窗；Error → 提示重试。
+     * 手动检查同样刷新 24h 节流时间戳（刚查过就别让自动检查立刻再联网）。
+     */
     private fun onCheckUpdate() {
+        if (updateChecking) return
+        updateChecking = true
+        updateMessage = null
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                UpdateChecker.checkLatest(BuildConfig.VERSION_NAME)
+            }
+            runCatching {
+                settingsRepo.setLastUpdateCheckMillis(System.currentTimeMillis())
+            }
+            updateChecking = false
+            when (result) {
+                UpdateChecker.Result.Latest -> updateMessage = "已是最新版本"
+                is UpdateChecker.Result.NewAvailable -> {
+                    updateDialog = UpdateDialogUi(
+                        tag = result.tag,
+                        notes = result.notes,
+                        apkUrl = result.apkUrl,
+                    )
+                }
+                is UpdateChecker.Result.Error -> {
+                    LogStore.log("检查更新失败: ${result.cause}")
+                    updateMessage = "检查失败，请确认能访问 GitHub 后重试"
+                }
+            }
+        }
+    }
+
+    /**
+     * 自动检查：仅 onboarded 后；距上次 ≥24h 才联网；Latest/Error 完全静默，
+     * NewAvailable 才弹同款弹窗，且每进程最多弹一次（伴生对象标志，配置变更重建也算已弹）。
+     */
+    private fun autoCheckUpdate() {
+        lifecycleScope.launch {
+            try {
+                if (!settingsRepo.onboarded.first()) return@launch
+                val last = settingsRepo.lastUpdateCheckMillis.first()
+                if (System.currentTimeMillis() - last < AUTO_CHECK_INTERVAL_MS) return@launch
+                // 发起即记账：失败也节流，避免无网环境每次启动都白请求一次
+                settingsRepo.setLastUpdateCheckMillis(System.currentTimeMillis())
+                val result = withContext(Dispatchers.IO) {
+                    UpdateChecker.checkLatest(BuildConfig.VERSION_NAME)
+                }
+                if (result is UpdateChecker.Result.NewAvailable && !autoDialogShownThisProcess) {
+                    autoDialogShownThisProcess = true
+                    updateDialog = UpdateDialogUi(
+                        tag = result.tag,
+                        notes = result.notes,
+                        apkUrl = result.apkUrl,
+                    )
+                    LogStore.log("自动检查：发现新版本 ${result.tag}")
+                }
+            } catch (t: Throwable) {
+                LogStore.log("自动检查更新失败: $t")
+            }
+        }
+    }
+
+    /** 「立即更新/重试」：应用内下载 APK 到应用专属 Download 目录，完成拉起系统安装器。 */
+    private fun onUpdateConfirm() {
+        val dialog = updateDialog ?: return
+        if (dialog.downloading) return
+        val dest = File(
+            getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+            "StayHiFi-${dialog.tag}.apk",
+        )
+        updateDialog = dialog.copy(
+            downloading = true, error = null, progressPercent = null, downloadedMb = 0f,
+        )
+        updateDownloadJob = lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                UpdateChecker.downloadApk(dialog.apkUrl, dest) { downloaded, total ->
+                    // 进度直写 snapshot state（快照系统允许跨线程写），省掉每 64KB 一次切线程
+                    updateDialog?.takeIf { it.downloading }?.let { cur ->
+                        updateDialog = cur.copy(
+                            progressPercent = if (total > 0) (downloaded * 100 / total).toInt() else null,
+                            downloadedMb = downloaded / 1048576f,
+                        )
+                    }
+                }
+                withContext(Dispatchers.Main) { installApk(dest) }
+            } catch (t: Throwable) {
+                // 失败删半成品，弹窗报错可重试（取消也走这里，无需单独处理）
+                dest.delete()
+                if (t !is kotlinx.coroutines.CancellationException) {
+                    LogStore.log("下载更新包失败: $t")
+                }
+                withContext(Dispatchers.Main) {
+                    // 弹窗已被用户关闭则不复活
+                    updateDialog?.let {
+                        updateDialog = it.copy(
+                            downloading = false,
+                            error = if (t is kotlinx.coroutines.CancellationException) null
+                                else "下载失败，请检查网络后重试",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /** 取消/关闭弹窗：下载中则取消任务并删半成品文件。 */
+    private fun onUpdateDismiss() {
+        updateDialog?.takeIf { it.downloading }?.let { dialog ->
+            updateDownloadJob?.cancel()
+            File(
+                getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+                "StayHiFi-${dialog.tag}.apk",
+            ).delete()
+        }
+        updateDownloadJob = null
+        updateDialog = null
+    }
+
+    /** FileProvider 拉起系统安装器：同签名覆盖装数据不丢；不同签名系统直接拒装兜底。 */
+    private fun installApk(file: File) {
+        val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
         try {
-            startActivity(
-                Intent(
-                    Intent.ACTION_VIEW,
-                    Uri.parse("https://github.com/chengzi2333/StayHiFi/releases"),
-                ),
-            )
+            startActivity(intent)
+            updateDialog = null
+            LogStore.log("更新包下载完成，已拉起系统安装器: ${file.name}")
         } catch (t: Throwable) {
-            LogStore.log("打开 Releases 失败: $t")
+            updateDialog = updateDialog?.copy(
+                downloading = false,
+                error = "无法拉起系统安装器，请到系统文件管理器手动安装",
+            )
+            LogStore.log("拉起安装器失败: $t")
         }
     }
 
@@ -814,5 +970,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val STELLAR_PACKAGE = "roro.stellar.manager"
+        /** Task 38：自动更新检查节流间隔（24h）。 */
+        private const val AUTO_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
+        /** Task 38：自动弹窗每进程最多一次（伴生对象，配置变更重建后仍记得已弹过）。 */
+        private var autoDialogShownThisProcess = false
     }
 }

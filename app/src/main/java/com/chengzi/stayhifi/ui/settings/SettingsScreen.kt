@@ -7,16 +7,22 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -34,6 +40,10 @@ data class SettingsUiState(
     val qsTile: Boolean = false,
     /** 电池白名单状态（展示用）。 */
     val batteryWhitelisted: Boolean = false,
+    /** Task 38：更新检查进行中（按钮 loading 态）。 */
+    val checkingUpdate: Boolean = false,
+    /** Task 38：检查结果内联提示（已是最新/检查失败），非 null 时弹 snackbar。 */
+    val updateMessage: String? = null,
 )
 
 /** 设置页全部动作上抛，本层无逻辑。 */
@@ -45,8 +55,10 @@ sealed interface SettingsAction {
     data object OpenBatteryWhitelist : SettingsAction
     data object OpenBackgroundPower : SettingsAction
     data object OpenLogs : SettingsAction
-    /** 浏览器跳转 GitHub Releases 检查更新。 */
+    /** Task 38：应用内检查 GitHub Releases 新版本（不再跳浏览器）。 */
     data object CheckUpdate : SettingsAction
+    /** Task 38：检查结果 snackbar 展示完毕，清掉提示。 */
+    data object DismissUpdateMessage : SettingsAction
 }
 
 /**
@@ -58,7 +70,21 @@ fun SettingsScreen(
     onAction: (SettingsAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Scaffold(modifier = modifier) { innerPadding ->
+    Scaffold(
+        modifier = modifier,
+        snackbarHost = {
+            // Task 38：检查结果提示（已是最新 / 检查失败）
+            val snackbarHostState = remember { SnackbarHostState() }
+            LaunchedEffect(state.updateMessage) {
+                val msg = state.updateMessage
+                if (msg != null) {
+                    snackbarHostState.showSnackbar(msg)
+                    onAction(SettingsAction.DismissUpdateMessage)
+                }
+            }
+            SnackbarHost(hostState = snackbarHostState)
+        },
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .padding(innerPadding)
@@ -205,16 +231,24 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         Text(
-                            text = "当前 v${BuildConfig.VERSION_NAME} · 前往 GitHub Releases",
+                            text = "当前 v${BuildConfig.VERSION_NAME} · 应用内检查 GitHub 新版本",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Text(
-                        text = "去查看",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                    if (state.checkingUpdate) {
+                        // Task 38：检查中转圈
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text(
+                            text = "检查",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
             }
             Card(
