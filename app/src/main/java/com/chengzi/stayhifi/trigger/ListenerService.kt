@@ -147,6 +147,12 @@ class ListenerService : Service() {
         ContextCompat.registerReceiver(
             this, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
         LogStore.log("ListenerService 前台服务已启动（FGS 主触发）")
+
+        // Task 37：耳机先于 App 连接时不产生 ACL_CONNECTED 广播，ApplyWorker
+        // 从未运行（logcat 实证：引导完成后服务启动，无任何派生/写入/建档记录）。
+        // 启动末尾补跑一次「启动补触发」覆盖该场景。onCreate 语义更准（每实例一次），
+        // 且幂等——已拉满走 Task 36 早退分支（仍建档），重复触发无害。
+        scope.launch { retriggerIfAlreadyConnected() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -205,6 +211,60 @@ class ListenerService : Service() {
             // 写入成功后立即刷新一次通知正文
             HeadsetEvents.bump()
             refreshNotification()
+        }
+    }
+
+    // ================= 启动补触发（Task 37） =================
+
+    /**
+     * Task 37 启动补触发：服务启动时若本机 A2DP 已连接（耳机先于 App 连接，
+     * ACL_CONNECTED 广播已错过，ApplyWorker 永远不会被触发），经载体 dumpDevices
+     * 取回全部已连接设备（参照 MainActivity.onRefreshConnection 写法），逐台补跑
+     * ApplyWorker.run——force=false 尊重 autoApply=false 拦截；ApplyLock 自带互斥
+     * 串行，顺序调用即可。
+     *
+     * 幂等：已是最高 → Task 36 早退分支（仍建档）；未拉满 → 正常写入+建档。
+     * 载体未就绪/未授权/超时/空列表 → 记一句跳过原因，不报错不崩；
+     * 载体调用整体包 withTimeoutOrNull（同 readConnectedSummary 的
+     * CARRIER_READ_TIMEOUT_MS），防 vivo 冻结 codec 进程的永久阻塞（Task 31 教训）。
+     * 日志以「启动补触发」前缀区分信号源，便于浸泡排查。
+     */
+    private suspend fun retriggerIfAlreadyConnected() {
+        if (!isA2dpConnectedLocally()) return
+        if (!provider.isRunning || !provider.hasPermission) {
+            LogStore.log("启动补触发：载体未就绪或未授权，跳过")
+            return
+        }
+        try {
+            val devices = withTimeoutOrNull(CARRIER_READ_TIMEOUT_MS) {
+                val svc = withContext(Dispatchers.IO) { provider.bind() }
+                try {
+                    JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                } finally {
+                    provider.unbind()
+                }
+            }
+            if (devices == null) {
+                LogStore.log("启动补触发：载体读取超时（进程可能被系统冻结），跳过")
+                return
+            }
+            if (devices.length() == 0) {
+                LogStore.log("启动补触发：本机 A2DP 已连接但载体设备列表为空，跳过")
+                return
+            }
+            for (i in 0 until devices.length()) {
+                val obj = devices.getJSONObject(i)
+                val mac = obj.getString("mac")
+                val name = obj.getString("name")
+                LogStore.log("启动补触发：发现已连接设备 $name ($mac)，补跑 ApplyWorker")
+                try {
+                    ApplyWorker(this).run(mac, name)
+                } catch (t: Throwable) {
+                    LogStore.log("启动补触发 ApplyWorker 未捕获异常: $t")
+                }
+            }
+        } catch (t: Throwable) {
+            LogStore.log("启动补触发失败: $t")
         }
     }
 
