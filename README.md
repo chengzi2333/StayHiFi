@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/marketing/logo.png" width="128" alt="StayHiFi logo">
+  <img src="docs/assets/logo.png" width="128" alt="StayHiFi logo">
   <h1>StayHiFi 音质常驻</h1>
   <p><strong>蓝牙耳机一连，自动拉满音质——免 root，装完就不用管</strong></p>
   <p>[简体中文] | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.en.md">English</a> | <a href="README.ko.md">한국어</a></p>
@@ -20,9 +20,9 @@ StayHiFi 只做一件事：连上耳机的一瞬间，替你把参数写回这�
 ## 截图
 
 <p>
-  <img src="docs/marketing/screenshots/01-home.png" width="260" alt="首页状态卡">
-  <img src="docs/marketing/screenshots/02-devices.png" width="260" alt="设备页">
-  <img src="docs/marketing/screenshots/03-settings.png" width="260" alt="设置页">
+  <img src="docs/assets/screenshots/01-home.png" width="260" alt="首页状态卡">
+  <img src="docs/assets/screenshots/02-devices.png" width="260" alt="设备页">
+  <img src="docs/assets/screenshots/03-settings.png" width="260" alt="设置页">
 </p>
 
 ## 功能特性

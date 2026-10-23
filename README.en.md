@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/marketing/logo.png" width="128" alt="StayHiFi logo">
+  <img src="docs/assets/logo.png" width="128" alt="StayHiFi logo">
   <h1>StayHiFi</h1>
   <p><strong>Bluetooth on, quality maxed — no root, set it up once and forget it</strong></p>
   <p><a href="README.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | [English] | <a href="README.ko.md">한국어</a></p>
@@ -20,9 +20,9 @@ StayHiFi does exactly one thing: the instant a headset connects, it writes the p
 ## Screenshots
 
 <p>
-  <img src="docs/marketing/screenshots/01-home.png" width="260" alt="Home status card">
-  <img src="docs/marketing/screenshots/02-devices.png" width="260" alt="Devices page">
-  <img src="docs/marketing/screenshots/03-settings.png" width="260" alt="Settings page">
+  <img src="docs/assets/screenshots/01-home.png" width="260" alt="Home status card">
+  <img src="docs/assets/screenshots/02-devices.png" width="260" alt="Devices page">
+  <img src="docs/assets/screenshots/03-settings.png" width="260" alt="Settings page">
 </p>
 
 ## Features

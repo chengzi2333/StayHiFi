@@ -7,3 +7,4 @@ local.properties
 *.iml
 .DS_Store
 .analysis/
+docs/marketing/

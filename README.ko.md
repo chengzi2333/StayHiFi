@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/marketing/logo.png" width="128" alt="StayHiFi logo">
+  <img src="docs/assets/logo.png" width="128" alt="StayHiFi logo">
   <h1>StayHiFi</h1>
   <p><strong>블루투스만 연결하면 음질이 최대치로 — 루트 불필요, 한 번 설치하면 끝</strong></p>
   <p><a href="README.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.en.md">English</a> | [한국어]</p>
@@ -20,9 +20,9 @@ StayHiFi는 정확히 한 가지만 합니다. 헤드폰이 연결되는 순간,
 ## 스크린샷
 
 <p>
-  <img src="docs/marketing/screenshots/01-home.png" width="260" alt="홈 상태 카드">
-  <img src="docs/marketing/screenshots/02-devices.png" width="260" alt="기기 페이지">
-  <img src="docs/marketing/screenshots/03-settings.png" width="260" alt="설정 페이지">
+  <img src="docs/assets/screenshots/01-home.png" width="260" alt="홈 상태 카드">
+  <img src="docs/assets/screenshots/02-devices.png" width="260" alt="기기 페이지">
+  <img src="docs/assets/screenshots/03-settings.png" width="260" alt="설정 페이지">
 </p>
 
 ## 주요 기능
