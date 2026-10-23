@@ -25,6 +25,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +35,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val PAGE_COUNT = 5
@@ -106,6 +108,19 @@ fun OnboardingScreen(
 ) {
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { PAGE_COUNT })
     val scope = rememberCoroutineScope()
+
+    // Task 36 Bug B：翻到第三步（page 2）自动检测一次，停留期间每 2.5s 轮询连接态；
+    // 已连接或离开页面时 key 变化、协程自动取消即停。「刷新」按钮保留作兜底。
+    val onConnectPage = pagerState.currentPage == 2
+    LaunchedEffect(onConnectPage, state.headsetConnected) {
+        if (onConnectPage && !state.headsetConnected) {
+            onAction(OnboardingAction.RefreshConnection)
+            while (true) {
+                delay(2500)
+                onAction(OnboardingAction.RefreshConnection)
+            }
+        }
+    }
 
     Scaffold(modifier = modifier) { innerPadding ->
         Column(
@@ -251,6 +266,15 @@ private fun CarrierCard(
             CarrierStatusRow("已安装", carrier.installed)
             CarrierStatusRow("运行中", carrier.running)
             CarrierStatusRow("已授权", carrier.granted)
+            // Task 36 Bug A：授权弹窗由 Stellar 自己渲染且沿用了 Shizuku 文案（改不了它的字），
+            // 提前说明，避免用户看到「允许使用 Shizuku」以为装错了 App。
+            if (carrier.kind == CarrierKind.STELLAR) {
+                Text(
+                    text = "授权弹窗由 Stellar 提供，显示 Shizuku 字样属正常——Stellar 是 Shizuku 的兼容分支。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (!carrier.installed) {
                     Button(

@@ -110,6 +110,11 @@ class ApplyWorker(context: Context) {
             if (!ApplyPolicy.decide(current, candidate)) {
                 log("当前已是本机最高 ${candidate.summary()}，跳过写入")
                 notifyResult("音质已拉满", "${name ?: mac} 已是本机最高音质输出")
+                // Task 36 Bug C：老用户重装后参数已被上次装机拉满（蓝牙栈保存），必命中此早退分支，
+                // 此前直接 return 不走 autoCreateProfile，设备页永远空白。
+                // 读回即验证：current 是 settled 阶段读回的真实生效配置，
+                // 早退=已验证与本机最高一致，同样够建档资格。
+                autoCreateProfile(mac, name, current)
                 return
             }
             log("写入候选: ${candidate.summary()}")
