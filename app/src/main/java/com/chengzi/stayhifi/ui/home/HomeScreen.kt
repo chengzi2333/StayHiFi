@@ -12,12 +12,15 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -50,13 +53,17 @@ data class HomeUiState(
     val quality: String? = null,
     /**
      * Task 43/44：传输层实况码率（kbps，如 400），来自 dumpsys 的 "A2DP <codec> State:" 段。
-     * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null，实际传输卡显示「—」（诚实原则）。
+     * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null，实际传输行显示「—（本机栈不暴露）」。
+     * Task 45：该值在 vivo LHDC 下是粘性值（停播仍报 400000），是否真在播放以
+     * realtimeNotStreaming 为准（PCM read 计数增量判定，见 MainActivity）。
      */
     val realtimeKbps: Int? = null,
     /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。 */
     val realtimeQualityMode: String? = null,
     /**
-     * Task 44：栈明确回报未在流式传输（bitrate ≤ 0，实证 -1）→ 卡片显示「未在播放」。
+     * Task 44/45：判定为未在流式传输 → 实际传输行显示「未在播放」。
+     * 两条路径：栈明确回报 bitrate ≤ 0（LDAC 实证 -1）；
+     * 或 PCM read actual 计数相邻两次轮询不涨（Task 45，修 vivo LHDC 粘性值）。
      * 与「栈不暴露数据」（realtimeKbps=null 且本字段 false → 「—」）区分，空态三分。
      */
     val realtimeNotStreaming: Boolean = false,
@@ -106,19 +113,23 @@ fun HomeScreen(
                 color = MaterialTheme.colorScheme.onSurface,
             )
 
-            state.carrierAlert?.let { alert ->
-                CarrierAlertBanner(text = alert, onClick = { onAction(HomeAction.FixCarrier) })
+            // Task 45：中间内容区独占剩余高度并可滚动——加卡片后内容超高，
+            // 底部「重新拉满」按钮曾被挤出可视区只剩顶边（用户截图实证）。
+            // 改为「开关+按钮固定底部、内容区滚动」，任何内容高度/小屏/大字体下按钮完整可达。
+            // （滚动 Column 不允许 weight 子项，故不能把根 Column 直接改 verticalScroll。）
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                state.carrierAlert?.let { alert ->
+                    CarrierAlertBanner(text = alert, onClick = { onAction(HomeAction.FixCarrier) })
+                }
+
+                // Task 45 布局：实际传输并入状态卡（方案 C，用户拍板），独立 RealtimeCard 撤销。
+                StatusCard(state)
             }
-
-            StatusCard(state)
-
-            // Task 44：实际传输独立成卡（用户拍板），与上方「设置参数」明确区隔；
-            // 未连接耳机时整卡隐藏，保持首屏简洁。
-            if (state.headsetName != null) {
-                RealtimeCard(state)
-            }
-
-            Spacer(Modifier.weight(1f))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -251,11 +262,16 @@ private fun StatusCard(state: HomeUiState) {
             }
             StatusLine(state)
             DetailGrid(state)
+            // Task 45：实际传输并入状态卡（方案 C，用户拍板）——分隔线以上全是「设置层」，
+            // 以下一行是「传输层」；未连接耳机时该段整段不显示。
+            if (state.headsetName != null) {
+                RealtimeSection(state)
+            }
         }
     }
 }
 
-/** 状态卡唯一的状态文案：两态（Task 27）——真话文案，明细参数看下方 2×3 明细格。 */
+/** 状态卡唯一的状态文案：两态（Task 27）——真话文案，明细参数看下方 2×2 明细格。 */
 @Composable
 private fun StatusLine(state: HomeUiState) {
     val text = when {
@@ -271,8 +287,8 @@ private fun StatusLine(state: HomeUiState) {
 }
 
 /**
- * 明细格：编码器 / 采样率 / 位深 / 码率（2×2）。
- * Task 44：「实际传输」移出本格独立成卡（见 RealtimeCard），本格回到 2×2。
+ * 明细格：编码器 / 采样率 / 位深 / 码率（2×2，设置层参数）。
+ * Task 45：「实际传输」以分隔线行的形式并回本卡（见 RealtimeSection），不再独立成卡。
  */
 @Composable
 private fun DetailGrid(state: HomeUiState) {
@@ -283,66 +299,47 @@ private fun DetailGrid(state: HomeUiState) {
 }
 
 /**
- * Task 44：实际传输独立卡（用户中途拍板，替代原「第六格/全宽长条」方案）。
- * 结构：标题行「实际传输」+ 大字值；有数据时调度状态行
- * （ABR 必须带「自适应」三字——用户要求，别人不认识 ABR 缩写）；
- * 解释行说明「为什么这么设置」。用默认卡面色，与上方 primaryContainer 状态卡区隔。
- * 空态三分（Task 44 追加，用户拍板）：
- *   正常        → 码率值（如 400 kbps）+ 设计解释行
- *   栈回报未流式 → 「未在播放」（停歌后不再残留旧码率，5s 轮询会带它回来）
- *   栈不暴露     → 「—」+「本机栈不暴露实时传输数据（目前仅 vivo 机型实测可读）」
+ * Task 45：实际传输行（方案 C）——分隔线 + 「实际传输」行 + 超小字解释行。
+ * 空态三分（沿 Task 44 语义）：
+ *   正常        → 「400 kbps · ABR（自适应）」（ABR 必须带「自适应」三字——别人不认识缩写）
+ *   未在播放     → 「未在播放」（Task 45 PCM 计数增量判定，停歌不再残留粘性码率）
+ *   栈不暴露     → 「—（本机栈不暴露）」
+ * 解释行说明「为什么这么设置」；未连接耳机时本段由调用方整段跳过。
  */
 @Composable
-private fun RealtimeCard(state: HomeUiState) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "实际传输",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = when {
-                        state.realtimeNotStreaming -> "未在播放"
-                        state.realtimeKbps != null -> "${state.realtimeKbps} kbps"
-                        else -> "—"
-                    },
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            val qm = state.realtimeQualityMode
-            if (state.realtimeKbps != null && qm != null) {
-                Text(
-                    text = if (qm.contains("ABR", ignoreCase = true)) {
-                        "自适应调度（ABR）中"
-                    } else {
-                        "调度模式：$qm"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
+private fun RealtimeSection(state: HomeUiState) {
+    HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "实际传输",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
             Text(
                 text = when {
-                    // 未在播放：说明卡片会自动恢复（首页可见期间 5s 轮询）
-                    state.realtimeNotStreaming ->
-                        "当前没有音频在传输；开始播放后此处自动刷新"
-                    state.realtimeKbps != null ->
-                        // 用户要求的解释行：说清楚为什么这么设置
-                        "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度"
-                    else ->
-                        "本机栈不暴露实时传输数据（目前仅 vivo 机型实测可读）"
+                    state.realtimeNotStreaming -> "未在播放"
+                    state.realtimeKbps != null -> {
+                        val qm = state.realtimeQualityMode
+                        when {
+                            qm != null && qm.contains("ABR", ignoreCase = true) ->
+                                "${state.realtimeKbps} kbps · ABR（自适应）"
+                            qm != null -> "${state.realtimeKbps} kbps · $qm"
+                            else -> "${state.realtimeKbps} kbps"
+                        }
+                    }
+                    else -> "—（本机栈不暴露）"
                 },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
             )
         }
+        Text(
+            text = "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

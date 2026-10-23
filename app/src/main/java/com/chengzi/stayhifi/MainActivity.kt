@@ -894,6 +894,12 @@ class MainActivity : ComponentActivity() {
         if (msg != null) LogStore.log(msg)
     }
 
+    // Task 45：PCM read actual 计数前值（按 MAC 记忆）——vivo 栈 LHDC 的 bitrate 是
+    // 粘性值（停播仍报 400000，LDAC 才有 -1 未流式语义），改用相邻两次 5s 轮询的
+    // PCM read 计数增量判定「未在播放」；换设备/断连时清零重计。
+    private var lastPcmReadActual: Long? = null
+    private var lastPcmMac: String? = null
+
     /** onResume / ApplyNow 后刷新：载体异常 → 红条；否则 bind 读第一台设备实况。 */
     private fun refreshHome() {
         lifecycleScope.launch {
@@ -913,6 +919,8 @@ class MainActivity : ComponentActivity() {
                 )
                 connectedMac = null
                 connectedName = null
+                lastPcmReadActual = null   // Task 45：断连/载体挂掉时清 PCM 前值，重连后按首读处理
+                lastPcmMac = null
                 return@launch
             }
             homeState = homeState.copy(carrierAlert = null)
@@ -938,6 +946,8 @@ class MainActivity : ComponentActivity() {
                     )
                     connectedMac = null
                     connectedName = null
+                    lastPcmReadActual = null   // Task 45：同上，清 PCM 前值
+                    lastPcmMac = null
                     return@launch
                 }
                 val arr = JSONArray(devicesJson)
@@ -950,6 +960,8 @@ class MainActivity : ComponentActivity() {
                     )
                     connectedMac = null
                     connectedName = null
+                    lastPcmReadActual = null   // Task 45：同上，清 PCM 前值
+                    lastPcmMac = null
                     return@launch
                 }
                 val mac = arr.getJSONObject(0).getString("mac")
@@ -966,6 +978,8 @@ class MainActivity : ComponentActivity() {
                     )
                     connectedMac = null
                     connectedName = null
+                    lastPcmReadActual = null   // Task 45：同上，清 PCM 前值
+                    lastPcmMac = null
                     return@launch
                 }
                 val obj = JSONObject(stateJson)
@@ -985,10 +999,10 @@ class MainActivity : ComponentActivity() {
                     ApplyPolicy.deriveTarget(current, selectable), current,
                 )
                 // Task 43：同批拉传输层实况（载体本来就绑着，多一次 binder 调用而已）。
-                // 仅 vivo 栈实证可读；其他栈/未流式解析不到 → null，实际传输卡显示「—」。
+                // 仅 vivo 栈实证可读；其他栈/未流式解析不到 → null，实际传输行显示「—」。
                 // Task 44：静默失败补日志——error JSON 与 parse 为空两条路径此前无任何日志，
-                // 是「第六格一直 —」的定位盲区；parse 成功时顺带拿段落精确名（如 "LHDC V5"）。
-                // Task 44 追加：notStreaming（栈回报 -1）单独透传，卡片据此显示「未在播放」。
+                // 是「一直 —」的定位盲区；parse 成功时顺带拿段落精确名（如 "LHDC V5"）。
+                // Task 44 追加：notStreaming（栈回报 -1）单独透传，UI 据此显示「未在播放」。
                 var preciseCodec: String? = null
                 var realtimeKbps: Int? = null
                 var realtimeQm: String? = null
@@ -1002,13 +1016,26 @@ class MainActivity : ComponentActivity() {
                             btObj.optString("dump"), Masks.codecName(current.codecType),
                         )
                         if (parsed == null) {
-                            logBtDiag("首页 dumpBtState 无匹配段落或解析失败（实际传输卡降级显示—）")
+                            logBtDiag("首页 dumpBtState 无匹配段落或解析失败（实际传输行降级显示—）")
                         } else {
                             logBtDiag(null)
                             preciseCodec = parsed.codec
                             realtimeKbps = parsed.bitrateKbps
                             realtimeQm = parsed.qualityMode
                             notStreaming = parsed.notStreaming
+                            // Task 45：粘性值修复——LHDC 段 bitrate 停播不归零（LDAC 才有 -1 语义），
+                            // 改用 PCM read actual 计数增量判定：相邻两次 5s 轮询值不涨 → 未在播放。
+                            // 首次读取无前值按「播放中」（isStreamingByPcm 内部保证），避免误报；
+                            // 栈不暴露 PCM 行（pcmReadActual=null）时回落原有 bitrate 判据。
+                            val pcm = parsed.pcmReadActual
+                            if (pcm != null) {
+                                val prev = lastPcmReadActual.takeIf { lastPcmMac == mac }
+                                if (!notStreaming && !BtStateParser.isStreamingByPcm(prev, pcm)) {
+                                    notStreaming = true
+                                }
+                                lastPcmReadActual = pcm
+                                lastPcmMac = mac
+                            }
                         }
                     }
                 } catch (t: Throwable) {

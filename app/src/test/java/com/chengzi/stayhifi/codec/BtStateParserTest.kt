@@ -12,12 +12,14 @@ import org.junit.Test
  */
 class BtStateParserTest {
 
-    // LHDC 段：字段名标 "(Kbps)" 但值实为 bps（400000=400kbps），vivo 栈误标实证
+    // LHDC 段：字段名标 "(Kbps)" 但值实为 bps（400000=400kbps），vivo 栈误标实证；
+    // Task 45：附 PCM read counts 行（actual 为斜杠后的计数）
     private val lhdcDump = """
         A2DP LHDC V5 State:
           LHDC quality mode            : ABR
           LHDC transmission bitrate (Kbps) :400000
           Packet counts (expected/dropped) : 0 / 8077
+          PCM read counts (expected/actual) : 0 / 8077
     """.trimIndent()
 
     // LDAC 段：bitrate=-1 表示未在流式传输
@@ -123,5 +125,44 @@ class BtStateParserTest {
         """.trimIndent()
         val s = BtStateParser.parse(dump, "LDAC")!!
         assertEquals("990k", BtStateParser.formatDisplay(s))
+    }
+
+    // ── Task 45：PCM read 计数增量判定「未在播放」（修 vivo LHDC bitrate 粘性值） ──
+
+    @Test
+    fun parsesPcmReadActualCount() {
+        // Task 45：抓 "PCM read counts (expected/actual)" 的 actual（斜杠后）
+        val s = BtStateParser.parse(lhdcDump, "LHDC")!!
+        assertEquals(8077L, s.pcmReadActual)
+        // 无 PCM 行的段落 → null，调用方回落原 bitrate 判据
+        assertNull(BtStateParser.parse(aacDump, "AAC")!!.pcmReadActual)
+    }
+
+    @Test
+    fun stickyPcmCountMeansNotStreaming() {
+        // 粘性值场景：bitrate 停播仍报 400000（不归零），但 PCM actual 两次轮询同值
+        // → 判定未在播放（UI 显示「未在播放」，不再残留 400k）
+        val sticky = BtStateParser.parse(lhdcDump, "LHDC")!!
+        assertEquals(400, sticky.bitrateKbps)   // 粘性码率仍在，不能信
+        assertFalse(sticky.notStreaming)        // bitrate 判据对它失效
+        assertFalse(BtStateParser.isStreamingByPcm(8077L, sticky.pcmReadActual!!))
+    }
+
+    @Test
+    fun increasingPcmCountMeansStreaming() {
+        // 增量场景：actual 增长 → 流式中
+        assertTrue(BtStateParser.isStreamingByPcm(8077L, 9000L))
+        // 首次读取无前值按「播放中」，避免刚打开首页误报
+        assertTrue(BtStateParser.isStreamingByPcm(null, 8077L))
+        // 计数回退（重连重置等）也不增，按未在播放处理
+        assertFalse(BtStateParser.isStreamingByPcm(9000L, 100L))
+    }
+
+    @Test
+    fun negativeBitrateStillMeansNotStreaming() {
+        // -1 场景：LDAC 路径保留——栈明确回报未流式时无需 PCM 计数即判「未在播放」
+        val s = BtStateParser.parse(ldacDump, "LDAC")!!
+        assertTrue(s.notStreaming)
+        assertNull(s.bitrateKbps)
     }
 }

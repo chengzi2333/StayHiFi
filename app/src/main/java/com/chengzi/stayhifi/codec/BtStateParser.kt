@@ -12,6 +12,8 @@ package com.chengzi.stayhifi.codec
  *
  * 已知边界（诚实原则）：该段落仅 vivo 栈实证可读；其他厂商栈没有此段落或格式不同 → 返回
  * null，UI 降级显示「—」。bitrate = -1 表示未在流式传输（实证于 LDAC 段）。
+ * Task 45：vivo LHDC 的 bitrate 是粘性值（停播仍报 400000），另抓 PCM read counts
+ * 的 actual 计数做增量判定（isStreamingByPcm），LDAC 的 -1 路径保留兼容。
  */
 object BtStateParser {
 
@@ -21,12 +23,16 @@ object BtStateParser {
      * 供首页编码器格展示；拿不到段名时回落为传入的 codecName。
      * Task 44：notStreaming=true 表示栈明确回报未在流式（bitrate ≤ 0，实证 -1），
      * 与「字段缺失/栈不暴露」（bitrateKbps=null 且 notStreaming=false）区分——空态三分的关键。
+     * Task 45：pcmReadActual 为 "PCM read counts (expected/actual)" 的 actual 计数；
+     * vivo 栈 LHDC 的 bitrate 是粘性值（停播仍报 400000），改用该计数相邻两次轮询的
+     * 增量判定「未在播放」（见 isStreamingByPcm）。栈不暴露此行时为 null，回落旧判据。
      */
     data class BtState(
         val codec: String,
         val qualityMode: String?,
         val bitrateKbps: Int?,
         val notStreaming: Boolean = false,
+        val pcmReadActual: Long? = null,
     )
 
     private val SECTION_HEADER = Regex("^A2DP\\s+(.+?)\\s+State:")
@@ -48,6 +54,8 @@ object BtStateParser {
         var qualityMode: String? = null
         var bitrateKbps: Int? = null
         var notStreaming = false
+        // Task 45：PCM read actual 计数（粘性值修复的增量判据）
+        var pcmReadActual: Long? = null
         for (raw in dump.lineSequence()) {
             val line = raw.trim()
             val header = SECTION_HEADER.find(line)
@@ -73,11 +81,28 @@ object BtStateParser {
                 // Task 44：≤0（实证 -1）= 栈明确回报未在流式，单独标记
                 notStreaming = v <= 0
                 bitrateKbps = normalizeBitrate(v)
+            } else if (line.contains("PCM read", ignoreCase = true) &&
+                line.contains("counts", ignoreCase = true)
+            ) {
+                // Task 45："PCM read counts (expected/actual) : 0 / 8077" 抓 actual（斜杠后）。
+                // 格式不符/数字非法跳过，不污染已解析到的值
+                val parts = line.substringAfterLast(':').split('/')
+                if (parts.size == 2) {
+                    pcmReadActual = parts[1].trim().toLongOrNull() ?: pcmReadActual
+                }
             }
         }
         if (!found) return null
-        return BtState(sectionName ?: codecName, qualityMode, bitrateKbps, notStreaming)
+        return BtState(sectionName ?: codecName, qualityMode, bitrateKbps, notStreaming, pcmReadActual)
     }
+
+    /**
+     * Task 45：PCM read 计数增量判定「是否在播放」——vivo 栈 LHDC 的 transmission bitrate
+     * 是粘性值（停播不归零仍报 400000），bitrate 判据失效；同一 dump 里的 PCM read actual
+     * 计数只在真流式时增长，相邻两次轮询（5s）比对即可。
+     * prev == null（首次读取无前值）按「播放中」，避免刚打开首页就误报未在播放。
+     */
+    fun isStreamingByPcm(prev: Long?, current: Long): Boolean = prev == null || current > prev
 
     /**
      * 首页第六格显示文案：读不到/未流式 → null（UI 显示「—」，cell 占位不动）。
