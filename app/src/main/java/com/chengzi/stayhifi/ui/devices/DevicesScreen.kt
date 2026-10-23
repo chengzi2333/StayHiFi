@@ -92,7 +92,7 @@ fun DevicesScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        text = "连接耳机后通过 Onboarding 或录制向导创建",
+                        text = "连上耳机自动拉满后自动建档；也可用录制向导手动存档",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -182,7 +182,7 @@ private fun SourceBadge(source: DeviceProfile.Source) {
         DeviceProfile.Source.PRESET ->
             Triple("预设", MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.onTertiary)
         DeviceProfile.Source.AUTO ->
-            Triple("手选", MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.onSecondary)
+            Triple("自动", MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.onSecondary)
     }
     Text(
         text = label,

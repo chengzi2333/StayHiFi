@@ -1,14 +1,17 @@
 package com.chengzi.stayhifi.trigger
 
 import android.content.Context
+import android.os.Build
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.LogStore
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Negotiation
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
+import com.chengzi.stayhifi.util.DeviceNames
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.withLock
@@ -28,6 +31,9 @@ import org.json.JSONObject
  *
  * 对抗审查 I3：run 主体持 [ApplyLock.mutex]，三路触发互斥串行。
  * 对抗审查 I2：force=true（手动入口）跳过 autoApply=false 的自动触发拦截。
+ *
+ * Task 35：写入+读回验证通过后，该 MAC 无档案则自动建档（source=AUTO、autoApply=true、
+ * 记录读回的实际生效配置），档案仅供设备页展示与按设备开关，仍不参与拉满决策。
  */
 class ApplyWorker(context: Context) {
 
@@ -109,6 +115,9 @@ class ApplyWorker(context: Context) {
             log("写入候选: ${candidate.summary()}")
             if (writeVerified(service, mac, candidate)) {
                 notifyResult("音质拉满成功", "${name ?: mac} → ${candidate.summary()}")
+                // Task 35：确认实际生效（写入+读回验证通过）后才建档，不是写完就建；
+                // 档案 config 记录读回的真实落点（非派生目标）。
+                autoCreateProfile(mac, name, readState(service, mac)?.current ?: candidate)
                 return
             }
             log("候选 ${candidate.summary()} 读回不一致，降档重试")
@@ -146,6 +155,32 @@ class ApplyWorker(context: Context) {
             }
         }
         return false
+    }
+
+    /**
+     * Task 35：拉满成功后自动建档——该 MAC 已有档案（CAPTURED/PRESET/旧 AUTO）一律不碰不覆盖，
+     * 重录覆盖只走向导。出处四字段照抄 MainActivity onWizardSave 的写法。
+     * 建档只作记录 + 提供按设备 autoApply 开关，不参与拉满决策；失败只记日志，绝不影响主链路。
+     */
+    private fun autoCreateProfile(mac: String, name: String?, applied: CodecConfig) {
+        try {
+            if (profiles.profileFor(mac) != null) return
+            profiles.save(DeviceProfile(
+                mac = mac,
+                name = name ?: mac,
+                config = applied,
+                source = DeviceProfile.Source.AUTO,
+                autoApply = true,
+                // 出处四字段（Task 27 形状，Task 35 复用）：录制设备 / Android 版本 / ROM 构建号 / 时间。
+                recordedOnModel = DeviceNames.marketModel(),
+                recordedAndroidVersion = Build.VERSION.RELEASE,
+                recordedBuildDisplay = Build.DISPLAY,
+                recordedAtMillis = System.currentTimeMillis(),
+            ))
+            log("已自动建档: ${name ?: mac} ($mac) ${applied.summary()}")
+        } catch (t: Throwable) {
+            log("自动建档失败（不影响拉满主链路）: $t")
+        }
     }
 
     /** 轮询 Shizuku binder，最多 3s。 */

@@ -17,6 +17,6 @@ data class DeviceProfile(
     val recordedBuildDisplay: String = "",
     val recordedAtMillis: Long = 0L,
 ) {
-    /** 配置来源：AUTO=用户手选，CAPTURED=抓包捕获，PRESET=内置预设（历史档案，现已不再新增）。 */
+    /** 配置来源：AUTO=自动拉满成功后自动建档（Task 35），CAPTURED=抓包捕获，PRESET=内置预设（历史档案，现已不再新增）。 */
     enum class Source { AUTO, CAPTURED, PRESET }
 }
