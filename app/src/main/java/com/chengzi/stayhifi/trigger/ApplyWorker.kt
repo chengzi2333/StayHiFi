@@ -114,15 +114,20 @@ class ApplyWorker(context: Context) {
                 // 此前直接 return 不走 autoCreateProfile，设备页永远空白。
                 // 读回即验证：current 是 settled 阶段读回的真实生效配置，
                 // 早退=已验证与本机最高一致，同样够建档资格。
-                autoCreateProfile(mac, name, current)
+                // Task 42：早退分支不回填 originConfig——写入前的状态就是最高，不是「默认」，
+                // 把它当原始配置记下来会让「恢复默认参数」变成再拉满一次，失去后悔药意义。
+                autoCreateProfile(mac, name, current, origin = null)
                 return
             }
+            // Task 42：写入第一个候选之前，把写入前原始协商配置（settled.current）记入档案，
+            // 供设备页「恢复默认参数」写回。只记第一次，后续触发不覆盖。
+            recordOriginConfig(mac, current)
             log("写入候选: ${candidate.summary()}")
             if (writeVerified(service, mac, candidate)) {
                 notifyResult("音质拉满成功", "${name ?: mac} → ${candidate.summary()}")
                 // Task 35：确认实际生效（写入+读回验证通过）后才建档，不是写完就建；
                 // 档案 config 记录读回的真实落点（非派生目标）。
-                autoCreateProfile(mac, name, readState(service, mac)?.current ?: candidate)
+                autoCreateProfile(mac, name, readState(service, mac)?.current ?: candidate, origin = current)
                 return
             }
             log("候选 ${candidate.summary()} 读回不一致，降档重试")
@@ -166,8 +171,11 @@ class ApplyWorker(context: Context) {
      * Task 35：拉满成功后自动建档——该 MAC 已有档案（CAPTURED/PRESET/旧 AUTO）一律不碰不覆盖，
      * 重录覆盖只走向导。出处四字段照抄 MainActivity onWizardSave 的写法。
      * 建档只作记录 + 提供按设备 autoApply 开关，不参与拉满决策；失败只记日志，绝不影响主链路。
+     *
+     * Task 42：[origin] = 首次写入前的原始协商配置（走写入分支时传入 settled.current）；
+     * 早退分支传 null——那时的状态已是最高，不是「默认」。
      */
-    private fun autoCreateProfile(mac: String, name: String?, applied: CodecConfig) {
+    private fun autoCreateProfile(mac: String, name: String?, applied: CodecConfig, origin: CodecConfig?) {
         try {
             if (profiles.profileFor(mac) != null) return
             profiles.save(DeviceProfile(
@@ -181,10 +189,77 @@ class ApplyWorker(context: Context) {
                 recordedAndroidVersion = Build.VERSION.RELEASE,
                 recordedBuildDisplay = Build.DISPLAY,
                 recordedAtMillis = System.currentTimeMillis(),
+                originConfig = origin,
             ))
             log("已自动建档: ${name ?: mac} ($mac) ${applied.summary()}")
         } catch (t: Throwable) {
             log("自动建档失败（不影响拉满主链路）: $t")
+        }
+    }
+
+    /**
+     * Task 42：首次写入前把原始协商配置记入档案（后悔药的数据来源）。
+     * 已有档案（含向导录的）且 originConfig==null → 回填 copy(originConfig=…)；
+     * 已有 originConfig → 不覆盖（永远记第一次的）；无档案 → 由成功后的 autoCreateProfile 带上。
+     * 失败只记日志，绝不影响主链路。
+     */
+    private fun recordOriginConfig(mac: String, current: CodecConfig) {
+        try {
+            val profile = profiles.profileFor(mac) ?: return
+            if (profile.originConfig == null) {
+                profiles.save(profile.copy(originConfig = current))
+                log("已回填原始配置: ${profile.name} ($mac) ${current.summary()}")
+            }
+        } catch (t: Throwable) {
+            log("记录原始配置失败（不影响拉满主链路）: $t")
+        }
+    }
+
+    /**
+     * Task 42：恢复默认参数（设备页「后悔药」入口）——把首次拉满前的原始协商配置写回设备：
+     * 绑定载体 → writeConfig(origin) → 读回验证（ApplyPolicy.matches(origin, actual)）→ 成功/失败通知。
+     * 与自动拉满同一把 [ApplyLock.mutex] 互斥串行；失败不碰档案，返回是否成功（供调用方决定是否连带关自动拉满）。
+     */
+    suspend fun restoreDefault(mac: String, name: String, origin: CodecConfig): Boolean {
+        log("恢复默认参数: $name ($mac) → ${origin.summary()}")
+        return ApplyLock.mutex.withLock {
+            try {
+                if (!waitForShell()) {
+                    log("Shizuku 未运行，发一键修复通知")
+                    notifier.notifyFixRequired("Shizuku 未运行")
+                    return@withLock false
+                }
+                if (!provider.hasPermission) {
+                    log("特权授权已被撤销，发引导修复通知")
+                    notifier.notifyFixRequired("特权授权已被撤销")
+                    return@withLock false
+                }
+                val service = withContext(Dispatchers.IO) { provider.bind() }
+                val res = withContext(Dispatchers.IO) { service.writeConfig(mac, origin.toJson()) }
+                val err = parseError(res)
+                if (err != null) {
+                    log("恢复默认写入失败: $err")
+                    notifier.notifyResult("恢复默认参数失败", "$name: $err")
+                    return@withLock false
+                }
+                // 读回验证：与拉满同一套 matches 生效语义（codecType/rate/bits/cs1）
+                val actual = readState(service, mac)?.current
+                if (actual != null && ApplyPolicy.matches(origin, actual)) {
+                    log("恢复默认成功 ✓ 读回=${actual.summary()}")
+                    notifyResult("已恢复默认参数", "$name → ${actual.summary()}")
+                    true
+                } else {
+                    log("恢复默认读回不一致: ${actual?.summary() ?: "读取失败"}")
+                    notifier.notifyResult("恢复默认参数失败", "$name：读回与原始配置不一致")
+                    false
+                }
+            } catch (t: Throwable) {
+                log("恢复默认参数失败: $t")
+                notifier.notifyResult("恢复默认参数失败", "$name: ${t.message}")
+                false
+            } finally {
+                provider.unbind()
+            }
         }
     }
 

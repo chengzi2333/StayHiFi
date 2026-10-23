@@ -40,6 +40,8 @@ data class DeviceItemUi(
     val autoApply: Boolean,
     /** 录制出处行（Task 27，如 "记录于 V2505A · Android 15 · PD2505_A_xxx · 2026-10-21"）；空则不显示。 */
     val provenance: String = "",
+    /** Task 42：是否已记录首次拉满前的原始配置——false 时「恢复默认参数」置灰。 */
+    val hasOrigin: Boolean = false,
 )
 
 data class DevicesUiState(
@@ -51,6 +53,8 @@ sealed interface DevicesAction {
     data class SetAutoApply(val mac: String, val enabled: Boolean) : DevicesAction
     /** 「重录」：复用 RecordWizard 流程重新抓取这台设备的参数。 */
     data class ReRecord(val mac: String) : DevicesAction
+    /** Task 42：「恢复默认参数」——把首次拉满前的原始协商配置写回设备。 */
+    data class RestoreDefault(val mac: String) : DevicesAction
 }
 
 /**
@@ -163,6 +167,20 @@ private fun DeviceCard(item: DeviceItemUi, onAction: (DevicesAction) -> Unit) {
                     checked = item.autoApply,
                     onCheckedChange = { onAction(DevicesAction.SetAutoApply(item.mac, it)) },
                 )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                // Task 42：originConfig==null（老档案/从未被本 App 拉满过，没有「默认值」可回）
+                // 时置灰，而不是隐藏——让入口可见但解释得了为什么没有。
+                TextButton(
+                    onClick = { onAction(DevicesAction.RestoreDefault(item.mac)) },
+                    enabled = item.hasOrigin,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text("恢复默认参数")
+                }
                 TextButton(
                     onClick = { onAction(DevicesAction.ReRecord(item.mac)) },
                     modifier = Modifier.heightIn(min = 48.dp),
@@ -209,6 +227,7 @@ private fun DevicesScreenPreviewLight() {
                         configSummary = "LHDC·192kHz·24bit",
                         source = DeviceProfile.Source.PRESET,
                         autoApply = true,
+                        hasOrigin = true,
                     ),
                     DeviceItemUi(
                         mac = "AA:BB:CC:DD:EE:FF",

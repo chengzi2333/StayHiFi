@@ -33,6 +33,7 @@ StayHiFi does exactly one thing: the instant a headset connects, it writes the p
 - **Persistent silent notification**: optional live parameter readout; plus a QS tile for one-tap status
 - **iOS-style floating Dock navigation**: spring lens + jelly-physics motion, drag-tracking
 - **Record wizard** (optional diagnostic tool): capture the current negotiated parameters once and archive them to the Devices page, with device model / Android version provenance
+- **One-tap restore anytime**: the Devices page can write the parameters back to the original negotiated values from before the first max-out
 - **Material You**: dynamic colors, light and dark themes follow the system
 
 ## How it works
@@ -59,6 +60,10 @@ Requires: Android 10+.
    - **Add to battery whitelist** (disable battery optimization)
    - **Allow background high power usage + lock the recents card**: in Settings → Battery → background power management, allow this app; and in the recents view, pull the app card down and tap "lock" to prevent swipe-to-kill
 3. That's it. When a headset connects, parameters are maxed automatically; the home status card tells you live whether you've hit the ceiling
+
+## Uninstall
+
+The written parameter preferences persist in the system Bluetooth stack — **uninstalling the app does not revert them automatically**. To go back to defaults: before uninstalling, tap "Restore default parameters" on the Devices page to write the parameters back to the original negotiated values from before the first max-out. Beyond that there is no residue — no system files are touched, so uninstalling leaves nothing behind.
 
 ## Feedback & contact
 

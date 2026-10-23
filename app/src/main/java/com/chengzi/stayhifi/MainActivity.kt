@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.service.quicksettings.TileService
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -282,6 +283,7 @@ class MainActivity : ComponentActivity() {
                                         source = it.source,
                                         autoApply = it.autoApply,
                                         provenance = it.provenanceLine(),
+                                        hasOrigin = it.originConfig != null,
                                     )
                                 },
                             ),
@@ -331,6 +333,35 @@ class MainActivity : ComponentActivity() {
                 wizardSaved = false
                 wizardTargetMac = action.mac
                 wizardVisible = true
+            }
+            is DevicesAction.RestoreDefault -> onRestoreDefault(action.mac)
+        }
+    }
+
+    /**
+     * Task 42：恢复默认参数（后悔药）——把首次拉满前的原始协商配置写回设备。
+     * 成功后必须连带关掉这台设备的自动拉满（autoApply=false）：不关的话下次重连又被拉满，
+     * 回退就白费了。失败不碰档案，记日志 + 轻提示。设备列表/首页状态靠现有 flow 自动刷新。
+     */
+    private fun onRestoreDefault(mac: String) {
+        lifecycleScope.launch {
+            try {
+                val profile = withContext(Dispatchers.IO) { profileRepo.profileFor(mac) } ?: return@launch
+                val origin = profile.originConfig ?: return@launch
+                val ok = ApplyWorker(this@MainActivity).restoreDefault(mac, profile.name, origin)
+                if (ok) {
+                    withContext(Dispatchers.IO) {
+                        profileRepo.save(profile.copy(autoApply = false))
+                    }
+                    LogStore.log("${profile.name} 已恢复默认参数，这台设备的自动拉满已连带关闭")
+                    refreshHome()
+                } else {
+                    LogStore.log("${profile.name} 恢复默认参数失败")
+                    Toast.makeText(this@MainActivity, "恢复默认参数失败，详见日志页", Toast.LENGTH_SHORT).show()
+                }
+            } catch (t: Throwable) {
+                LogStore.log("恢复默认参数失败: $t")
+                Toast.makeText(this@MainActivity, "恢复默认参数失败，详见日志页", Toast.LENGTH_SHORT).show()
             }
         }
     }

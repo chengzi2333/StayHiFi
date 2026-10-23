@@ -106,7 +106,8 @@ fun HomeScreen(
                 Column(Modifier.weight(1f)) {
                     Text("自动拉满", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        text = "连上耳机时自动写入本机最高音质参数",
+                        // Task 42：澄清这是总开关（管所有设备），与设备页的单设备开关区分开。
+                        text = "总开关：关闭后所有设备连上都不再自动拉满",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
