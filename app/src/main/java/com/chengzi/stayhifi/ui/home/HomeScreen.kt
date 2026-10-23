@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -46,6 +47,8 @@ data class HomeUiState(
     val quality: String? = null,
     /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
     val fullBars: Boolean = false,
+    /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
+    val applying: Boolean = false,
     /** 「自动拉满」总开关。 */
     val autoApplyEnabled: Boolean = true,
     /** 载体异常警示文案；null 表示一切正常。 */
@@ -116,16 +119,34 @@ fun HomeScreen(
 
             Button(
                 onClick = { onAction(HomeAction.ApplyNow) },
-                enabled = state.headsetName != null,
+                enabled = state.headsetName != null && !state.applying,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 56.dp),
             ) {
-                Text(
-                    // 两态文案（Task 27）：无对比行、无"最高/最强参数"字样；"满血"仅徽标保留。
-                    text = if (state.fullBars) "重新拉满" else "立即拉满",
-                    style = MaterialTheme.typography.titleMedium,
-                )
+                if (state.applying) {
+                    // Task 31 加载态：处理中禁用按钮，小号转圈 + 文案，完成信号回弹由 MainActivity 给。
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                        Text(
+                            text = "拉满中…",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+                } else {
+                    Text(
+                        // 两态文案（Task 27）：无对比行、无"最高/最强参数"字样；"满血"仅徽标保留。
+                        text = if (state.fullBars) "重新拉满" else "立即拉满",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
             }
         }
     }

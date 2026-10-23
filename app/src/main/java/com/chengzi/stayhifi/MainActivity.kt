@@ -658,14 +658,18 @@ class MainActivity : ComponentActivity() {
     private fun onApplyNow() {
         val mac = connectedMac ?: return
         val name = connectedName
+        // Task 31 加载态：按下即进处理态，run 完成/异常 finally 回弹并刷新实况。
+        homeState = homeState.copy(applying = true)
         lifecycleScope.launch {
             try {
                 // 对抗审查 I2：手动入口传 force=true，不被 autoApply=false 静默拦截
                 ApplyWorker(this@MainActivity).run(mac, name, force = true)
             } catch (t: Throwable) {
                 LogStore.log("立即满血失败: $t")
+            } finally {
+                homeState = homeState.copy(applying = false)
+                refreshHome()
             }
-            refreshHome()
         }
     }
 
