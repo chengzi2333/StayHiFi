@@ -982,11 +982,14 @@ class MainActivity : ComponentActivity() {
                 } catch (t: Throwable) {
                     logBtDiag("传输层实况读取失败（实际传输卡降级显示—）: $t")
                 }
+                // Task 45：ColorOS 新栈 LHDC 在 vendor 段（0x10..0x1F），
+                // 用 selectable 能力掩码佐证后再认 LHDC。
+                val capsMask = Masks.capsRateMask(current.codecType, selectable)
                 homeState = homeState.copy(
                     headsetName = name,
                     // Task 44：编码器格优先用 dumpsys 段落精确名（如 "LHDC V5"），
                     // 读不到回落 Masks 映射名；CodecConfig 层语义不动（cs1 档位仍按 codecType）。
-                    codec = preciseCodec ?: Masks.codecName(current.codecType),
+                    codec = preciseCodec ?: Masks.codecName(current.codecType, capsMask),
                     rate = Masks.rateHz(current.sampleRate),
                     bits = Masks.bitsDepth(current.bitsPerSample),
                     quality = Masks.qualityLabel(current.codecType, current.cs1),
