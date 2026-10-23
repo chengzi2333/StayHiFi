@@ -39,7 +39,7 @@ data class HomeUiState(
     val headsetName: String? = null,
     /**
      * 编码器名；null 表示未知。
-     * Task 44：优先为 dumpsys 段落头精确名（如 "LHDC V5"），读不到回落 Masks 映射名（如 "LHDC"）。
+     * Task 44：为 dumpsys 段落头精确名或 Masks 扩充映射名（均为 "LHDC V5" 级别精度）。
      */
     val codec: String? = null,
     /** 采样率（如 "192kHz"）；null 表示未知。 */
@@ -55,6 +55,11 @@ data class HomeUiState(
     val realtimeKbps: Int? = null,
     /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。 */
     val realtimeQualityMode: String? = null,
+    /**
+     * Task 44：栈明确回报未在流式传输（bitrate ≤ 0，实证 -1）→ 卡片显示「未在播放」。
+     * 与「栈不暴露数据」（realtimeKbps=null 且本字段 false → 「—」）区分，空态三分。
+     */
+    val realtimeNotStreaming: Boolean = false,
     /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
     val fullBars: Boolean = false,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
@@ -279,10 +284,13 @@ private fun DetailGrid(state: HomeUiState) {
 
 /**
  * Task 44：实际传输独立卡（用户中途拍板，替代原「第六格/全宽长条」方案）。
- * 结构：标题行「实际传输」+ 大字值（如 400 kbps）；有数据时调度状态行
+ * 结构：标题行「实际传输」+ 大字值；有数据时调度状态行
  * （ABR 必须带「自适应」三字——用户要求，别人不认识 ABR 缩写）；
- * 解释行说明「为什么这么设置」。读不到数据时值显示「—」，解释行换成诚实说明
- * （目前仅 vivo 机型实测可读）。用默认卡面色，与上方 primaryContainer 状态卡区隔。
+ * 解释行说明「为什么这么设置」。用默认卡面色，与上方 primaryContainer 状态卡区隔。
+ * 空态三分（Task 44 追加，用户拍板）：
+ *   正常        → 码率值（如 400 kbps）+ 设计解释行
+ *   栈回报未流式 → 「未在播放」（停歌后不再残留旧码率，5s 轮询会带它回来）
+ *   栈不暴露     → 「—」+「本机栈不暴露实时传输数据（目前仅 vivo 机型实测可读）」
  */
 @Composable
 private fun RealtimeCard(state: HomeUiState) {
@@ -299,7 +307,11 @@ private fun RealtimeCard(state: HomeUiState) {
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    text = state.realtimeKbps?.let { "$it kbps" } ?: "—",
+                    text = when {
+                        state.realtimeNotStreaming -> "未在播放"
+                        state.realtimeKbps != null -> "${state.realtimeKbps} kbps"
+                        else -> "—"
+                    },
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                 )
@@ -317,11 +329,15 @@ private fun RealtimeCard(state: HomeUiState) {
                 )
             }
             Text(
-                text = if (state.realtimeKbps != null) {
-                    // 用户要求的解释行：说清楚为什么这么设置
-                    "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度"
-                } else {
-                    "本机栈不暴露实时传输数据（目前仅 vivo 机型实测可读）"
+                text = when {
+                    // 未在播放：说明卡片会自动恢复（首页可见期间 5s 轮询）
+                    state.realtimeNotStreaming ->
+                        "当前没有音频在传输；开始播放后此处自动刷新"
+                    state.realtimeKbps != null ->
+                        // 用户要求的解释行：说清楚为什么这么设置
+                        "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度"
+                    else ->
+                        "本机栈不暴露实时传输数据（目前仅 vivo 机型实测可读）"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

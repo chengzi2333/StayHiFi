@@ -36,9 +36,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.abs
+import kotlinx.coroutines.delay
 import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
@@ -249,6 +253,22 @@ class MainActivity : ComponentActivity() {
                 val cur = pageOrder?.get(pagerState.currentPage) ?: pagerState.currentPage
                 if (prevPage != -1 && cur == 0 && prevPage != 0) refreshHome()
                 prevPage = cur
+            }
+            // Task 44 追加：首页可见期间每 5s 补刷实况——停歌后残留旧码率的修复
+            // （栈回报 -1 未流式，卡片随之显示「未在播放」）。
+            // 仅首页 tab 且 RESUMED 时跑：离开页面（isHomePage 翻 false 取消协程）/
+            // 退后台（repeatOnLifecycle 挂起）即停；dumpsys 单次开销可控，5s 合理。
+            // 无连接设备时跳过（ headsetName==null ），避免未授权分支每 5s 刷一条日志。
+            val isHomePage = (pageOrder?.get(pagerState.currentPage) ?: pagerState.currentPage) == 0
+            val lifecycleOwner = LocalLifecycleOwner.current
+            LaunchedEffect(isHomePage, lifecycleOwner) {
+                if (!isHomePage) return@LaunchedEffect
+                lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                    while (true) {
+                        delay(5_000)
+                        if (homeState.headsetName != null) refreshHome()
+                    }
+                }
             }
             LaunchedEffect(selectedTab) {
                 val target = selectedTab
@@ -864,6 +884,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Task 44：dumpBtState 诊断日志去重——5s 轮询下同一条失败日志会刷屏，
+    // 只在诊断内容变化时记一条；传 null 表示恢复正常（下次再失败会重新记）。
+    private var btDiagLast: String? = null
+    private fun logBtDiag(msg: String?) {
+        if (msg == btDiagLast) return
+        btDiagLast = msg
+        if (msg != null) LogStore.log(msg)
+    }
+
     /** onResume / ApplyNow 后刷新：载体异常 → 红条；否则 bind 读第一台设备实况。 */
     private fun refreshHome() {
         lifecycleScope.launch {
@@ -878,6 +907,7 @@ class MainActivity : ComponentActivity() {
                     quality = null,
                     realtimeKbps = null,
                     realtimeQualityMode = null,
+                    realtimeNotStreaming = false,
                     fullBars = false,
                 )
                 connectedMac = null
@@ -896,7 +926,8 @@ class MainActivity : ComponentActivity() {
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
-                        realtimeKbps = null, realtimeQualityMode = null, fullBars = false,
+                        realtimeKbps = null, realtimeQualityMode = null,
+                        realtimeNotStreaming = false, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -925,27 +956,31 @@ class MainActivity : ComponentActivity() {
                 // 仅 vivo 栈实证可读；其他栈/未流式解析不到 → null，实际传输卡显示「—」。
                 // Task 44：静默失败补日志——error JSON 与 parse 为空两条路径此前无任何日志，
                 // 是「第六格一直 —」的定位盲区；parse 成功时顺带拿段落精确名（如 "LHDC V5"）。
+                // Task 44 追加：notStreaming（栈回报 -1）单独透传，卡片据此显示「未在播放」。
                 var preciseCodec: String? = null
                 var realtimeKbps: Int? = null
                 var realtimeQm: String? = null
+                var notStreaming = false
                 try {
                     val btObj = JSONObject(withContext(Dispatchers.IO) { svc.dumpBtState() })
                     if (btObj.has("error")) {
-                        LogStore.log("首页 dumpBtState error: ${btObj.optString("error")}")
+                        logBtDiag("首页 dumpBtState error: ${btObj.optString("error")}")
                     } else {
                         val parsed = BtStateParser.parse(
                             btObj.optString("dump"), Masks.codecName(current.codecType),
                         )
                         if (parsed == null) {
-                            LogStore.log("首页 dumpBtState 无匹配段落或解析失败（实际传输卡降级显示—）")
+                            logBtDiag("首页 dumpBtState 无匹配段落或解析失败（实际传输卡降级显示—）")
                         } else {
+                            logBtDiag(null)
                             preciseCodec = parsed.codec
                             realtimeKbps = parsed.bitrateKbps
                             realtimeQm = parsed.qualityMode
+                            notStreaming = parsed.notStreaming
                         }
                     }
                 } catch (t: Throwable) {
-                    LogStore.log("传输层实况读取失败（实际传输卡降级显示—）: $t")
+                    logBtDiag("传输层实况读取失败（实际传输卡降级显示—）: $t")
                 }
                 homeState = homeState.copy(
                     headsetName = name,
@@ -957,6 +992,7 @@ class MainActivity : ComponentActivity() {
                     quality = Masks.qualityLabel(current.codecType, current.cs1),
                     realtimeKbps = realtimeKbps,
                     realtimeQualityMode = realtimeQm,
+                    realtimeNotStreaming = notStreaming,
                     fullBars = fullBars,
                 )
                 connectedMac = mac

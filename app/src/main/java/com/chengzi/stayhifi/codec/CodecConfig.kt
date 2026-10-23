@@ -57,8 +57,13 @@ object Masks {
     fun bitsDepth(mask: Int): String = BITS_NAMES[mask] ?: "unknown"
 
     /**
-     * codecType ≥ 5 为厂商私有编号，10=LHDC 仅在 OPPO/vivo 系栈上成立；
-     * 此映射仅用于显示。0~4 为 AOSP 标准编号，全平台通用。
+     * codecType → 人类可读名字，仅用于显示。
+     * Task 44：映射表扩充，只收有出处的编号，查不到出处的不编，未知仍回落 vendor($type)——
+     * 0~6 为 AOSP 标准编号（已核对 AOSP 源码 packages/modules/Bluetooth
+     * BluetoothCodecConfig.java，android-14.0.0_r1 与 main 一致：5=LC3、6=Opus；
+     * aptX Adaptive/TWS+ 不在 AOSP 公共编号里，属高通私有编号）；
+     * 7=aptX-Adaptive、10=LHDC V5 为 vivo 栈真机实证（2026-10，OriginOS，
+     * dumpsys 段头 "A2DP LHDC V5 State:" 佐证 10 的 V5 后缀）。
      */
     fun codecName(type: Int): String = when (type) {
         0 -> "SBC"
@@ -66,7 +71,10 @@ object Masks {
         2 -> "aptX"
         3 -> "aptX-HD"
         4 -> "LDAC"
-        10 -> "LHDC"
+        5 -> "LC3"            // AOSP SOURCE_CODEC_TYPE_LC3
+        6 -> "Opus"           // AOSP SOURCE_CODEC_TYPE_OPUS
+        7 -> "aptX-Adaptive"  // vivo 栈真机实证；AOSP 无此公共编号
+        10 -> "LHDC V5"       // vivo 栈真机实证（原映射 "LHDC" 无版本后缀）
         else -> "vendor($type)"
     }
 
@@ -74,7 +82,7 @@ object Masks {
      * cs1（codec-specific 1）质量档到人类可读标签；未知编号返回 null（调用方保持三段显示）。
      * 4=LDAC 用 AOSP 标准值（见 BluetoothCodecConfig 注释）：
      * 1000=990kbps 高 / 1001=660kbps / 1002=330kbps / 1003=自适应。
-     * 10=LHDC 为厂商私有编号（仅 OPPO/vivo 系栈实测）：
+     * 10=LHDC V5 为厂商私有编号（仅 OPPO/vivo 系栈实测）：
      * 50888712=音质优先(1000kbps)、33914889=自适应。
      */
     fun qualityLabel(codecType: Int, cs1: Long): String? = when (codecType) {

@@ -1,7 +1,9 @@
 package com.chengzi.stayhifi.codec
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -57,8 +59,10 @@ class BtStateParserTest {
     @Test
     fun missingBitrateFieldYieldsNullBitrate() {
         // AAC 段无 transmission bitrate → 段落能找到，但码率读不到 → 显示「—」
+        // Task 44：字段缺失 ≠ 未流式，notStreaming 必须为 false（空态三分）
         val s = BtStateParser.parse(aacDump, "AAC")!!
         assertNull(s.bitrateKbps)
+        assertFalse(s.notStreaming)
         assertNull(BtStateParser.formatDisplay(s))
     }
 
@@ -75,10 +79,26 @@ class BtStateParserTest {
 
     @Test
     fun negativeBitrateMeansNotStreaming() {
-        // -1 = 未在流式传输：bitrateKbps 为 null，显示「—」而不是 "-1k"
+        // -1 = 未在流式传输：bitrateKbps 为 null，显示「未在播放」而不是 "-1k"
+        // Task 44：notStreaming=true 把「栈明确回报未流式」与「栈不暴露」分开
         val s = BtStateParser.parse(ldacDump, "LDAC")!!
         assertNull(s.bitrateKbps)
+        assertTrue(s.notStreaming)
         assertNull(BtStateParser.formatDisplay(s))
+    }
+
+    @Test
+    fun legacySectionNameMatchesSuffixedCodecName() {
+        // Task 44：codecName 映射扩充为 "LHDC V5" 后，旧栈段头无后缀
+        // （"A2DP LHDC State:"）也要能命中——双向 contains 反向兜底
+        val dump = """
+            A2DP LHDC State:
+              LHDC quality mode : ABR
+              LHDC transmission bitrate (Kbps) : 400000
+        """.trimIndent()
+        val s = BtStateParser.parse(dump, "LHDC V5")!!
+        assertEquals("LHDC", s.codec)
+        assertEquals(400, s.bitrateKbps)
     }
 
     @Test

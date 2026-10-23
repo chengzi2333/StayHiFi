@@ -36,12 +36,13 @@ class CodecConfigTest {
 
     @Test
     fun summaryFormat() {
-        assertEquals("LHDC·192kHz·24bit·1000kbps", golden.summary())
+        // Task 44：codecName(10) 扩充为精确名 "LHDC V5"（vivo 栈实证）
+        assertEquals("LHDC V5·192kHz·24bit·1000kbps", golden.summary())
     }
 
     @Test
     fun summaryStaysThreeSegmentsWhenCs1Unknown() {
         val unknown = golden.copy(cs1 = 12345L)
-        assertEquals("LHDC·192kHz·24bit", unknown.summary())
+        assertEquals("LHDC V5·192kHz·24bit", unknown.summary())
     }
 }
