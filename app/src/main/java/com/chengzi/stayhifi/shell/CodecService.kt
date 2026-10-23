@@ -171,7 +171,9 @@ class CodecService : ICodecService.Stub() {
      * 5s 超时兜底（Task 43）：dumpsys 偶发卡死，超时强杀进程走 errorJson。
      */
     private fun runDumpsysFiltered(timeoutMs: Long): String {
-        val proc = Runtime.getRuntime().exec(arrayOf("dumpsys", "bluetooth_manager"))
+        // Task 44：dumpsys 改绝对路径——Shizuku 用户服务进程的 PATH 不含 /system/bin，
+        // 裸 "dumpsys" 在部分环境直接 exec 失败（防患于未然）。
+        val proc = Runtime.getRuntime().exec(arrayOf("/system/bin/dumpsys", "bluetooth_manager"))
         val kept = StringBuilder()
         val reader = Thread {
             proc.inputStream.bufferedReader().useLines { lines ->

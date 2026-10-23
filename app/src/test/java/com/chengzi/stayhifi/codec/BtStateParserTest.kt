@@ -34,7 +34,8 @@ class BtStateParserTest {
     @Test
     fun parsesLhdcAbrSection() {
         val s = BtStateParser.parse(lhdcDump, "LHDC")!!
-        assertEquals("LHDC", s.codec)
+        // Task 44：codec 改为段落头精确名（带 V5 后缀），供首页编码器格展示
+        assertEquals("LHDC V5", s.codec)
         assertEquals("ABR", s.qualityMode)
         // 400000 bps 归一化为 400 kbps（vivo 字段名误标修正）
         assertEquals(400, s.bitrateKbps)
@@ -66,6 +67,8 @@ class BtStateParserTest {
         // 多段落共存时按 codecName 选对（shell 侧过滤后仍保留全部 State: 段头）
         val combined = lhdcDump + "\n" + ldacDump
         val s = BtStateParser.parse(combined, "LDAC")!!
+        // Task 44：段名无后缀时精确名与映射名一致
+        assertEquals("LDAC", s.codec)
         assertEquals("HIGH", s.qualityMode)
         assertNull(s.bitrateKbps)   // -1 未流式
     }

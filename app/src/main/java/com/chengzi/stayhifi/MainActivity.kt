@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -240,6 +241,15 @@ class MainActivity : ComponentActivity() {
             // 跨 >1 页用 order 重排把当前页换到目标相邻位，只滑一页、结束后恢复。
             val pagerState = rememberPagerState(pageCount = { mainTabsDestinations.size })
             var pageOrder by remember { mutableStateOf<List<Int>?>(null) }
+            // Task 44：切回首页（index 0）时补一次 refreshHome——此前 refreshHome 只在
+            // onResume/连接事件触发，页内 tab 切换不触发，开着歌切回首页实况格仍是旧值/「—」。
+            // 跳过初始组合（onResume 已刷过），不与既有路径双跑。
+            var prevPage by remember { mutableIntStateOf(-1) }
+            LaunchedEffect(pagerState.currentPage) {
+                val cur = pageOrder?.get(pagerState.currentPage) ?: pagerState.currentPage
+                if (prevPage != -1 && cur == 0 && prevPage != 0) refreshHome()
+                prevPage = cur
+            }
             LaunchedEffect(selectedTab) {
                 val target = selectedTab
                 val current = pageOrder?.get(pagerState.currentPage) ?: pagerState.currentPage
@@ -866,7 +876,8 @@ class MainActivity : ComponentActivity() {
                     rate = null,
                     bits = null,
                     quality = null,
-                    realtimeBitrate = null,
+                    realtimeKbps = null,
+                    realtimeQualityMode = null,
                     fullBars = false,
                 )
                 connectedMac = null
@@ -884,7 +895,8 @@ class MainActivity : ComponentActivity() {
                 if (arr.length() == 0) {
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
-                        bits = null, quality = null, realtimeBitrate = null, fullBars = false,
+                        bits = null, quality = null,
+                        realtimeKbps = null, realtimeQualityMode = null, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -910,27 +922,41 @@ class MainActivity : ComponentActivity() {
                     ApplyPolicy.deriveTarget(current, selectable), current,
                 )
                 // Task 43：同批拉传输层实况（载体本来就绑着，多一次 binder 调用而已）。
-                // 仅 vivo 栈实证可读；其他栈/未流式解析不到 → null，第六格显示「—」。
-                val realtime = try {
+                // 仅 vivo 栈实证可读；其他栈/未流式解析不到 → null，实际传输卡显示「—」。
+                // Task 44：静默失败补日志——error JSON 与 parse 为空两条路径此前无任何日志，
+                // 是「第六格一直 —」的定位盲区；parse 成功时顺带拿段落精确名（如 "LHDC V5"）。
+                var preciseCodec: String? = null
+                var realtimeKbps: Int? = null
+                var realtimeQm: String? = null
+                try {
                     val btObj = JSONObject(withContext(Dispatchers.IO) { svc.dumpBtState() })
                     if (btObj.has("error")) {
-                        null
+                        LogStore.log("首页 dumpBtState error: ${btObj.optString("error")}")
                     } else {
-                        BtStateParser.parse(
+                        val parsed = BtStateParser.parse(
                             btObj.optString("dump"), Masks.codecName(current.codecType),
-                        )?.let { BtStateParser.formatDisplay(it) }
+                        )
+                        if (parsed == null) {
+                            LogStore.log("首页 dumpBtState 无匹配段落或解析失败（实际传输卡降级显示—）")
+                        } else {
+                            preciseCodec = parsed.codec
+                            realtimeKbps = parsed.bitrateKbps
+                            realtimeQm = parsed.qualityMode
+                        }
                     }
                 } catch (t: Throwable) {
-                    LogStore.log("传输层实况读取失败（第六格降级显示—）: $t")
-                    null
+                    LogStore.log("传输层实况读取失败（实际传输卡降级显示—）: $t")
                 }
                 homeState = homeState.copy(
                     headsetName = name,
-                    codec = Masks.codecName(current.codecType),
+                    // Task 44：编码器格优先用 dumpsys 段落精确名（如 "LHDC V5"），
+                    // 读不到回落 Masks 映射名；CodecConfig 层语义不动（cs1 档位仍按 codecType）。
+                    codec = preciseCodec ?: Masks.codecName(current.codecType),
                     rate = Masks.rateHz(current.sampleRate),
                     bits = Masks.bitsDepth(current.bitsPerSample),
                     quality = Masks.qualityLabel(current.codecType, current.cs1),
-                    realtimeBitrate = realtime,
+                    realtimeKbps = realtimeKbps,
+                    realtimeQualityMode = realtimeQm,
                     fullBars = fullBars,
                 )
                 connectedMac = mac

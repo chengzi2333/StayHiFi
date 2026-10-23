@@ -15,7 +15,11 @@ package com.chengzi.stayhifi.codec
  */
 object BtStateParser {
 
-    /** 一段传输层实况：qualityMode 如 "ABR"/"HIGH"；bitrateKbps 归一化后的 kbps，null=未流式/读不到。 */
+    /**
+     * 一段传输层实况：qualityMode 如 "ABR"/"HIGH"；bitrateKbps 归一化后的 kbps，null=未流式/读不到。
+     * Task 44：codec 为 dumpsys 段落头原始名（如 "LHDC V5"），比 Masks.codecName 映射精确，
+     * 供首页编码器格展示；拿不到段名时回落为传入的 codecName。
+     */
     data class BtState(
         val codec: String,
         val qualityMode: String?,
@@ -35,6 +39,8 @@ object BtStateParser {
         if (wanted.isEmpty()) return null
         var inSection = false
         var found = false
+        // Task 44：命中段落的段头原始名（如 "LHDC V5"），带回给 UI 精确展示
+        var sectionName: String? = null
         var qualityMode: String? = null
         var bitrateKbps: Int? = null
         for (raw in dump.lineSequence()) {
@@ -42,7 +48,10 @@ object BtStateParser {
             val header = SECTION_HEADER.find(line)
             if (header != null) {
                 inSection = normalize(header.groupValues[1]).contains(wanted)
-                if (inSection) found = true
+                if (inSection) {
+                    found = true
+                    sectionName = header.groupValues[1].trim()
+                }
                 continue
             }
             if (!inSection) continue
@@ -57,7 +66,7 @@ object BtStateParser {
             }
         }
         if (!found) return null
-        return BtState(codecName, qualityMode, bitrateKbps)
+        return BtState(sectionName ?: codecName, qualityMode, bitrateKbps)
     }
 
     /**

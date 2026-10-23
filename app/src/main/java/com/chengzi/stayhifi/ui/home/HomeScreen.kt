@@ -37,7 +37,10 @@ import com.chengzi.stayhifi.util.DeviceNames
 data class HomeUiState(
     /** 耳机名；null 表示当前未连接耳机。 */
     val headsetName: String? = null,
-    /** 编码器名（如 "LHDC"）；null 表示未知。 */
+    /**
+     * 编码器名；null 表示未知。
+     * Task 44：优先为 dumpsys 段落头精确名（如 "LHDC V5"），读不到回落 Masks 映射名（如 "LHDC"）。
+     */
     val codec: String? = null,
     /** 采样率（如 "192kHz"）；null 表示未知。 */
     val rate: String? = null,
@@ -46,10 +49,12 @@ data class HomeUiState(
     /** 码率质量档（如 "1000kbps"/"自适应"）；null 表示未识别。 */
     val quality: String? = null,
     /**
-     * Task 43：传输层实况（如 "400k · ABR"），来自 dumpsys 的 "A2DP State:" 段。
-     * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null，第六格显示「—」（诚实原则）。
+     * Task 43/44：传输层实况码率（kbps，如 400），来自 dumpsys 的 "A2DP <codec> State:" 段。
+     * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null，实际传输卡显示「—」（诚实原则）。
      */
-    val realtimeBitrate: String? = null,
+    val realtimeKbps: Int? = null,
+    /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。 */
+    val realtimeQualityMode: String? = null,
     /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
     val fullBars: Boolean = false,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
@@ -101,6 +106,12 @@ fun HomeScreen(
             }
 
             StatusCard(state)
+
+            // Task 44：实际传输独立成卡（用户拍板），与上方「设置参数」明确区隔；
+            // 未连接耳机时整卡隐藏，保持首屏简洁。
+            if (state.headsetName != null) {
+                RealtimeCard(state)
+            }
 
             Spacer(Modifier.weight(1f))
 
@@ -255,24 +266,65 @@ private fun StatusLine(state: HomeUiState) {
 }
 
 /**
- * 明细格：编码器 / 采样率 / 位深 / 码率 + 第六格「实际传输」（Task 43，2×2 → 2×3）。
- * 各格 label + 值（未知显示 "—"）；第六格读不到传输层实况时也常驻占位，
- * 六格结构稳定不跳动（左下留空，实际传输固定右下=第六格）。
+ * 明细格：编码器 / 采样率 / 位深 / 码率（2×2）。
+ * Task 44：「实际传输」移出本格独立成卡（见 RealtimeCard），本格回到 2×2。
  */
 @Composable
 private fun DetailGrid(state: HomeUiState) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         DetailRow("编码器" to state.codec, "采样率" to state.rate)
         DetailRow("位深" to state.bits, "码率" to state.quality)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+    }
+}
+
+/**
+ * Task 44：实际传输独立卡（用户中途拍板，替代原「第六格/全宽长条」方案）。
+ * 结构：标题行「实际传输」+ 大字值（如 400 kbps）；有数据时调度状态行
+ * （ABR 必须带「自适应」三字——用户要求，别人不认识 ABR 缩写）；
+ * 解释行说明「为什么这么设置」。读不到数据时值显示「—」，解释行换成诚实说明
+ * （目前仅 vivo 机型实测可读）。用默认卡面色，与上方 primaryContainer 状态卡区隔。
+ */
+@Composable
+private fun RealtimeCard(state: HomeUiState) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Spacer(Modifier.weight(1f))
-            DetailCell(
-                label = "实际传输",
-                value = state.realtimeBitrate,
-                modifier = Modifier.weight(1f),
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "实际传输",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = state.realtimeKbps?.let { "$it kbps" } ?: "—",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            val qm = state.realtimeQualityMode
+            if (state.realtimeKbps != null && qm != null) {
+                Text(
+                    text = if (qm.contains("ABR", ignoreCase = true)) {
+                        "自适应调度（ABR）中"
+                    } else {
+                        "调度模式：$qm"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            Text(
+                text = if (state.realtimeKbps != null) {
+                    // 用户要求的解释行：说清楚为什么这么设置
+                    "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度"
+                } else {
+                    "本机栈不暴露实时传输数据（目前仅 vivo 机型实测可读）"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -352,11 +404,12 @@ private fun HomeScreenPreviewLight() {
         HomeScreen(
             state = HomeUiState(
                 headsetName = "OPPO Enco X3",
-                codec = "LHDC",
+                codec = "LHDC V5",
                 rate = "192kHz",
                 bits = "24bit",
                 quality = "1000kbps",
-                realtimeBitrate = "400k · ABR",
+                realtimeKbps = 400,
+                realtimeQualityMode = "ABR",
                 fullBars = true,
                 autoApplyEnabled = true,
             ),
