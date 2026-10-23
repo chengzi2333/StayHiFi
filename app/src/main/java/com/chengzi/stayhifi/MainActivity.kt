@@ -130,6 +130,9 @@ class MainActivity : ComponentActivity() {
     private var updateMessage by mutableStateOf<String?>(null)
     private var updateDialog by mutableStateOf<UpdateDialogUi?>(null)
     private var updateDownloadJob: Job? = null
+    // Task 39：下载任务身份令牌——每次发起下载换一个新令牌，
+    // 旧 job 残留的 catch/回调写 UI 前凭引用比较识别自己已过期
+    private var updateDownloadToken: Any? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -439,14 +442,23 @@ class MainActivity : ComponentActivity() {
         updateDialog = dialog.copy(
             downloading = true, error = null, progressPercent = null, downloadedMb = 0f,
         )
+        // Task 39：重试/重新发起前取消旧下载 job——阻塞式 IO 未必立刻响应取消，
+        // 不取消的话旧 job 的 catch 与新 job 的进度回调会交叉覆写弹窗状态（进度回跳的根因）
+        updateDownloadJob?.cancel()
+        // Task 39：每次下载发新身份令牌；下行在主线程串行执行，旧 job 的 Main 回调必定看到新令牌
+        val token = Any()
+        updateDownloadToken = token
         updateDownloadJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
                 UpdateChecker.downloadApk(dialog.apkUrl, dest) { downloaded, total ->
                     // 进度直写 snapshot state（快照系统允许跨线程写），省掉每 64KB 一次切线程
                     updateDialog?.takeIf { it.downloading }?.let { cur ->
+                        // Task 39：单调守卫——旧 job 残留回调/乱序写入只许前进不许倒退
+                        val newPercent = if (total > 0) (downloaded * 100 / total).toInt() else null
                         updateDialog = cur.copy(
-                            progressPercent = if (total > 0) (downloaded * 100 / total).toInt() else null,
-                            downloadedMb = downloaded / 1048576f,
+                            progressPercent = newPercent?.let { maxOf(cur.progressPercent ?: 0, it) }
+                                ?: cur.progressPercent,
+                            downloadedMb = maxOf(cur.downloadedMb, downloaded / 1048576f),
                         )
                     }
                 }
@@ -458,6 +470,12 @@ class MainActivity : ComponentActivity() {
                     LogStore.log("下载更新包失败: $t")
                 }
                 withContext(Dispatchers.Main) {
+                    // Task 39：身份校验——本 job 已被新下载顶替（或弹窗已取消重建），
+                    // 过期 catch 只记日志不写 UI，防止旧任务把新任务的进度/状态回滚
+                    if (updateDownloadToken !== token) {
+                        LogStore.log("过期下载任务结束，忽略其状态写回: $t")
+                        return@withContext
+                    }
                     // 弹窗已被用户关闭则不复活
                     updateDialog?.let {
                         updateDialog = it.copy(
@@ -481,6 +499,8 @@ class MainActivity : ComponentActivity() {
             ).delete()
         }
         updateDownloadJob = null
+        // Task 39：取消下载同时作废令牌，被取消 job 迟到的 catch 不再碰 UI
+        updateDownloadToken = null
         updateDialog = null
     }
 
