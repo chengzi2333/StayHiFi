@@ -31,7 +31,7 @@ StayHiFi does exactly one thing: the instant a headset connects, it writes the p
 - **Two-state status card**: "At this phone's maximum output quality" / "Not maxed out · tap to retry" — one glance tells all
 - **Auto re-max on reconnect**: a foreground service listens for connection events — near-zero battery drain, no polling
 - **Persistent silent notification**: optional live parameter readout; plus a QS tile for one-tap status
-- **iOS-style floating Dock navigation**: spring lens + jelly-physics motion (ported from FlClash, GPL attribution)
+- **iOS-style floating Dock navigation**: spring lens + jelly-physics motion, drag-tracking
 - **Record wizard** (optional diagnostic tool): capture the current negotiated parameters once and archive them to the Devices page, with device model / Android version provenance
 - **Material You**: dynamic colors, light and dark themes follow the system
 
