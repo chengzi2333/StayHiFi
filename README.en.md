@@ -1,69 +1,77 @@
-[简体中文](README.md) | [繁體中文](README.zh-TW.md) | [English] | [한국어](README.ko.md)
+<div align="center">
+  <img src="docs/marketing/logo.png" width="128" alt="StayHiFi logo">
+  <h1>StayHiFi</h1>
+  <p><strong>Bluetooth on, quality maxed — no root, set it up once and forget it</strong></p>
+  <p><a href="README.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | [English] | <a href="README.ko.md">한국어</a></p>
+  <p>
+    <a href="https://github.com/chengzi2333/StayHiFi/releases"><img src="https://img.shields.io/github/v/release/chengzi2333/StayHiFi" alt="Release"></a>
+    <a href="https://github.com/chengzi2333/StayHiFi/releases"><img src="https://img.shields.io/github/downloads/chengzi2333/StayHiFi/total" alt="Downloads"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/chengzi2333/StayHiFi" alt="License"></a>
+    <img src="https://img.shields.io/badge/Android-10%2B-green" alt="Android 10+">
+  </p>
+</div>
 
-# StayHiFi 音质常驻
+## Why StayHiFi
 
-**Set it once — it stays that way.**
+For compatibility and power reasons, vendors ship Bluetooth codecs with conservative defaults (SBC / 48 kHz / adaptive bitrate) — pay HiFi money, hear MP3 sound. To actually run your headset at its real capability, you'd otherwise have to dig into **Developer Options** after every connection and manually set codec / sample rate / bit depth — and the settings **roll back on disconnect or when Developer Options is closed**, so every day starts over.
 
-The moment your headset connects, StayHiFi pushes your Bluetooth audio (A2DP codec) parameters to the maximum your phone has negotiated for this device — silently, in the background. No more digging into Developer Options every time.
-
-## Why this app exists
-
-Vendors ship conservative Bluetooth codec defaults for compatibility and power reasons (e.g. SBC / 48 kHz / adaptive bitpool). To actually run your headset at its negotiated capability, you would otherwise have to:
-
-- Open **Developer Options** after every connection and manually set codec / sample rate / bit depth;
-- And the settings **roll back on disconnect or when Developer Options is closed** — every day starts over.
-
-StayHiFi does exactly one thing: the instant a headset connects, it writes the parameters back.
-
-## How it works
-
-StayHiFi obtains shell-level privileges through **Shizuku or Stellar** (either one), and calls the system Bluetooth stack's hidden `setCodecConfigPreference()` API **via reflection** to write the A2DP codec configuration.
-
-- It does **not** patch the system, unlock hidden codecs, or exceed the hardware-negotiated capability ceiling.
-- A foreground service listens for connection events only — near-zero extra battery drain, no polling loop.
-- There is no parameter-target stored in the app: the "max out" target is **derived on the fly** for your specific headset × phone × ROM combination (capability-mask maximum + a built-in best-tier table per codec), and **verified after writing** by reading the configuration back.
-
-### Status model: two states
-
-The home card shows one of exactly two states:
-
-- **Not maxed out** — the current negotiated parameters are below this phone's maximum, and StayHiFi will push them up on connection.
-- **At this phone's current maximum output quality** — the negotiated configuration already equals the derived target; the goal is reached and nothing further is pushed.
-
-If the phone's own capability ceiling changes (codec mask or codec-tier table update), the target is re-derived automatically.
+StayHiFi does exactly one thing: the instant a headset connects, it writes the parameters back to the maximum your device has negotiated — silently, in the background.
 
 ## Screenshots
 
-<img src="docs/marketing/screenshots/01-home.png" width="280" alt="Home status card">
-<img src="docs/marketing/screenshots/02-devices.png" width="280" alt="Devices page">
-<img src="docs/marketing/screenshots/03-settings.png" width="280" alt="Settings page">
+<p>
+  <img src="docs/marketing/screenshots/01-home.png" width="260" alt="Home status card">
+  <img src="docs/marketing/screenshots/02-devices.png" width="260" alt="Devices page">
+  <img src="docs/marketing/screenshots/03-settings.png" width="260" alt="Settings page">
+</p>
+
+## Features
+
+- **Maxed the moment you connect**: any Bluetooth headset, zero per-device adaptation — the target parameters are derived on the fly for your headset × phone × ROM combination, and verified by reading the config back after writing
+- **Two-state status card**: "At this phone's maximum output quality" / "Not maxed out · tap to retry" — one glance tells all
+- **Auto re-max on reconnect**: a foreground service listens for connection events — near-zero battery drain, no polling
+- **Persistent silent notification**: optional live parameter readout; plus a QS tile for one-tap status
+- **iOS-style floating Dock navigation**: spring lens + jelly-physics motion (ported from FlClash, GPL attribution)
+- **Record wizard** (optional diagnostic tool): capture the current negotiated parameters once and archive them to the Devices page, with device model / Android version provenance
+- **Material You**: dynamic colors, light and dark themes follow the system
+
+## How it works
+
+StayHiFi obtains shell-level privileges through **Shizuku or Stellar** (either one), then calls the system Bluetooth stack's hidden `setCodecConfigPreference()` API via reflection to write the A2DP codec configuration.
+
+- It does **not** patch the system, unlock hidden codecs, or exceed the hardware-negotiated capability ceiling
+- The only external interaction is local IPC with Shizuku/Stellar — zero network requests
 
 ## Install
 
-Official channels are only these two (CoolApk / GitHub). Do not install APKs from anywhere else:
+> ⚠️ The only official channel right now is **GitHub Releases** (CoolApk listing in progress). Do not install APKs from anywhere else.
 
-- **CoolApk**: search "音质常驻" in the app market
-- **GitHub Releases**: <https://github.com/chengzi2333/StayHiFi/releases> (SHA-256 of each APK is attached to the release page — verify before installing)
+1. Install the **Shizuku** or **Stellar** manager and activate it per its instructions (wireless debugging / wired adb — no root required)
+2. Download the APK from [GitHub Releases](https://github.com/chengzi2333/StayHiFi/releases) — **one universal package covers all devices**, no need to pick an ABI variant; SHA-256 checksums and the signing-certificate fingerprint are attached to the release page, verify before installing
 
-Prerequisite: install the **Shizuku** or **Stellar** manager and activate it per its own instructions (wireless debugging or wired adb — no root required).
-
-Package name: `com.chengzi.stayhifi`.
+Requires: Android 10+.
 
 ## Usage
 
-1. On first launch, follow the **five-step onboarding**: choose a privileged carrier (Shizuku / Stellar) → grant authorization → connect your headset → choose parameter source → configure keep-alive
-2. The "three gates" of keep-alive (aggressive background-kill on Chinese vendor ROMs — do all three for reliability):
+1. On first launch, follow the **five-step onboarding**: choose a privileged carrier (Shizuku / Stellar) → grant authorization → connect your headset → choose parameter source → keep-alive settings
+2. The "three gates" of keep-alive (Chinese vendor ROMs kill background apps aggressively — do all three for reliability):
    - **Allow auto-launch** (system settings → app management)
    - **Add to battery whitelist** (disable battery optimization)
    - **Allow background high power usage + lock the recents card**: in Settings → Battery → background power management, allow this app; and in the recents view, pull the app card down and tap "lock" to prevent swipe-to-kill
-3. That's it. When a headset connects, parameters are pushed to the maximum automatically; a silent persistent notification stays in the notification shade (optionally showing live parameters).
+3. That's it. When a headset connects, parameters are maxed automatically; the home status card tells you live whether you've hit the ceiling
 
-Adapting to a new device: no template is needed. The target is derived on the fly by the app per headset × phone × ROM (built-in best-tier table per codec), then verified by reading back after writing. The **record wizard** in onboarding is a diagnostic tool — it captures the current parameters once and stores them as a local record (it does not feed the max-out decision).
+## Feedback & contact
+
+There are countless device models out there and vendor ROMs vary wildly, so some devices inevitably won't be covered. If you run into problems, feel free to reach out through any channel:
+
+- **GitHub Issues**: the preferred place for bug reports and feature requests — attaching the content of the in-app "Logs" page helps the most
+- **CoolApk**: @一般社畜橙子 (CoolApk handle)
+- **Xiaohongshu**: @橙橙橙子Orenji (Xiaohongshu handle)
 
 ## Privacy
 
-- **Zero data collection**: all data stays on your device only — no network uploads, no analytics, no account system.
-- The only external interaction is local IPC with Shizuku / Stellar.
+- **Zero data collection**: all data stays on your device only — no network uploads, no analytics, no account system
+- The only external interaction is local IPC with Shizuku/Stellar
 
 ## Disclaimer
 
@@ -72,3 +80,5 @@ This project has no affiliation with, sponsorship from, or endorsement by **Shiz
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). Third-party component notices in [NOTICE](NOTICE). Device-profile contribution guide in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+The source code is free to use and modify, but **the "StayHiFi" name and icon are not part of the license grant** — forks and redistributions must use a different name and icon (following the common practice of Shizuku / Seal).
