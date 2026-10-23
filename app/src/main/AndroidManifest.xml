@@ -59,6 +59,13 @@
             </intent-filter>
         </receiver>
 
+        <!-- Task 41：自更新覆盖装成功后（本包被替换）清理下载的 APK 残包 -->
+        <receiver android:name=".updater.UpdateCleanupReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- FGS 主触发载体：运行时注册 ACL_CONNECTED，常驻静默通知 -->
         <service
             android:name=".trigger.ListenerService"

@@ -7,6 +7,7 @@ import androidx.core.content.ContextCompat
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.trigger.ListenerService
+import com.chengzi.stayhifi.updater.UpdateCleanup
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -26,6 +27,11 @@ class StayHiFiApp : Application() {
         // 不预热时首次切设备页才冷初始化，全砸在切换帧上（实测单帧 150ms）。
         CoroutineScope(Dispatchers.IO).launch {
             runCatching { ProfileRepository(applicationContext).all.first() }
+        }
+        // Task 41：启动兜底清理自更新 APK 残包（升级成功走 MY_PACKAGE_REPLACED
+        // 更快，这里是下载后取消安装/安装失败/进程被杀等残留场景的保险）。
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { UpdateCleanup.deleteStaleApks(applicationContext) }
         }
         // 对抗审查 C2：权限被撤（隐私恐慌后常见）时 startForeground 会抛 SecurityException
         // 连带进程崩溃死循环。拉起前先查 BLUETOOTH_CONNECT，runBlocking 整体兜底 try/catch。
