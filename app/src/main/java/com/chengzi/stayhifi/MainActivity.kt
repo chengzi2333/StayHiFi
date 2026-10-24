@@ -904,11 +904,16 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    // 每次刷新递增代次；慢读取可并发，但只有最新轮次允许写首页状态与 PCM 前值。
+    @Volatile private var refreshGeneration = 0L
+
     /** onResume / ApplyNow 后刷新：载体异常 → 红条；否则 bind 读第一台设备实况。 */
     private fun refreshHome() {
         lifecycleScope.launch {
+            val gen = ++refreshGeneration
             val running = withContext(Dispatchers.IO) { provider.isRunning }
             if (!running) {
+                if (gen != refreshGeneration) return@launch
                 homeState = homeState.copy(
                     carrierAlert = "Shizuku/Stellar 未运行，点我修复",
                     headsetName = null,
@@ -925,6 +930,7 @@ class MainActivity : ComponentActivity() {
                 connectedName = null
                 return@launch
             }
+            if (gen != refreshGeneration) return@launch
             homeState = homeState.copy(carrierAlert = null)
             if (!withContext(Dispatchers.IO) { provider.hasPermission }) {
                 LogStore.log("首页刷新：特权未授予，跳过设备读取")
@@ -934,8 +940,10 @@ class MainActivity : ComponentActivity() {
                 // Task 46（Task 3 审查捎带裁定）：bind 同为 binder 调用，ColorOS 冻结载体
                 // 时同样可能永久阻塞，与 dumpDevices/readConfig 同口径包 8s 超时；
                 // 超时早退与「特权未授予」分支一致（直接 return，不清空已有状态）。
-                val svc = withContext(Dispatchers.IO) {
-                    withTimeoutOrNull(8_000) { provider.bind() }
+                // 超时必须在 IO 外层：取消的是等待线程，已发出的同步 binder 调用本身
+                // 不可中断，IO 线程可能滞留。
+                val svc = withTimeoutOrNull(8_000) {
+                    withContext(Dispatchers.IO) { provider.bind() }
                 }
                 if (svc == null) {
                     LogStore.log("首页刷新：bind 超时(8s)，本轮跳过")
@@ -945,15 +953,17 @@ class MainActivity : ComponentActivity() {
                 // 浸泡实测已踩过），dumpDevices/readConfig 各包 8s 超时（同
                 // ListenerService 兜底口径）；超时按「本轮读不到」走与无设备相同的
                 // 清空/早退路径，避免首页协程挂起停旧数据被误诊为「参数显示不出来」。
-                val devicesJson = withContext(Dispatchers.IO) {
-                    withTimeoutOrNull(8_000) { svc.dumpDevices() }
+                val devicesJson = withTimeoutOrNull(8_000) {
+                    withContext(Dispatchers.IO) { svc.dumpDevices() }
                 }
                 if (devicesJson == null) {
                     LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+                    if (gen != refreshGeneration) return@launch
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
-                        realtimeKbps = null, realtimeQualityMode = null, fullBars = false,
+                        realtimeKbps = null, realtimeQualityMode = null,
+                        realtimeNotStreaming = false, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -961,6 +971,7 @@ class MainActivity : ComponentActivity() {
                 }
                 val arr = JSONArray(devicesJson)
                 if (arr.length() == 0) {
+                    if (gen != refreshGeneration) return@launch
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
@@ -973,15 +984,17 @@ class MainActivity : ComponentActivity() {
                 }
                 val mac = arr.getJSONObject(0).getString("mac")
                 val name = arr.getJSONObject(0).getString("name")
-                val stateJson = withContext(Dispatchers.IO) {
-                    withTimeoutOrNull(8_000) { svc.readConfig(mac) }
+                val stateJson = withTimeoutOrNull(8_000) {
+                    withContext(Dispatchers.IO) { svc.readConfig(mac) }
                 }
                 if (stateJson == null) {
                     LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+                    if (gen != refreshGeneration) return@launch
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
-                        realtimeKbps = null, realtimeQualityMode = null, fullBars = false,
+                        realtimeKbps = null, realtimeQualityMode = null,
+                        realtimeNotStreaming = false, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1006,6 +1019,7 @@ class MainActivity : ComponentActivity() {
                 // Task 46：播放判定先行——isMusicActive=false 时不再读 dump，首轮直接
                 // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
                 // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
+                // （旧 dump 读取块已由下方 isMusicActive 版取代，合并时整段移除。）
                 // Task 45：ColorOS 新栈 LHDC 在 vendor 段（0x10..0x1F），
                 // 用 selectable 能力掩码佐证后再认 LHDC。
                 val capsMask = Masks.capsRateMask(current.codecType, selectable)
@@ -1019,8 +1033,10 @@ class MainActivity : ComponentActivity() {
                     logBtDiag(null)
                 } else {
                     try {
-                        val btJson = withContext(Dispatchers.IO) {
-                            withTimeoutOrNull(8_000) { svc.dumpBtState() }
+                        // Task 46 并行分支：dumpBtState 超时必须在 IO 外层（对齐
+                        // ListenerService 范式；取消的是等待，阻塞中的 binder 不可中断）。
+                        val btJson = withTimeoutOrNull(8_000) {
+                            withContext(Dispatchers.IO) { svc.dumpBtState() }
                         }
                         if (btJson == null) {
                             realtimeDiag(current, codecName, "超时(8s)")
@@ -1062,6 +1078,7 @@ class MainActivity : ComponentActivity() {
                         .filter { it.contains("State:") }
                         .forEach { LogStore.log("dumpsys段: $it") }
                 }
+                if (gen != refreshGeneration) return@launch
                 homeState = homeState.copy(
                     headsetName = name,
                     // Task 44：编码器格优先用 dumpsys 段落精确名（如 "LHDC V5"），
