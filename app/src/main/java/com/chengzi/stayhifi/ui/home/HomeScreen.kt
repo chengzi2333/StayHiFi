@@ -53,18 +53,18 @@ data class HomeUiState(
     val quality: String? = null,
     /**
      * Task 43/44：传输层实况码率（kbps，如 400），来自 dumpsys 的 "A2DP <codec> State:" 段。
-     * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null，实际传输行显示「—（本机栈不暴露）」。
-     * Task 45：该值在 vivo LHDC 下是粘性值（停播仍报 400000），是否真在播放以
-     * realtimeNotStreaming 为准（PCM read 计数增量判定，见 MainActivity）。
+     * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null。
+     * Task 46：该值在 vivo LHDC 下是粘性值（停播仍报 400000），是否真在播放以
+     * realtimeNotStreaming 为准（AudioManager.isMusicActive 即时判定，见 MainActivity）。
      */
     val realtimeKbps: Int? = null,
     /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。 */
     val realtimeQualityMode: String? = null,
     /**
-     * Task 44/45：判定为未在流式传输 → 实际传输行显示「未在播放」。
-     * 两条路径：栈明确回报 bitrate ≤ 0（LDAC 实证 -1）；
-     * 或 PCM read actual 计数相邻两次轮询不涨（Task 45，修 vivo LHDC 粘性值）。
-     * 与「栈不暴露数据」（realtimeKbps=null 且本字段 false → 「—」）区分，空态三分。
+     * Task 44/46：判定为未在流式传输 → 实际传输行显示「未在播放」。
+     * 两条路径：AudioManager.isMusicActive=false（Task 46，即时主判定）；
+     * 或栈明确回报 bitrate ≤ 0（LDAC 实证 -1，保留兼容）。
+     * 与「本机暂不支持抓取」（realtimeKbps=null 且本字段 false → 「—」）区分，空态三分。
      */
     val realtimeNotStreaming: Boolean = false,
     /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
@@ -302,8 +302,8 @@ private fun DetailGrid(state: HomeUiState) {
  * Task 45：实际传输行（方案 C）——分隔线 + 「实际传输」行 + 超小字解释行。
  * 空态三分（沿 Task 44 语义）：
  *   正常        → 「400 kbps · ABR（自适应）」（ABR 必须带「自适应」三字——别人不认识缩写）
- *   未在播放     → 「未在播放」（Task 45 PCM 计数增量判定，停歌不再残留粘性码率）
- *   栈不暴露     → 「—（本机栈不暴露）」
+ *   未在播放     → 「未在播放」（Task 46 isMusicActive 即时判定，停歌不再残留粘性码率）
+ *   暂不支持抓取 → 「—（本机暂不支持抓取）」（Task 46 用户拍板的人话文案）
  * 解释行说明「为什么这么设置」；未连接耳机时本段由调用方整段跳过。
  */
 @Composable
@@ -329,14 +329,19 @@ private fun RealtimeSection(state: HomeUiState) {
                             else -> "${state.realtimeKbps} kbps"
                         }
                     }
-                    else -> "—（本机栈不暴露）"
+                    else -> "—（本机暂不支持抓取）"
                 },
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
             )
         }
         Text(
-            text = "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度",
+            // Task 46（用户中途追加）：只有抓取不支持时换成反馈指引，其余状态保留调度解释。
+            text = if (!state.realtimeNotStreaming && state.realtimeKbps == null) {
+                "这个机型的系统不开放实时码率读取，欢迎到设置-日志页把日志反馈给作者"
+            } else {
+                "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度"
+            },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

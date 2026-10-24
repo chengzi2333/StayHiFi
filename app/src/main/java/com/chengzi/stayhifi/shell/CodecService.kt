@@ -156,7 +156,8 @@ class CodecService : ICodecService.Stub() {
     // Task 43：传输层实况读取——dumpsys bluetooth_manager 的 "A2DP <codec> State:" 段
     // 暴露真实传输码率/调度策略（vivo 栈实证：LHDC quality mode=ABR、
     // transmission bitrate=400000 即 400kbps）。shell uid 有权限跑 dumpsys。
-    // 只回传 State:/quality/bitrate/PCM read 相关行，减小 binder 负载；解析归 app 侧 BtStateParser。
+    // 只回传 State:/quality/bitrate 相关行，减小 binder 负载；解析归 app 侧 BtStateParser。
+    // Task 46：播放状态由 AudioManager.isMusicActive 判定，不再回传 PCM read 计数。
     override fun dumpBtState(): String = try {
         buildJsonObject {
             put("dump", runDumpsysFiltered(DUMP_TIMEOUT_MS))
@@ -178,12 +179,9 @@ class CodecService : ICodecService.Stub() {
         val reader = Thread {
             proc.inputStream.bufferedReader().useLines { lines ->
                 for (line in lines) {
-                    // Task 45：加留 "PCM read" 行——LHDC 的 transmission bitrate 是粘性值
-                    // （停播仍报 400000），app 侧改用 PCM read actual 计数增量判定未在播放
                     if (line.contains("State:") ||
                         line.contains("quality", ignoreCase = true) ||
-                        line.contains("bitrate", ignoreCase = true) ||
-                        line.contains("PCM read", ignoreCase = true)
+                        line.contains("bitrate", ignoreCase = true)
                     ) {
                         synchronized(kept) { kept.append(line).append('\n') }
                     }

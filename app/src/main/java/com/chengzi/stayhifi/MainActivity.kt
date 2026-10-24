@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -106,6 +107,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var provider: ShizukuShellProvider
     private lateinit var settingsRepo: SettingsRepository
     private lateinit var profileRepo: ProfileRepository
+    // Task 46：公开 API 本地即时判定音乐播放，替代需要两轮采样的 PCM 计数增量。
+    private val audioManager by lazy { getSystemService(AudioManager::class.java) }
 
     // ---- Onboarding 状态 ----
     private var onboardingState by mutableStateOf(OnboardingUiState())
@@ -255,18 +258,17 @@ class MainActivity : ComponentActivity() {
                 if (prevPage != -1 && cur == 0 && prevPage != 0) refreshHome()
                 prevPage = cur
             }
-            // Task 44 追加：首页可见期间每 5s 补刷实况——停歌后残留旧码率的修复
-            // （栈回报 -1 未流式，卡片随之显示「未在播放」）。
+            // Task 46：首页可见期间每 3s 补刷实况（原 5s，用户要求更快反映停播）。
             // 仅首页 tab 且 RESUMED 时跑：离开页面（isHomePage 翻 false 取消协程）/
-            // 退后台（repeatOnLifecycle 挂起）即停；dumpsys 单次开销可控，5s 合理。
-            // 无连接设备时跳过（ headsetName==null ），避免未授权分支每 5s 刷一条日志。
+            // 退后台（repeatOnLifecycle 挂起）即停；dumpsys 开销前台 3s 一次可接受（用户拍板）。
+            // 无连接设备时跳过（ headsetName==null ），避免未授权分支每 3s 刷一条日志。
             val isHomePage = (pageOrder?.get(pagerState.currentPage) ?: pagerState.currentPage) == 0
             val lifecycleOwner = LocalLifecycleOwner.current
             LaunchedEffect(isHomePage, lifecycleOwner) {
                 if (!isHomePage) return@LaunchedEffect
                 lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                     while (true) {
-                        delay(5_000)
+                        delay(3_000)
                         if (homeState.headsetName != null) refreshHome()
                     }
                 }
@@ -885,8 +887,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Task 44：dumpBtState 诊断日志去重——5s 轮询下同一条失败日志会刷屏，
-    // 只在诊断内容变化时记一条；传 null 表示恢复正常（下次再失败会重新记）。
+    // Task 46：dumpBtState 诊断日志去重——3s 轮询下同一条失败日志会刷屏，
+    // 只在诊断内容变化时记一条；传 null 表示恢复可读/进入未播放态（下次失败会重新记）。
     private var btDiagLast: String? = null
     private fun logBtDiag(msg: String?) {
         if (msg == btDiagLast) return
@@ -894,11 +896,13 @@ class MainActivity : ComponentActivity() {
         if (msg != null) LogStore.log(msg)
     }
 
-    // Task 45：PCM read actual 计数前值（按 MAC 记忆）——vivo 栈 LHDC 的 bitrate 是
-    // 粘性值（停播仍报 400000，LDAC 才有 -1 未流式语义），改用相邻两次 5s 轮询的
-    // PCM read 计数增量判定「未在播放」；换设备/断连时清零重计。
-    private var lastPcmReadActual: Long? = null
-    private var lastPcmMac: String? = null
+    // Task 46：结构化抓取诊断沿用 logBtDiag 去重，包含反馈定位所需全部上下文。
+    private fun realtimeDiag(current: CodecConfig, codecName: String, reason: String) {
+        logBtDiag(
+            "实际传输抓取诊断: 机型=${DeviceNames.marketModel()} " +
+                "codecType=${current.codecType} 编码器=$codecName 原因=$reason"
+        )
+    }
 
     /** onResume / ApplyNow 后刷新：载体异常 → 红条；否则 bind 读第一台设备实况。 */
     private fun refreshHome() {
@@ -919,8 +923,6 @@ class MainActivity : ComponentActivity() {
                 )
                 connectedMac = null
                 connectedName = null
-                lastPcmReadActual = null   // Task 45：断连/载体挂掉时清 PCM 前值，重连后按首读处理
-                lastPcmMac = null
                 return@launch
             }
             homeState = homeState.copy(carrierAlert = null)
@@ -955,8 +957,6 @@ class MainActivity : ComponentActivity() {
                     )
                     connectedMac = null
                     connectedName = null
-                    lastPcmReadActual = null   // Task 45：同上，清 PCM 前值
-                    lastPcmMac = null
                     return@launch
                 }
                 val arr = JSONArray(devicesJson)
@@ -969,8 +969,6 @@ class MainActivity : ComponentActivity() {
                     )
                     connectedMac = null
                     connectedName = null
-                    lastPcmReadActual = null   // Task 45：同上，清 PCM 前值
-                    lastPcmMac = null
                     return@launch
                 }
                 val mac = arr.getJSONObject(0).getString("mac")
@@ -987,8 +985,6 @@ class MainActivity : ComponentActivity() {
                     )
                     connectedMac = null
                     connectedName = null
-                    lastPcmReadActual = null   // Task 45：同上，清 PCM 前值
-                    lastPcmMac = null
                     return@launch
                 }
                 val obj = JSONObject(stateJson)
@@ -1007,76 +1003,64 @@ class MainActivity : ComponentActivity() {
                 val fullBars = ApplyPolicy.matches(
                     ApplyPolicy.deriveTarget(current, selectable), current,
                 )
-                // Task 43：同批拉传输层实况（载体本来就绑着，多一次 binder 调用而已）。
-                // 仅 vivo 栈实证可读；其他栈/未流式解析不到 → null，实际传输行显示「—」。
-                // Task 44：静默失败补日志——error JSON 与 parse 为空两条路径此前无任何日志，
-                // 是「一直 —」的定位盲区；parse 成功时顺带拿段落精确名（如 "LHDC V5"）。
-                // Task 44 追加：notStreaming（栈回报 -1）单独透传，UI 据此显示「未在播放」。
-                var preciseCodec: String? = null
-                var realtimeKbps: Int? = null
-                var realtimeQm: String? = null
-                var notStreaming = false
-                // Task 46：保留本次 dump 原文，未知 vendor 编码器诊断日志复用同一次
-                // dumpBtState 返回取 "State:" 段头行，禁止为日志再开一次 dumpsys。
-                var btDump: String? = null
-                try {
-                    // Task 46（Task 3 审查捎带裁定）：dumpBtState 同为 binder 调用，
-                    // 同口径 8s 超时；超时走 logBtDiag 去重（5s 轮询下不刷屏），
-                    // 本轮实况格降级显示「—」，codec 等已读到的字段照常更新。
-                    val btJson = withContext(Dispatchers.IO) {
-                        withTimeoutOrNull(8_000) { svc.dumpBtState() }
-                    }
-                    if (btJson == null) {
-                        logBtDiag("首页刷新：传输实况超时(8s)，本轮跳过")
-                    } else {
-                        val btObj = JSONObject(btJson)
-                        if (btObj.has("error")) {
-                            logBtDiag("首页 dumpBtState error: ${btObj.optString("error")}")
-                        } else {
-                            btDump = btObj.optString("dump")
-                            val parsed = BtStateParser.parse(
-                                btDump.orEmpty(), Masks.codecName(current.codecType),
-                            )
-                            if (parsed == null) {
-                                logBtDiag("首页 dumpBtState 无匹配段落或解析失败（实际传输行降级显示—）")
-                            } else {
-                                logBtDiag(null)
-                                preciseCodec = parsed.codec
-                                realtimeKbps = parsed.bitrateKbps
-                                realtimeQm = parsed.qualityMode
-                                notStreaming = parsed.notStreaming
-                                // Task 45：粘性值修复——LHDC 段 bitrate 停播不归零（LDAC 才有 -1 语义），
-                                // 改用 PCM read actual 计数增量判定：相邻两次 5s 轮询值不涨 → 未在播放。
-                                // 首次读取无前值按「播放中」（isStreamingByPcm 内部保证），避免误报；
-                                // 栈不暴露 PCM 行（pcmReadActual=null）时回落原有 bitrate 判据。
-                                val pcm = parsed.pcmReadActual
-                                if (pcm != null) {
-                                    val prev = lastPcmReadActual.takeIf { lastPcmMac == mac }
-                                    if (!notStreaming && !BtStateParser.isStreamingByPcm(prev, pcm)) {
-                                        notStreaming = true
-                                    }
-                                    lastPcmReadActual = pcm
-                                    lastPcmMac = mac
-                                }
-                            }
-                        }
-                    }
-                } catch (t: Throwable) {
-                    logBtDiag("传输层实况读取失败（实际传输行降级显示—）: $t")
-                }
+                // Task 46：播放判定先行——isMusicActive=false 时不再读 dump，首轮直接
+                // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
+                // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
                 // Task 45：ColorOS 新栈 LHDC 在 vendor 段（0x10..0x1F），
                 // 用 selectable 能力掩码佐证后再认 LHDC。
                 val capsMask = Masks.capsRateMask(current.codecType, selectable)
+                val codecName = Masks.codecName(current.codecType, capsMask)
+                val isMusicActive = audioManager.isMusicActive
+                var preciseCodec: String? = null
+                var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
+                // 保留本次 dump 原文，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
+                var btDump: String? = null
+                if (!isMusicActive) {
+                    logBtDiag(null)
+                } else {
+                    try {
+                        val btJson = withContext(Dispatchers.IO) {
+                            withTimeoutOrNull(8_000) { svc.dumpBtState() }
+                        }
+                        if (btJson == null) {
+                            realtimeDiag(current, codecName, "超时(8s)")
+                        } else {
+                            val btObj = JSONObject(btJson)
+                            if (btObj.has("error")) {
+                                realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
+                            } else {
+                                btDump = btObj.optString("dump")
+                                val parsed = BtStateParser.parse(
+                                    btDump.orEmpty(), Masks.codecName(current.codecType),
+                                )
+                                realtime = BtStateParser.realtimeDisplay(isMusicActive = true, state = parsed)
+                                if (parsed == null) {
+                                    realtimeDiag(current, codecName, "无匹配段落")
+                                } else {
+                                    preciseCodec = parsed.codec
+                                    if (!realtime.notStreaming && realtime.bitrateKbps == null) {
+                                        realtimeDiag(current, codecName, "无码率字段")
+                                    } else {
+                                        logBtDiag(null)
+                                    }
+                                }
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        realtimeDiag(current, codecName, "读取异常: $t")
+                    }
+                }
                 // Task 46：未知 vendor 编码器诊断（纯日志，不改显示/映射行为）——
                 // 佐证版解析仍落 vendor 兜底才打（已佐证 LHDC 的 19 号不再打）；
                 // 进程内按 mac+raw 签名去重，段头行复用上方同一次 dumpBtState 返回。
-                if (Masks.codecName(current.codecType, capsMask).startsWith("vendor(") &&
+                // 未播放时无 dump，不消耗签名，待播放中抓到段头后再记录。
+                if (btDump != null && codecName.startsWith("vendor(") &&
                     recordUnknownVendor(mac, current)
                 ) {
                     LogStore.log("未知编码器 raw: ${current.toJson()}")
-                    btDump?.lineSequence()
-                        ?.filter { it.contains("State:") }
-                        ?.forEach { LogStore.log("dumpsys段: $it") }
+                    btDump.lineSequence()
+                        .filter { it.contains("State:") }
+                        .forEach { LogStore.log("dumpsys段: $it") }
                 }
                 homeState = homeState.copy(
                     headsetName = name,
@@ -1086,9 +1070,9 @@ class MainActivity : ComponentActivity() {
                     rate = Masks.rateHz(current.sampleRate),
                     bits = Masks.bitsDepth(current.bitsPerSample),
                     quality = Masks.qualityLabel(current.codecType, current.cs1),
-                    realtimeKbps = realtimeKbps,
-                    realtimeQualityMode = realtimeQm,
-                    realtimeNotStreaming = notStreaming,
+                    realtimeKbps = realtime.bitrateKbps,
+                    realtimeQualityMode = realtime.qualityMode,
+                    realtimeNotStreaming = realtime.notStreaming,
                     fullBars = fullBars,
                 )
                 connectedMac = mac
