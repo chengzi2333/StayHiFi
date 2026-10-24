@@ -1046,8 +1046,10 @@ class MainActivity : ComponentActivity() {
                                 realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
                             } else {
                                 btDump = btObj.optString("dump")
+                                // 必须走 current+selectable 的佐证版名称；单参映射会把
+                                // ColorOS 19 变成 vendor(19)，永远匹配不到 LHDC 段。
                                 val parsed = BtStateParser.parse(
-                                    btDump.orEmpty(), Masks.codecName(current.codecType),
+                                    btDump.orEmpty(), current, selectable,
                                 )
                                 realtime = BtStateParser.realtimeDisplay(isMusicActive = true, state = parsed)
                                 if (parsed == null) {
