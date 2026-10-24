@@ -15,7 +15,7 @@
 | codecType | int | 编码器编号；0~4 为 AOSP 标准（SBC/AAC/aptX/aptX-HD/LDAC），≥5 为厂商私有（如 10=LHDC，仅 OPPO/vivo 系栈实测成立） |
 | priority | int | 优先级，满血通常 1000000 |
 | sampleRate | int | 采样率**位掩码**：1=44.1k 2=48k 4=88.2k 8=96k 16=176.4k 32=192k（可叠加，如 43=44.1k~192k 全支持） |
-| bitsPerSample | int | 位深**位掩码**：1=16bit 2=24bit |
+| bitsPerSample | int | 位深**位掩码**：1=16bit 2=24bit 4=32bit |
 | channelMode | int | 声道模式（如 2=立体声） |
 | cs1 | long | codec-specific 1，质量档，厂商私有（如 LHDC: 50888712=音质优先 1000kbps，33914889=自适应） |
 | cs2 | long | codec-specific 2 |

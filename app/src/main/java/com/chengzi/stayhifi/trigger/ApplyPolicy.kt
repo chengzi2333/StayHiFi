@@ -34,6 +34,8 @@ object ApplyPolicy {
      * 本机最高派生目标（唯一目标来源）：rate / bits 取 [selectable] 中当前 codec
      * 能力掩码的最高位；cs1 取内置「各编码器已知最佳档位表」；
      * [selectable] 中没有当前 codec 的能力条目时，rate / bits 保持 current。
+     * 能力字段为 AOSP NONE(0)（栈未暴露该维度）时同样保持 current——
+     * 0 是通配语义，不是可写入的最高档位。
      *
      * 档位表（写入被拒由 Negotiation 降级链兜底退回现状）：
      * - LDAC（codecType=4）→ 1000：AOSP 标准 LDAC_QUALITY_HIGH（990kbps 最高音质档），
@@ -43,8 +45,8 @@ object ApplyPolicy {
      */
     fun deriveTarget(current: CodecConfig, selectable: List<CodecConfig>): CodecConfig {
         val cap = selectable.firstOrNull { it.codecType == current.codecType }
-        val rate = cap?.sampleRate?.let { highestBit(it) } ?: current.sampleRate
-        val bits = cap?.bitsPerSample?.let { highestBit(it) } ?: current.bitsPerSample
+        val rate = cap?.sampleRate?.takeIf { it > 0 }?.let { highestBit(it) } ?: current.sampleRate
+        val bits = cap?.bitsPerSample?.takeIf { it > 0 }?.let { highestBit(it) } ?: current.bitsPerSample
         val cs1 = BEST_CS1[current.codecType] ?: current.cs1
         return current.copy(priority = 1_000_000, sampleRate = rate, bitsPerSample = bits, cs1 = cs1)
     }

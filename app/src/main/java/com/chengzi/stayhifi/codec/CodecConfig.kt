@@ -49,6 +49,7 @@ object Masks {
     private val BITS_NAMES: Map<Int, String> = mapOf(
         1 to "16bit",
         2 to "24bit",
+        4 to "32bit",       // AOSP BITS_PER_SAMPLE_32 = 0x1 << 2
     )
 
     /** 仅解单比特；多比特掩码（如 43=多档叠加）无法唯一确定，返回 "unknown"。 */

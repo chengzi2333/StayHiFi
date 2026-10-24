@@ -26,7 +26,7 @@ labels: ["device-profile"]
 | codecType | | |
 | priority | | |
 | sampleRate | | 位掩码：1=44.1k 2=48k 4=88.2k 8=96k 16=176.4k 32=192k |
-| bitsPerSample | | 位掩码：1=16bit 2=24bit |
+| bitsPerSample | | 位掩码：1=16bit 2=24bit 4=32bit |
 | channelMode | | |
 | cs1 | | codec-specific 1（质量档，厂商私有） |
 | cs2 | | |

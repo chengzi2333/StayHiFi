@@ -132,6 +132,37 @@ class ApplyPolicyTest {
     }
 
     @Test
+    fun deriveTargetKeepsCurrentBitsWhenCapabilityBitsAreNone() {
+        // AOSP BITS_PER_SAMPLE_NONE=0 是“未指定”，不是可写入的最高位深；
+        // 不能把 24bit 现状改成 0，再借 matches 的 0 通配语义宣称已拉满。
+        val current = golden.copy(codecType = 2, sampleRate = 2, bitsPerSample = 2)
+        val capability = CodecConfig(
+            codecType = 2, priority = 0,
+            sampleRate = 32, bitsPerSample = 0, channelMode = 2,
+            cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+        )
+
+        val target = ApplyPolicy.deriveTarget(current, listOf(capability))
+
+        assertEquals(2, target.bitsPerSample)
+    }
+
+    @Test
+    fun deriveTargetKeepsCurrentRateWhenCapabilityRateIsNone() {
+        // SAMPLE_RATE_NONE=0 同样不是可协商档位；保留现状，避免派生出空降档序列。
+        val current = golden.copy(codecType = 2, sampleRate = 2, bitsPerSample = 2)
+        val capability = CodecConfig(
+            codecType = 2, priority = 0,
+            sampleRate = 0, bitsPerSample = 3, channelMode = 2,
+            cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+        )
+
+        val target = ApplyPolicy.deriveTarget(current, listOf(capability))
+
+        assertEquals(2, target.sampleRate)
+    }
+
+    @Test
     fun deriveTargetKeepsCurrentRateBitsWhenCodecMissingInSelectable() {
         val current = golden.copy(sampleRate = 2, priority = 0)
         val otherCodec = CodecConfig(

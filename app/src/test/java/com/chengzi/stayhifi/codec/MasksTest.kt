@@ -25,6 +25,7 @@ class MasksTest {
     fun bitsDepthDecodesKnownBits() {
         assertEquals("16bit", Masks.bitsDepth(1))
         assertEquals("24bit", Masks.bitsDepth(2))
+        assertEquals("32bit", Masks.bitsDepth(4))
     }
 
     @Test
