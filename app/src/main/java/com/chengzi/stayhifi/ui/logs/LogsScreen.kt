@@ -36,12 +36,13 @@ data class LogsUiState(
 
 /** 日志页动作：上抛，本层无逻辑。 */
 sealed interface LogsAction {
+    data object Copy : LogsAction
     data object Clear : LogsAction
     data object Back : LogsAction
 }
 
 /**
- * 运行日志页：[com.chengzi.stayhifi.LogStore] 快照倒序展示 + 清空。
+ * 运行日志页：[com.chengzi.stayhifi.LogStore] 快照倒序展示 + 复制 + 清空。
  * 顶部提示「日志仅保存在本机内存」。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -107,6 +108,13 @@ fun LogsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
+                TextButton(
+                    onClick = { onAction(LogsAction.Copy) },
+                    enabled = state.lines.isNotEmpty(),
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text("复制日志")
+                }
                 TextButton(
                     onClick = { onAction(LogsAction.Clear) },
                     modifier = Modifier.heightIn(min = 48.dp),
