@@ -6,6 +6,7 @@ import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.LogStore
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
+import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Negotiation
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
@@ -84,6 +85,30 @@ class ApplyWorker(context: Context) {
                 return
             }
             log("当前配置: ${settled.current.summary()}")
+            // Task 46：未知 vendor 编码器诊断（纯日志，不改写入/映射行为）——
+            // 佐证版解析仍落 vendor 兜底才打（已佐证 LHDC 的 ColorOS 19 号不再打），
+            // 进程内按 mac+raw 签名去重；raw 9 字段 + dumpsys "State:" 段头行入日志，
+            // 为回填 cs1 质量档映射攒真实数据。
+            val capsMask = Masks.capsRateMask(settled.current.codecType, settled.selectable)
+            if (Masks.codecName(settled.current.codecType, capsMask).startsWith("vendor(") &&
+                recordUnknownVendor(mac, settled.current)
+            ) {
+                log("未知编码器 raw: ${settled.current.toJson()}")
+                // dumpBtState 可能耗时（dumpsys ~秒级）放 IO 线程；失败静默，不打错误日志
+                // （避免噪音——dumpBtState 失败日志路径 Task 44 已在首页补齐，不重复）。
+                withContext(Dispatchers.IO) {
+                    try {
+                        val dumpObj = JSONObject(service.dumpBtState())
+                        if (!dumpObj.has("error")) {
+                            dumpObj.optString("dump").lineSequence()
+                                .filter { it.contains("State:") }
+                                .forEach { log("dumpsys段: $it") }
+                        }
+                    } catch (t: Throwable) {
+                        // 静默：诊断失败不影响拉满主链路
+                    }
+                }
+            }
 
             val profile = profiles.profileFor(mac)
             if (!force && profile != null && !profile.autoApply) {
@@ -343,5 +368,13 @@ class ApplyWorker(context: Context) {
         private const val SETTLE_MS = 1500L             // 等 A2DP 协商稳定
         private const val OUTER_RETRIES = 3             // 读回不一致重试次数
         private const val RETRY_DELAY_MS = 1000L
+
+        /** Task 46：未知 vendor 编码器 raw 日志去重（进程内，签名 = mac + raw JSON）。 */
+        private val loggedUnknownVendorSignatures = mutableSetOf<String>()
+
+        /** 签名首次出现返回 true；ApplyWorker 可能并发跑，伴生集合访问需同步。 */
+        @Synchronized
+        private fun recordUnknownVendor(mac: String, current: CodecConfig): Boolean =
+            loggedUnknownVendorSignatures.add("$mac|${current.toJson()}")
     }
 }

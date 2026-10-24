@@ -929,7 +929,16 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             try {
-                val svc = withContext(Dispatchers.IO) { provider.bind() }
+                // Task 46（Task 3 审查捎带裁定）：bind 同为 binder 调用，ColorOS 冻结载体
+                // 时同样可能永久阻塞，与 dumpDevices/readConfig 同口径包 8s 超时；
+                // 超时早退与「特权未授予」分支一致（直接 return，不清空已有状态）。
+                val svc = withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(8_000) { provider.bind() }
+                }
+                if (svc == null) {
+                    LogStore.log("首页刷新：bind 超时(8s)，本轮跳过")
+                    return@launch
+                }
                 // Task 45：ColorOS 可能冻结载体进程使 binder 永久阻塞（ListenerService
                 // 浸泡实测已踩过），dumpDevices/readConfig 各包 8s 超时（同
                 // ListenerService 兜底口径）；超时按「本轮读不到」走与无设备相同的
@@ -1007,43 +1016,68 @@ class MainActivity : ComponentActivity() {
                 var realtimeKbps: Int? = null
                 var realtimeQm: String? = null
                 var notStreaming = false
+                // Task 46：保留本次 dump 原文，未知 vendor 编码器诊断日志复用同一次
+                // dumpBtState 返回取 "State:" 段头行，禁止为日志再开一次 dumpsys。
+                var btDump: String? = null
                 try {
-                    val btObj = JSONObject(withContext(Dispatchers.IO) { svc.dumpBtState() })
-                    if (btObj.has("error")) {
-                        logBtDiag("首页 dumpBtState error: ${btObj.optString("error")}")
+                    // Task 46（Task 3 审查捎带裁定）：dumpBtState 同为 binder 调用，
+                    // 同口径 8s 超时；超时走 logBtDiag 去重（5s 轮询下不刷屏），
+                    // 本轮实况格降级显示「—」，codec 等已读到的字段照常更新。
+                    val btJson = withContext(Dispatchers.IO) {
+                        withTimeoutOrNull(8_000) { svc.dumpBtState() }
+                    }
+                    if (btJson == null) {
+                        logBtDiag("首页刷新：传输实况超时(8s)，本轮跳过")
                     } else {
-                        val parsed = BtStateParser.parse(
-                            btObj.optString("dump"), Masks.codecName(current.codecType),
-                        )
-                        if (parsed == null) {
-                            logBtDiag("首页 dumpBtState 无匹配段落或解析失败（实际传输行降级显示—）")
+                        val btObj = JSONObject(btJson)
+                        if (btObj.has("error")) {
+                            logBtDiag("首页 dumpBtState error: ${btObj.optString("error")}")
                         } else {
-                            logBtDiag(null)
-                            preciseCodec = parsed.codec
-                            realtimeKbps = parsed.bitrateKbps
-                            realtimeQm = parsed.qualityMode
-                            notStreaming = parsed.notStreaming
-                            // Task 45：粘性值修复——LHDC 段 bitrate 停播不归零（LDAC 才有 -1 语义），
-                            // 改用 PCM read actual 计数增量判定：相邻两次 5s 轮询值不涨 → 未在播放。
-                            // 首次读取无前值按「播放中」（isStreamingByPcm 内部保证），避免误报；
-                            // 栈不暴露 PCM 行（pcmReadActual=null）时回落原有 bitrate 判据。
-                            val pcm = parsed.pcmReadActual
-                            if (pcm != null) {
-                                val prev = lastPcmReadActual.takeIf { lastPcmMac == mac }
-                                if (!notStreaming && !BtStateParser.isStreamingByPcm(prev, pcm)) {
-                                    notStreaming = true
+                            btDump = btObj.optString("dump")
+                            val parsed = BtStateParser.parse(
+                                btDump.orEmpty(), Masks.codecName(current.codecType),
+                            )
+                            if (parsed == null) {
+                                logBtDiag("首页 dumpBtState 无匹配段落或解析失败（实际传输行降级显示—）")
+                            } else {
+                                logBtDiag(null)
+                                preciseCodec = parsed.codec
+                                realtimeKbps = parsed.bitrateKbps
+                                realtimeQm = parsed.qualityMode
+                                notStreaming = parsed.notStreaming
+                                // Task 45：粘性值修复——LHDC 段 bitrate 停播不归零（LDAC 才有 -1 语义），
+                                // 改用 PCM read actual 计数增量判定：相邻两次 5s 轮询值不涨 → 未在播放。
+                                // 首次读取无前值按「播放中」（isStreamingByPcm 内部保证），避免误报；
+                                // 栈不暴露 PCM 行（pcmReadActual=null）时回落原有 bitrate 判据。
+                                val pcm = parsed.pcmReadActual
+                                if (pcm != null) {
+                                    val prev = lastPcmReadActual.takeIf { lastPcmMac == mac }
+                                    if (!notStreaming && !BtStateParser.isStreamingByPcm(prev, pcm)) {
+                                        notStreaming = true
+                                    }
+                                    lastPcmReadActual = pcm
+                                    lastPcmMac = mac
                                 }
-                                lastPcmReadActual = pcm
-                                lastPcmMac = mac
                             }
                         }
                     }
                 } catch (t: Throwable) {
-                    logBtDiag("传输层实况读取失败（实际传输卡降级显示—）: $t")
+                    logBtDiag("传输层实况读取失败（实际传输行降级显示—）: $t")
                 }
                 // Task 45：ColorOS 新栈 LHDC 在 vendor 段（0x10..0x1F），
                 // 用 selectable 能力掩码佐证后再认 LHDC。
                 val capsMask = Masks.capsRateMask(current.codecType, selectable)
+                // Task 46：未知 vendor 编码器诊断（纯日志，不改显示/映射行为）——
+                // 佐证版解析仍落 vendor 兜底才打（已佐证 LHDC 的 19 号不再打）；
+                // 进程内按 mac+raw 签名去重，段头行复用上方同一次 dumpBtState 返回。
+                if (Masks.codecName(current.codecType, capsMask).startsWith("vendor(") &&
+                    recordUnknownVendor(mac, current)
+                ) {
+                    LogStore.log("未知编码器 raw: ${current.toJson()}")
+                    btDump?.lineSequence()
+                        ?.filter { it.contains("State:") }
+                        ?.forEach { LogStore.log("dumpsys段: $it") }
+                }
                 homeState = homeState.copy(
                     headsetName = name,
                     // Task 44：编码器格优先用 dumpsys 段落精确名（如 "LHDC V5"），
@@ -1167,5 +1201,13 @@ class MainActivity : ComponentActivity() {
         private const val AUTO_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
         /** Task 38：自动弹窗每进程最多一次（伴生对象，配置变更重建后仍记得已弹过）。 */
         private var autoDialogShownThisProcess = false
+
+        /** Task 46：未知 vendor 编码器 raw 日志去重（进程内，签名 = mac + raw JSON）。 */
+        private val loggedUnknownVendorSignatures = mutableSetOf<String>()
+
+        /** 签名首次出现返回 true；refreshHome 可能并发（onResume/轮询/事件），伴生集合访问需同步。 */
+        @Synchronized
+        private fun recordUnknownVendor(mac: String, current: CodecConfig): Boolean =
+            loggedUnknownVendorSignatures.add("$mac|${current.toJson()}")
     }
 }
