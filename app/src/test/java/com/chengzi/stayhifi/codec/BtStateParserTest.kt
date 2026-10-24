@@ -44,6 +44,18 @@ class BtStateParserTest {
     }
 
     @Test
+    fun parsesCapabilityBackedColorOsLhdcSection() {
+        // ColorOS 19 只有经 selectable 高采样率佐证后才认 LHDC；
+        // 若解析仍走单参 Masks.codecName(19)=vendor(19)，这里会找不到段落。
+        val current = CodecConfig(0x13, 0, 32, 2, 2, 0L, 0L, 0L, 0L)
+        val selectable = listOf(CodecConfig(0x13, 0, 32, 3, 2, 0L, 0L, 0L, 0L))
+        val s = BtStateParser.parse(lhdcDump, current, selectable)!!
+        assertEquals("LHDC V5", s.codec)
+        assertEquals("ABR", s.qualityMode)
+        assertEquals(400, s.bitrateKbps)
+    }
+
+    @Test
     fun displayShowsAbrSuffix() {
         val s = BtStateParser.parse(lhdcDump, "LHDC")!!
         assertEquals("400k · ABR", BtStateParser.formatDisplay(s))

@@ -41,6 +41,13 @@ object BtStateParser {
     private val SECTION_HEADER = Regex("^A2DP\\s+(.+?)\\s+State:")
 
     /**
+     * 按首页读回的 current + selectable 解析：ColorOS vendor 段必须复用经能力佐证的
+     * LHDC 名称，不能退回单参 Masks.codecName 映射得到的 vendor(N) 去匹配段落。
+     */
+    fun parse(dump: String, current: CodecConfig, selectable: List<CodecConfig>): BtState? =
+        parse(dump, Masks.codecName(current.codecType, Masks.capsRateMask(current.codecType, selectable)))
+
+    /**
      * 从 dumpsys 文本中找 [codecName]（如 "LHDC"/"LDAC"，与 Masks.codecName 输出一致）对应段落，
      * 提取 quality mode 与 transmission bitrate；段落不存在 → null。
      * 段名匹配用「去空格/连字符后双向 contains」：覆盖 "LHDC V5" 这类带后缀的段名，
