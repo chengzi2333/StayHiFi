@@ -2,6 +2,8 @@ package com.chengzi.stayhifi
 
 import android.Manifest
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -48,6 +50,7 @@ import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
+import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.QsTileService
@@ -591,11 +594,36 @@ class MainActivity : ComponentActivity() {
 
     private fun onLogsAction(action: LogsAction) {
         when (action) {
+            LogsAction.Copy -> copyLogs()
             LogsAction.Clear -> {
                 LogStore.clear()
+                resetVendorDiagnostics()
+                ApplyWorker.resetVendorDiagnostics()
+                btDiagLast = null
                 logs = emptyList()
             }
             LogsAction.Back -> logsVisible = false
+        }
+    }
+
+    /** 用户主动复制现有内存日志；不新增持久化或上传通道。 */
+    private fun copyLogs() {
+        val lines = LogStore.snapshot()
+        if (lines.isEmpty()) {
+            Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val header = "StayHiFi v${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) · " +
+            "${DeviceNames.marketModelWithAndroid()} · ${Build.DISPLAY}"
+        try {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("StayHiFi 运行日志", (listOf(header) + lines).joinToString("\n"))
+            )
+            Toast.makeText(this, "已复制 ${lines.size} 条日志", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            LogStore.log("复制日志失败: $t")
+            Toast.makeText(this, "复制失败，请查看日志页", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1068,17 +1096,26 @@ class MainActivity : ComponentActivity() {
                         realtimeDiag(current, codecName, "读取异常: $t")
                     }
                 }
-                // Task 46：未知 vendor 编码器诊断（纯日志，不改显示/映射行为）——
-                // 佐证版解析仍落 vendor 兜底才打（已佐证 LHDC 的 19 号不再打）；
-                // 进程内按 mac+raw 签名去重，段头行复用上方同一次 dumpBtState 返回。
-                // 未播放时无 dump，不消耗签名，待播放中抓到段头后再记录。
-                if (btDump != null && codecName.startsWith("vendor(") &&
+                // Task 49：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump。
+                // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；进程内按 mac+raw 签名去重。
+                if (btDump != null && VendorDiagnostics.shouldLog(current.codecType, capsMask) &&
                     recordUnknownVendor(mac, current)
                 ) {
-                    LogStore.log("未知编码器 raw: ${current.toJson()}")
-                    btDump.lineSequence()
-                        .filter { it.contains("State:") }
-                        .forEach { LogStore.log("dumpsys段: $it") }
+                    LogStore.log(
+                        "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
+                            "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
+                            "mac=$mac capsRateMask=$capsMask current=${current.toJson()}"
+                    )
+                    val state = BtStateParser.parse(btDump, current, selectable)
+                    if (state != null) {
+                        LogStore.log("dumpsys证据: mac=$mac ${VendorDiagnostics.evidence(state)}")
+                    } else {
+                        LogStore.log("dumpsys证据: mac=$mac 无匹配段落")
+                        btDump.lineSequence()
+                            .filter { it.contains("State:") }
+                            .take(12)
+                            .forEach { LogStore.log("dumpsys段: $it") }
+                    }
                 }
                 if (gen != refreshGeneration) return@launch
                 homeState = homeState.copy(
@@ -1212,5 +1249,10 @@ class MainActivity : ComponentActivity() {
         @Synchronized
         private fun recordUnknownVendor(mac: String, current: CodecConfig): Boolean =
             loggedUnknownVendorSignatures.add("$mac|${current.toJson()}")
+
+        @Synchronized
+        private fun resetVendorDiagnostics() {
+            loggedUnknownVendorSignatures.clear()
+        }
     }
 }

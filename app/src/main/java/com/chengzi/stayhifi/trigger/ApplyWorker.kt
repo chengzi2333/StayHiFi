@@ -4,10 +4,12 @@ import android.content.Context
 import android.os.Build
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.LogStore
+import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Negotiation
+import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
@@ -85,27 +87,38 @@ class ApplyWorker(context: Context) {
                 return
             }
             log("当前配置: ${settled.current.summary()}")
-            // Task 46：未知 vendor 编码器诊断（纯日志，不改写入/映射行为）——
-            // 佐证版解析仍落 vendor 兜底才打（已佐证 LHDC 的 ColorOS 19 号不再打），
-            // 进程内按 mac+raw 签名去重；raw 9 字段 + dumpsys "State:" 段头行入日志，
-            // 为回填 cs1 质量档映射攒真实数据。
+            // Task 49：轻量厂商诊断（仅现有 LogStore，不改写入/映射行为）——
+            // 未识别 vendor 保持原日志；已佐证的 vendor LHDC（含 19 号）也记录 raw 9 字段，
+            // 供回填 cs1 质量档；同一次 dumpsys 只留段名/quality/bitrate，避免冲刷 200 行缓冲。
             val capsMask = Masks.capsRateMask(settled.current.codecType, settled.selectable)
-            if (Masks.codecName(settled.current.codecType, capsMask).startsWith("vendor(") &&
+            if (VendorDiagnostics.shouldLog(settled.current.codecType, capsMask) &&
                 recordUnknownVendor(mac, settled.current)
             ) {
-                log("未知编码器 raw: ${settled.current.toJson()}")
-                // dumpBtState 可能耗时（dumpsys ~秒级）放 IO 线程；失败静默，不打错误日志
-                // （避免噪音——dumpBtState 失败日志路径 Task 44 已在首页补齐，不重复）。
+                log(
+                    "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
+                        "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
+                        "mac=$mac capsRateMask=$capsMask current=${settled.current.toJson()}"
+                )
                 withContext(Dispatchers.IO) {
                     try {
                         val dumpObj = JSONObject(service.dumpBtState())
-                        if (!dumpObj.has("error")) {
-                            dumpObj.optString("dump").lineSequence()
-                                .filter { it.contains("State:") }
-                                .forEach { log("dumpsys段: $it") }
+                        if (dumpObj.has("error")) {
+                            log("dumpsys诊断失败: ${dumpObj.optString("error")}")
+                        } else {
+                            val dump = dumpObj.optString("dump")
+                            val state = BtStateParser.parse(dump, settled.current, settled.selectable)
+                            if (state != null) {
+                                log("dumpsys证据: mac=$mac ${VendorDiagnostics.evidence(state)}")
+                            } else {
+                                log("dumpsys证据: mac=$mac 无匹配段落")
+                                dump.lineSequence()
+                                    .filter { it.contains("State:") }
+                                    .take(12)
+                                    .forEach { log("dumpsys段: $it") }
+                            }
                         }
                     } catch (t: Throwable) {
-                        // 静默：诊断失败不影响拉满主链路
+                        log("dumpsys诊断异常: $t")
                     }
                 }
             }
@@ -376,5 +389,11 @@ class ApplyWorker(context: Context) {
         @Synchronized
         private fun recordUnknownVendor(mac: String, current: CodecConfig): Boolean =
             loggedUnknownVendorSignatures.add("$mac|${current.toJson()}")
+
+        /** 日志页清空后允许「重连一次」重新留下同配置证据。 */
+        @Synchronized
+        internal fun resetVendorDiagnostics() {
+            loggedUnknownVendorSignatures.clear()
+        }
     }
 }
