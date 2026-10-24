@@ -24,7 +24,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -71,22 +70,19 @@ data class HomeUiState(
     val fullBars: Boolean = false,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
     val applying: Boolean = false,
-    /** 「自动拉满」总开关。 */
-    val autoApplyEnabled: Boolean = true,
     /** 载体异常警示文案；null 表示一切正常。 */
     val carrierAlert: String? = null,
 )
 
 /** 首页全部动作上抛，本层无逻辑。 */
 sealed interface HomeAction {
-    data class SetAutoApply(val enabled: Boolean) : HomeAction
     data object ApplyNow : HomeAction
     /** 点击红色警示横幅去修复载体。 */
     data object FixCarrier : HomeAction
 }
 
 /**
- * 首页：顶部状态大卡 + 自动拉满开关 + 下半屏主操作按钮。
+ * 首页：顶部状态大卡 + 下半屏手动拉满按钮；自动拉满总开关在设置页。
  * 载体异常时顶部出现红色警示横幅。
  */
 @Composable
@@ -115,7 +111,7 @@ fun HomeScreen(
 
             // Task 45：中间内容区独占剩余高度并可滚动——加卡片后内容超高，
             // 底部「重新拉满」按钮曾被挤出可视区只剩顶边（用户截图实证）。
-            // 改为「开关+按钮固定底部、内容区滚动」，任何内容高度/小屏/大字体下按钮完整可达。
+            // 改为「按钮固定底部、内容区滚动」，任何内容高度/小屏/大字体下按钮完整可达。
             // （滚动 Column 不允许 weight 子项，故不能把根 Column 直接改 verticalScroll。）
             Column(
                 modifier = Modifier
@@ -129,25 +125,6 @@ fun HomeScreen(
 
                 // Task 45 布局：实际传输并入状态卡（方案 C，用户拍板），独立 RealtimeCard 撤销。
                 StatusCard(state)
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("自动拉满", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        // Task 42：澄清这是总开关（管所有设备），与设备页的单设备开关区分开。
-                        text = "总开关：关闭后所有设备连上都不再自动拉满",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = state.autoApplyEnabled,
-                    onCheckedChange = { onAction(HomeAction.SetAutoApply(it)) },
-                )
             }
 
             Button(
@@ -340,7 +317,7 @@ private fun RealtimeSection(state: HomeUiState) {
             text = if (!state.realtimeNotStreaming && state.realtimeKbps == null) {
                 "这个机型的系统不开放实时码率读取，欢迎到设置-日志页把日志反馈给作者"
             } else {
-                "纸面参数已拉满；实际码率由系统蓝牙栈按信号环境实时调度"
+                "部分 vivo LHDC 栈实测固定档仍走 ABR；其他系统样本不足，请对比设置码率与实际传输"
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -429,7 +406,6 @@ private fun HomeScreenPreviewLight() {
                 realtimeKbps = 400,
                 realtimeQualityMode = "ABR",
                 fullBars = true,
-                autoApplyEnabled = true,
             ),
             onAction = {},
         )
@@ -448,7 +424,6 @@ private fun HomeScreenPreviewDark() {
                 bits = "16bit",
                 quality = null,
                 fullBars = false,
-                autoApplyEnabled = false,
                 carrierAlert = "Shizuku 未运行，点我修复",
             ),
             onAction = {},

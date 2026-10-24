@@ -32,6 +32,8 @@ import com.chengzi.stayhifi.BuildConfig
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 data class SettingsUiState(
+    /** 「自动拉满」总开关（Task 50 从首页迁入）。 */
+    val autoApplyEnabled: Boolean = true,
     /** 拉满结果通知。 */
     val notifyResult: Boolean = false,
     /** 常驻通知显示参数详情（事件驱动 + 30s 轮询）。 */
@@ -48,6 +50,7 @@ data class SettingsUiState(
 
 /** 设置页全部动作上抛，本层无逻辑。 */
 sealed interface SettingsAction {
+    data class SetAutoApply(val enabled: Boolean) : SettingsAction
     data class SetNotifyResult(val enabled: Boolean) : SettingsAction
     data class SetNotifyPersistent(val enabled: Boolean) : SettingsAction
     data class SetQsTile(val enabled: Boolean) : SettingsAction
@@ -62,7 +65,7 @@ sealed interface SettingsAction {
 }
 
 /**
- * 设置页：三个通知/磁贴开关 + 保活引导 + 运行日志入口 + 关于。
+ * 设置页：自动拉满总开关 + 通知/磁贴开关 + 保活引导 + 运行日志入口 + 关于。
  */
 @Composable
 fun SettingsScreen(
@@ -97,6 +100,14 @@ fun SettingsScreen(
                 text = "设置",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
+            )
+
+            SectionTitle("自动化")
+            SwitchRow(
+                title = "自动拉满",
+                subtitle = "总开关：关闭后所有设备连上都不再自动拉满",
+                checked = state.autoApplyEnabled,
+                onChecked = { onAction(SettingsAction.SetAutoApply(it)) },
             )
 
             SectionTitle("通知")

@@ -307,7 +307,7 @@ class MainActivity : ComponentActivity() {
                 ) { page ->
                     when (pageOrder?.get(page) ?: page) {
                         0 -> HomeScreen(
-                            state = homeState.copy(autoApplyEnabled = autoApplyEnabled),
+                            state = homeState,
                             onAction = ::onHomeAction,
                         )
                         1 -> DevicesScreen(
@@ -328,6 +328,7 @@ class MainActivity : ComponentActivity() {
                         )
                         2 -> SettingsScreen(
                             state = SettingsUiState(
+                                autoApplyEnabled = autoApplyEnabled,
                                 notifyResult = notifyResultOn,
                                 notifyPersistent = notifyPersistentOn,
                                 qsTile = qsTileOn,
@@ -405,6 +406,16 @@ class MainActivity : ComponentActivity() {
 
     private fun onSettingsAction(action: SettingsAction) {
         when (action) {
+            is SettingsAction.SetAutoApply -> lifecycleScope.launch {
+                settingsRepo.setAutoEnabled(action.enabled)
+                // FGS 主触发的拉起/停止与开关同步（Task 50 从首页迁入，行为不变）
+                if (action.enabled) {
+                    ListenerService.start(this@MainActivity)
+                } else {
+                    ListenerService.stop(this@MainActivity)
+                }
+                LogStore.log("自动拉满开关 = ${action.enabled}")
+            }
             is SettingsAction.SetNotifyResult -> lifecycleScope.launch {
                 settingsRepo.setNotifyResult(action.enabled)
                 LogStore.log("拉满结果通知 = ${action.enabled}")
@@ -900,16 +911,6 @@ class MainActivity : ComponentActivity() {
 
     private fun onHomeAction(action: HomeAction) {
         when (action) {
-            is HomeAction.SetAutoApply -> lifecycleScope.launch {
-                settingsRepo.setAutoEnabled(action.enabled)
-                // FGS 主触发的拉起/停止与开关同步
-                if (action.enabled) {
-                    ListenerService.start(this@MainActivity)
-                } else {
-                    ListenerService.stop(this@MainActivity)
-                }
-                LogStore.log("自动拉满开关 = ${action.enabled}")
-            }
             HomeAction.ApplyNow -> onApplyNow()
             HomeAction.FixCarrier -> openCarrierManager()
         }
