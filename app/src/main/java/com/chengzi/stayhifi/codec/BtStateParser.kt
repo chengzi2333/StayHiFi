@@ -29,6 +29,7 @@ object BtStateParser {
         val qualityMode: String?,
         val bitrateKbps: Int?,
         val notStreaming: Boolean = false,
+        val rawBitrate: Long? = null,
     )
 
     /** Task 46：实际传输行三态结果；默认值表示「本机暂不支持抓取」。 */
@@ -63,6 +64,7 @@ object BtStateParser {
         var sectionName: String? = null
         var qualityMode: String? = null
         var bitrateKbps: Int? = null
+        var rawBitrate: Long? = null
         var notStreaming = false
         for (raw in dump.lineSequence()) {
             val line = raw.trim()
@@ -86,13 +88,14 @@ object BtStateParser {
                 // 非数字值（如 AAC 的 "bitrate mode : Constant" 不匹配本分支）跳过；
                 // 数字非法也跳过，不污染已解析到的值
                 val v = line.substringAfterLast(':').trim().toLongOrNull() ?: continue
+                rawBitrate = v
                 // Task 44：≤0（实证 -1）= 栈明确回报未在流式，单独标记
                 notStreaming = v <= 0
                 bitrateKbps = normalizeBitrate(v)
             }
         }
         if (!found) return null
-        return BtState(sectionName ?: codecName, qualityMode, bitrateKbps, notStreaming)
+        return BtState(sectionName ?: codecName, qualityMode, bitrateKbps, notStreaming, rawBitrate)
     }
 
     /**
