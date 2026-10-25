@@ -33,6 +33,11 @@ class BtStateParserTest {
           AAC bitrate mode : Constant
     """.trimIndent()
 
+    private val unknownBitrateDump = """
+        A2DP AAC State:
+          AAC transmission bitrate (Kbps) : unknown
+    """.trimIndent()
+
     @Test
     fun parsesLhdcAbrSection() {
         val s = BtStateParser.parse(lhdcDump, "LHDC")!!
@@ -40,6 +45,7 @@ class BtStateParserTest {
         assertEquals("LHDC V5", s.codec)
         assertEquals("ABR", s.qualityMode)
         // 400000 bps 归一化为 400 kbps（vivo 字段名误标修正）
+        assertEquals(400000L, s.rawBitrate)
         assertEquals(400, s.bitrateKbps)
     }
 
@@ -73,9 +79,18 @@ class BtStateParserTest {
         // AAC 段无 transmission bitrate → 段落能找到，但码率读不到 → 显示「—」
         // Task 44：字段缺失 ≠ 未流式，notStreaming 必须为 false（空态三分）
         val s = BtStateParser.parse(aacDump, "AAC")!!
+        assertEquals(null, s.rawBitrate)
         assertNull(s.bitrateKbps)
         assertFalse(s.notStreaming)
         assertNull(BtStateParser.formatDisplay(s))
+    }
+
+    @Test
+    fun nonNumericBitrateYieldsNullWithoutMarkingNotStreaming() {
+        val s = BtStateParser.parse(unknownBitrateDump, "AAC")!!
+        assertEquals(null, s.rawBitrate)
+        assertEquals(null, s.bitrateKbps)
+        assertFalse(s.notStreaming)
     }
 
     @Test
@@ -94,6 +109,7 @@ class BtStateParserTest {
         // -1 = 未在流式传输：bitrateKbps 为 null，显示「未在播放」而不是 "-1k"
         // Task 44：notStreaming=true 把「栈明确回报未流式」与「栈不暴露」分开
         val s = BtStateParser.parse(ldacDump, "LDAC")!!
+        assertEquals(-1L, s.rawBitrate)
         assertNull(s.bitrateKbps)
         assertTrue(s.notStreaming)
         assertNull(BtStateParser.formatDisplay(s))

@@ -1,6 +1,7 @@
 package com.chengzi.stayhifi.trigger
 
 import android.content.Context
+import android.media.AudioManager
 import android.os.Build
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.LogStore
@@ -10,6 +11,7 @@ import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Negotiation
 import com.chengzi.stayhifi.codec.VendorDiagnostics
+import com.chengzi.stayhifi.codec.VendorDiagnosticGate
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
@@ -45,6 +47,7 @@ class ApplyWorker(context: Context) {
     private val profiles = ProfileRepository(appContext)
     private val notifier = Notifier(appContext)
     private val provider = ShizukuShellProvider(appContext)
+    private val audioManager by lazy { appContext.getSystemService(AudioManager::class.java) }
 
     private fun log(msg: String) = LogStore.log(msg)
 
@@ -87,38 +90,50 @@ class ApplyWorker(context: Context) {
                 return
             }
             log("当前配置: ${settled.current.summary()}")
-            // Task 49：轻量厂商诊断（仅现有 LogStore，不改写入/映射行为）——
-            // 未识别 vendor 保持原日志；已佐证的 vendor LHDC（含 19 号）也记录 raw 9 字段，
-            // 供回填 cs1 质量档；同一次 dumpsys 只留段名/quality/bitrate，避免冲刷 200 行缓冲。
+            // Task 53：轻量厂商诊断（仅现有 LogStore，不改写入/映射行为）——
+            // 未识别 vendor 保持原日志；已佐证的 vendor LHDC（含 19 号）也记录 raw 9 字段。
+            // dump 前固定使用 apply-dump 去重，真实 sampleKind 只在 dump 后标注本次证据。
             val capsMask = Masks.capsRateMask(settled.current.codecType, settled.selectable)
             if (VendorDiagnostics.shouldLog(settled.current.codecType, capsMask) &&
-                recordUnknownVendor(mac, settled.current)
+                recordUnknownVendor(mac, settled.current, "apply-dump")
             ) {
                 log(
                     "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
                         "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
                         "mac=$mac capsRateMask=$capsMask current=${settled.current.toJson()}"
                 )
+                val isMusicActive = audioManager.isMusicActive
                 withContext(Dispatchers.IO) {
                     try {
                         val dumpObj = JSONObject(service.dumpBtState())
                         if (dumpObj.has("error")) {
-                            log("dumpsys诊断失败: ${dumpObj.optString("error")}")
+                            log(
+                                "dumpsys诊断失败: ${dumpObj.optString("error")} " +
+                                    "source=apply isMusicActive=$isMusicActive sample=dump-error"
+                            )
                         } else {
                             val dump = dumpObj.optString("dump")
                             val state = BtStateParser.parse(dump, settled.current, settled.selectable)
+                            val kind = VendorDiagnostics.sampleKind(state)
                             if (state != null) {
-                                log("dumpsys证据: mac=$mac ${VendorDiagnostics.evidence(state)}")
+                                log(
+                                    "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +
+                                        "sample=$kind ${VendorDiagnostics.evidence(state)}"
+                                )
                             } else {
-                                log("dumpsys证据: mac=$mac 无匹配段落")
-                                dump.lineSequence()
-                                    .filter { it.contains("State:") }
-                                    .take(12)
-                                    .forEach { log("dumpsys段: $it") }
+                                log(
+                                    "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +
+                                        "sample=$kind 无匹配段落"
+                                )
+                                VendorDiagnostics.dumpClues(dump)
+                                    .forEach { log("dumpsys线索: $it") }
                             }
                         }
                     } catch (t: Throwable) {
-                        log("dumpsys诊断异常: $t")
+                        log(
+                            "dumpsys诊断异常: $t source=apply isMusicActive=$isMusicActive " +
+                                "sample=dump-exception"
+                        )
                     }
                 }
             }
@@ -382,18 +397,16 @@ class ApplyWorker(context: Context) {
         private const val OUTER_RETRIES = 3             // 读回不一致重试次数
         private const val RETRY_DELAY_MS = 1000L
 
-        /** Task 46：未知 vendor 编码器 raw 日志去重（进程内，签名 = mac + raw JSON）。 */
-        private val loggedUnknownVendorSignatures = mutableSetOf<String>()
+        /** Task 53：ApplyWorker 只用固定 apply-dump 类别做首次配置去重。 */
+        private val vendorDiagnosticGate = VendorDiagnosticGate()
 
-        /** 签名首次出现返回 true；ApplyWorker 可能并发跑，伴生集合访问需同步。 */
-        @Synchronized
-        private fun recordUnknownVendor(mac: String, current: CodecConfig): Boolean =
-            loggedUnknownVendorSignatures.add("$mac|${current.toJson()}")
+        private fun recordUnknownVendor(
+            mac: String, current: CodecConfig, sampleKind: String,
+        ): Boolean = vendorDiagnosticGate.shouldRecord(mac, current, sampleKind)
 
         /** 日志页清空后允许「重连一次」重新留下同配置证据。 */
-        @Synchronized
         internal fun resetVendorDiagnostics() {
-            loggedUnknownVendorSignatures.clear()
+            vendorDiagnosticGate.reset()
         }
     }
 }

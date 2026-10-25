@@ -51,6 +51,7 @@ import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.VendorDiagnostics
+import com.chengzi.stayhifi.codec.VendorDiagnosticGate
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.QsTileService
@@ -1056,8 +1057,9 @@ class MainActivity : ComponentActivity() {
                 val isMusicActive = audioManager.isMusicActive
                 var preciseCodec: String? = null
                 var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
-                // 保留本次 dump 原文，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
+                // 保留本次 dump 原文与 parsed state，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
                 var btDump: String? = null
+                var parsedState: BtStateParser.BtState? = null
                 if (!isMusicActive) {
                     logBtDiag(null)
                 } else {
@@ -1080,6 +1082,7 @@ class MainActivity : ComponentActivity() {
                                 val parsed = BtStateParser.parse(
                                     btDump.orEmpty(), current, selectable,
                                 )
+                                parsedState = parsed
                                 realtime = BtStateParser.realtimeDisplay(isMusicActive = true, state = parsed)
                                 if (parsed == null) {
                                     realtimeDiag(current, codecName, "无匹配段落")
@@ -1097,25 +1100,30 @@ class MainActivity : ComponentActivity() {
                         realtimeDiag(current, codecName, "读取异常: $t")
                     }
                 }
-                // Task 49：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump。
-                // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；进程内按 mac+raw 签名去重。
+                // Task 53：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump 与 parsed state。
+                // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；首页按 mac+raw+真实类别去重。
+                val state = parsedState
+                val kind = VendorDiagnostics.sampleKind(state)
                 if (btDump != null && VendorDiagnostics.shouldLog(current.codecType, capsMask) &&
-                    recordUnknownVendor(mac, current)
+                    recordUnknownVendor(mac, current, kind)
                 ) {
                     LogStore.log(
                         "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
                             "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
                             "mac=$mac capsRateMask=$capsMask current=${current.toJson()}"
                     )
-                    val state = BtStateParser.parse(btDump, current, selectable)
                     if (state != null) {
-                        LogStore.log("dumpsys证据: mac=$mac ${VendorDiagnostics.evidence(state)}")
+                        LogStore.log(
+                            "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
+                                "sample=$kind ${VendorDiagnostics.evidence(state)}"
+                        )
                     } else {
-                        LogStore.log("dumpsys证据: mac=$mac 无匹配段落")
-                        btDump.lineSequence()
-                            .filter { it.contains("State:") }
-                            .take(12)
-                            .forEach { LogStore.log("dumpsys段: $it") }
+                        LogStore.log(
+                            "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
+                                "sample=$kind 无匹配段落"
+                        )
+                        VendorDiagnostics.dumpClues(btDump)
+                            .forEach { LogStore.log("dumpsys线索: $it") }
                     }
                 }
                 if (gen != refreshGeneration) return@launch
@@ -1243,17 +1251,15 @@ class MainActivity : ComponentActivity() {
         /** Task 38：自动弹窗每进程最多一次（伴生对象，配置变更重建后仍记得已弹过）。 */
         private var autoDialogShownThisProcess = false
 
-        /** Task 46：未知 vendor 编码器 raw 日志去重（进程内，签名 = mac + raw JSON）。 */
-        private val loggedUnknownVendorSignatures = mutableSetOf<String>()
+        /** Task 53：首页诊断按 mac + raw JSON + 真实 sampleKind 去重。 */
+        private val vendorDiagnosticGate = VendorDiagnosticGate()
 
-        /** 签名首次出现返回 true；refreshHome 可能并发（onResume/轮询/事件），伴生集合访问需同步。 */
-        @Synchronized
-        private fun recordUnknownVendor(mac: String, current: CodecConfig): Boolean =
-            loggedUnknownVendorSignatures.add("$mac|${current.toJson()}")
+        private fun recordUnknownVendor(
+            mac: String, current: CodecConfig, sampleKind: String,
+        ): Boolean = vendorDiagnosticGate.shouldRecord(mac, current, sampleKind)
 
-        @Synchronized
         private fun resetVendorDiagnostics() {
-            loggedUnknownVendorSignatures.clear()
+            vendorDiagnosticGate.reset()
         }
     }
 }
