@@ -102,7 +102,7 @@ class ApplyWorker(context: Context) {
                         "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
                         "mac=$mac capsRateMask=$capsMask current=${settled.current.toJson()}"
                 )
-                val isMusicActive = audioManager.isMusicActive
+                val isMusicActive = VendorDiagnostics.readMusicActive { audioManager.isMusicActive }
                 withContext(Dispatchers.IO) {
                     try {
                         val dumpObj = JSONObject(service.dumpBtState())

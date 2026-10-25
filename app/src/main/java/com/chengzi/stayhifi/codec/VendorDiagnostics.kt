@@ -3,6 +3,13 @@ package com.chengzi.stayhifi.codec
 /** 轻量厂商诊断：仍走现有 LogStore，不引入持久化或额外采集。 */
 object VendorDiagnostics {
 
+    /** 音频状态仅作诊断；厂商运行时读取失败不得中断正常 apply。 */
+    fun readMusicActive(read: () -> Boolean): String = try {
+        read().toString()
+    } catch (_: RuntimeException) {
+        "unknown"
+    }
+
     /** 未识别 vendor 保持原诊断；已佐证的 vendor LHDC 也需留 cs1/实况证据供后续回填。 */
     fun shouldLog(codecType: Int, capsRateMask: Int): Boolean {
         val codecName = Masks.codecName(codecType, capsRateMask)

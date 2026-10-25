@@ -8,6 +8,29 @@ import org.junit.Test
 class VendorDiagnosticsTest {
 
     @Test
+    fun musicActiveTrueUsesTrueLogValue() {
+        assertEquals("true", VendorDiagnostics.readMusicActive { true })
+    }
+
+    @Test
+    fun musicActiveFalseUsesFalseLogValue() {
+        assertEquals("false", VendorDiagnostics.readMusicActive { false })
+    }
+
+    @Test
+    fun musicActiveReadFailureIsContained() {
+        var callerContinued = false
+
+        val value = VendorDiagnostics.readMusicActive {
+            throw RuntimeException("vendor audio read failed")
+        }
+        callerContinued = true
+
+        assertEquals("unknown", value)
+        assertTrue(callerContinued)
+    }
+
+    @Test
     fun recognizedVendorLhdcStillNeedsCs1Evidence() {
         // 19 + 192kHz 能力可显示 LHDC，但 cs1 质量档尚未回填，不能因已识别就跳过诊断。
         assertTrue(VendorDiagnostics.shouldLog(0x13, 32))
