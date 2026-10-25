@@ -43,7 +43,7 @@
 
 - [ ] **Step 1: 通过 using-git-worktrees 创建 `task/lhdc-quality-realtime-diagnostics` 隔离工作区，并把 spec/plan 复制到相同相对路径。**
 - [ ] **Step 2: 提交两份文档，提交信息为 `Docs: StayHiFi 1.2.1 LHDC 修复设计与实施计划`，末尾附全局规定的 Co-Authored-By。**
-- [ ] **Step 3: 在 `.superpowers/sdd/2026-10-25-lhdc-realtime/` 建立任务简报/报告/进度账本；Task 52/53/54 共用同一分支，依次执行。**
+- [ ] **Step 3: 在 `.superpowers/sdd/2026-10-25-lhdc-quality-realtime-diagnostics/` 建立任务简报/报告/进度账本；Task 52/53/54 共用同一分支，依次执行。**
 
 ### Task 52：已佐证 LHDC 的设置层码率显示
 
@@ -277,7 +277,7 @@ git commit -m "Task 53: 增强 LHDC 实际传输诊断证据" \
 
 **Files:**
 - Modify: `app/build.gradle:16-17`
-- Create (gitignored，不提交): `.superpowers/sdd/2026-10-25-lhdc-realtime/release-1.2.1.md`
+- Create (gitignored，不提交): `.superpowers/sdd/2026-10-25-lhdc-quality-realtime-diagnostics/release-1.2.1.md`
 
 **Interfaces:**
 - Consumes: Task 52/53 最终代码。
@@ -309,7 +309,7 @@ Run：`/Users/chengzi/Library/Android/sdk/build-tools/37.0.0/aapt dump badging a
 
 Expected：package 行包含 `versionCode='6'` 与 `versionName='1.2.1'`。
 
-Run：`rg -n 'Task|cs1|codecType|dumpsys|gate|commit|解析器' .superpowers/sdd/2026-10-25-lhdc-realtime/release-1.2.1.md`
+Run：`rg -n 'Task|cs1|codecType|dumpsys|gate|commit|解析器' .superpowers/sdd/2026-10-25-lhdc-quality-realtime-diagnostics/release-1.2.1.md`
 
 Expected：无匹配；文案仍为上述三条。
 
