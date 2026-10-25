@@ -74,6 +74,43 @@ class MasksTest {
     }
 
     @Test
+    fun qualityLabelDecodesFeedbackVendorLhdcFixtures() {
+        assertEquals("自适应", Masks.qualityLabel(19, 32777L, 42))
+        assertEquals("400kbps", Masks.qualityLabel(19, 32773L, 43))
+    }
+
+    @Test
+    fun qualityLabelDecodesAllLhdcTiersForVerifiedVendor() {
+        val labels = listOf(
+            "64kbps", "128kbps", "192kbps", "256kbps", "320kbps",
+            "400kbps", "500kbps", "900kbps", "1000kbps", "自适应",
+        )
+        labels.forEachIndexed { index, label ->
+            assertEquals(label, Masks.qualityLabel(19, 0x8000L or index.toLong(), 42))
+        }
+    }
+
+    @Test
+    fun qualityLabelRequiresLhdcIdentityAndMagic() {
+        assertEquals(null, Masks.qualityLabel(19, 32773L))       // 无能力上下文
+        assertEquals(null, Masks.qualityLabel(19, 32773L, 8))   // 最高 96k，不足以佐证
+        assertEquals(null, Masks.qualityLabel(0x20, 0x8005L, 32))
+        assertEquals(null, Masks.qualityLabel(99, 0x8005L, 32))
+        assertEquals(null, Masks.qualityLabel(19, 0xC005L, 43)) // 错误 magic
+        assertEquals(null, Masks.qualityLabel(19, 0x800AL, 43))
+        assertEquals(null, Masks.qualityLabel(19, 0x80FFL, 43))
+    }
+
+    @Test
+    fun qualityLabelKeepsVivoLhdcAndRejectsInvalidValues() {
+        assertEquals("1000kbps", Masks.qualityLabel(10, 50888712L))
+        assertEquals("自适应", Masks.qualityLabel(10, 33914889L))
+        assertEquals("400kbps", Masks.qualityLabel(10, 0x03088005L))
+        assertEquals(null, Masks.qualityLabel(10, 5L))
+        assertEquals(null, Masks.qualityLabel(10, 0x800AL))
+    }
+
+    @Test
     fun qualityLabelReturnsNullForUnknownCs1() {
         assertEquals(null, Masks.qualityLabel(10, 0L))
         assertEquals(null, Masks.qualityLabel(4, 999L))

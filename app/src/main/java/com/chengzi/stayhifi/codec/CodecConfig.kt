@@ -100,21 +100,32 @@ object Masks {
      * cs1（codec-specific 1）质量档到人类可读标签；未知编号返回 null（调用方保持三段显示）。
      * 4=LDAC 用 AOSP 标准值（见 BluetoothCodecConfig 注释）：
      * 1000=990kbps 高 / 1001=660kbps / 1002=330kbps / 1003=自适应。
-     * 10=LHDC V5 为厂商私有编号（仅 OPPO/vivo 系栈实测）：
-     * 50888712=音质优先(1000kbps)、33914889=自适应。
+     * 10=LHDC V5 为已有 vivo 实证；其他厂商编号需 capsRateMask 通过 codecName 身份佐证。
+     * LHDC 还需 magic 匹配 0x8000，再按低字节解码质量档。
      */
-    fun qualityLabel(codecType: Int, cs1: Long): String? = when (codecType) {
-        4 -> when (cs1) {
+    fun qualityLabel(codecType: Int, cs1: Long, capsRateMask: Int = 0): String? = when {
+        codecType == 4 -> when (cs1) {
             1000L -> "990kbps"
             1001L -> "660kbps"
             1002L -> "330kbps"
             1003L -> "自适应"
             else -> null
         }
-        10 -> when (cs1) {
-            50888712L -> "1000kbps"
-            33914889L -> "自适应"
-            else -> null
+        codecType == 10 || codecName(codecType, capsRateMask) == "LHDC" -> {
+            if ((cs1 and 0xC000L) != 0x8000L) null
+            else when (cs1 and 0xFFL) {
+                0L -> "64kbps"
+                1L -> "128kbps"
+                2L -> "192kbps"
+                3L -> "256kbps"
+                4L -> "320kbps"
+                5L -> "400kbps"
+                6L -> "500kbps"
+                7L -> "900kbps"
+                8L -> "1000kbps"
+                9L -> "自适应"
+                else -> null
+            }
         }
         else -> null
     }

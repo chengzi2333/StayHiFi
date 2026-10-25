@@ -1126,7 +1126,7 @@ class MainActivity : ComponentActivity() {
                     codec = preciseCodec ?: Masks.codecName(current.codecType, capsMask),
                     rate = Masks.rateHz(current.sampleRate),
                     bits = Masks.bitsDepth(current.bitsPerSample),
-                    quality = Masks.qualityLabel(current.codecType, current.cs1),
+                    quality = Masks.qualityLabel(current.codecType, current.cs1, capsMask),
                     realtimeKbps = realtime.bitrateKbps,
                     realtimeQualityMode = realtime.qualityMode,
                     realtimeNotStreaming = realtime.notStreaming,
