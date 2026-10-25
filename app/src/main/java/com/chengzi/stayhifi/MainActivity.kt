@@ -89,6 +89,7 @@ import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.updater.UpdateChecker
 import com.chengzi.stayhifi.util.DeviceNames
 import com.chengzi.stayhifi.util.KeepAlive
+import com.chengzi.stayhifi.util.QqGroup
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
@@ -440,9 +441,29 @@ class MainActivity : ComponentActivity() {
                 logs = LogStore.snapshot().asReversed()
                 logsVisible = true
             }
+            SettingsAction.CopyQqGroupNumber -> copyQqGroupNumber("QQ 群号已复制")
+            SettingsAction.OpenQqGroup -> {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(QqGroup.groupCardUri())).apply {
+                    setPackage(QqGroup.QQ_PACKAGE)
+                }
+                try {
+                    startActivity(intent)
+                    LogStore.log("已请求打开 QQ 群资料页")
+                } catch (_: ActivityNotFoundException) {
+                    copyQqGroupNumber("打开 QQ 失败，群号已复制")
+                } catch (_: SecurityException) {
+                    copyQqGroupNumber("打开 QQ 失败，群号已复制")
+                }
+            }
             SettingsAction.CheckUpdate -> onCheckUpdate()
             SettingsAction.DismissUpdateMessage -> updateMessage = null
         }
+    }
+
+    private fun copyQqGroupNumber(toastMessage: String) {
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("QQ 群号", QqGroup.GROUP_NUMBER))
+        Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
     }
 
     // ================= 自更新（Task 38） =================

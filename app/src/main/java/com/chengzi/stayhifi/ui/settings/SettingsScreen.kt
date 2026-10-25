@@ -20,6 +20,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -30,6 +31,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.BuildConfig
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
+import com.chengzi.stayhifi.util.QqGroup
 
 data class SettingsUiState(
     /** 「自动拉满」总开关（Task 50 从首页迁入）。 */
@@ -62,6 +64,8 @@ sealed interface SettingsAction {
     data object CheckUpdate : SettingsAction
     /** Task 38：检查结果 snackbar 展示完毕，清掉提示。 */
     data object DismissUpdateMessage : SettingsAction
+    data object CopyQqGroupNumber : SettingsAction
+    data object OpenQqGroup : SettingsAction
 }
 
 /**
@@ -283,6 +287,22 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Text(
+                        text = "QQ 交流群：${QqGroup.GROUP_NUMBER}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        TextButton(onClick = { onAction(SettingsAction.CopyQqGroupNumber) }) {
+                            Text("复制")
+                        }
+                        TextButton(onClick = { onAction(SettingsAction.OpenQqGroup) }) {
+                            Text("打开 QQ")
+                        }
+                    }
                 }
             }
         }
