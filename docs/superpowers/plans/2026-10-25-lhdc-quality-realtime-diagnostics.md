@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 发布候选项 StayHiFi 1.2.1：修复已佐证 LHDC 的设置层码率显示，补足实际传输诊断证据，并提供三条以内的普通用户 Release 说明。
+**Goal:** 发布候选项 StayHiFi 1.2.1：修复已佐证 LHDC 的设置层码率显示，补足实际传输诊断证据，新增 QQ 交流群入口，并提供三条以内的普通用户 Release 说明。
 
-**Architecture:** 只在现有 `Masks` 显示层增加带能力门控的 LHDC cs1 解码；实时显示链路和写入策略不动。诊断复用现有 dump，以四类 `sampleKind` 去重；首页负责状态跃迁，ApplyWorker 仍只采首次配置，最后独立修改版本元数据。
+**Architecture:** 只在现有 `Masks` 显示层增加带能力门控的 LHDC cs1 解码；实时显示链路和写入策略不动。诊断复用现有 dump，以四类 `sampleKind` 去重；首页负责状态跃迁，ApplyWorker 仍只采首次配置。QQ 入口并入关于卡，通过群名片 Intent 打开 QQ，最后独立修改版本元数据。
 
 **Tech Stack:** Android、Kotlin、Jetpack Compose、JUnit4、Gradle/AGP、Shizuku/Stellar。
 
-**Spec:** `docs/superpowers/specs/2026-10-25-lhdc-quality-realtime-diagnostics-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-25-lhdc-quality-realtime-diagnostics-design.md` + `docs/superpowers/specs/2026-10-25-qq-group-entry-design.md`
 
 ## Global Constraints
 
-- 基线：master `ef13067`，101/101 单测；所有任务在同一隔离 worktree/分支依次完成，禁止 Task 52/53 并行修改 `MainActivity.kt`。
+- 基线：master `ef13067`，101/101 单测；所有任务在同一隔离 worktree/分支依次完成，禁止任何并行施工或并发修改 `MainActivity.kt`。
 - JDK：`JAVA_HOME=/opt/homebrew/opt/openjdk@27/libexec/openjdk.jdk/Contents/Home`，并将其 `bin` 放到 `PATH` 最前。
 - 只读显示：不得修改 `ApplyPolicy.BEST_CS1`、不得写 19 号 cs1、不得改变拉满目标或协商逻辑。
 - LHDC 显示必须先有身份佐证，再验证 `(cs1 and 0xC000L) == 0x8000L`；不得裸认 codecType 19。
@@ -22,7 +22,8 @@
 - available 的码率变化可继续更新 UI，但不得重复写 vendor 证据块；无匹配段线索每块最多 24 行。
 - 每个功能任务由 fresh fable implementer 以 TDD 开发，fresh fable reviewer 审查，主 agent 再复审。
 - 每次本地提交末尾必须带：`Co-Authored-By: Claude Code <noreply@anthropic.com>`；不得 push 或发布。
-- Task 54 固定为 `versionCode 6 / versionName '1.2.1'`；Release 正文最多三条用户语言更新点。
+- Task 55 固定为 `versionCode 6 / versionName '1.2.1'`；Release 正文最多三条用户语言更新点。
+- QQ 群号固定 `1131911367`；入口并入现有关于卡，不新增区块/卡片；优先打开 QQ 群资料，ActivityNotFoundException/SecurityException 时复制群号并提示，不自动入群、不做浏览器回退。
 - 完成声明必须有最终提交、全量测试、构建和本机装机证据；外部 Xiaomi/OPlus 实际传输不得凭本机结果宣称已修复。
 
 ## Review Focus
@@ -32,6 +33,7 @@
 3. available 从 400 变为 500：UI 可更新，但 gate 不新增日志；ApplyWorker 同 raw 后续运行仍不新增 dump（Task 53 Step 4/8/10）。
 4. 超过 24 个通用 State 行后才出现 quality/bitrate：线索函数必须优先保留后者（Task 53 Step 4/6）。
 5. raw bitrate 为 -1、缺字段或非数字：原始证据与归一化/未流式语义必须区分，不能混成同一种空值（Task 53 Step 1/3）。
+6. QQ 未安装或拒绝唤起：必须复制 `1131911367` 并提示，不得静默失败或自动入群（Task 54 Step 4/6；真机成功路径列入 Final Verification）。
 
 ---
 
@@ -39,11 +41,12 @@
 
 **Files:**
 - Copy: `docs/superpowers/specs/2026-10-25-lhdc-quality-realtime-diagnostics-design.md`
+- Copy: `docs/superpowers/specs/2026-10-25-qq-group-entry-design.md`
 - Copy: `docs/superpowers/plans/2026-10-25-lhdc-quality-realtime-diagnostics.md`
 
-- [ ] **Step 1: 通过 using-git-worktrees 创建 `task/lhdc-quality-realtime-diagnostics` 隔离工作区，并把 spec/plan 复制到相同相对路径。**
-- [ ] **Step 2: 提交两份文档，提交信息为 `Docs: StayHiFi 1.2.1 LHDC 修复设计与实施计划`，末尾附全局规定的 Co-Authored-By。**
-- [ ] **Step 3: 在 `.superpowers/sdd/2026-10-25-lhdc-quality-realtime-diagnostics/` 建立任务简报/报告/进度账本；Task 52/53/54 共用同一分支，依次执行。**
+- [ ] **Step 1: 通过 using-git-worktrees 创建 `task/lhdc-quality-realtime-diagnostics` 隔离工作区，并把两份 spec 与 plan 复制到相同相对路径。**
+- [ ] **Step 2: 提交全部设计与计划文档，提交信息为 `Docs: StayHiFi 1.2.1 LHDC 修复设计与实施计划`，末尾附全局规定的 Co-Authored-By。**
+- [ ] **Step 3: 在 `.superpowers/sdd/2026-10-25-lhdc-quality-realtime-diagnostics/` 建立任务简报/报告/进度账本；Task 52/53/54/55 共用同一分支，依次执行。**
 
 ### Task 52：已佐证 LHDC 的设置层码率显示
 
@@ -273,14 +276,98 @@ git commit -m "Task 53: 增强 LHDC 实际传输诊断证据" \
   -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
-### Task 54：1.2.1 版本与简短 Release 说明
+### Task 54：QQ 交流群入口（并入关于卡）
+
+**Files:**
+- Create: `app/src/main/java/com/chengzi/stayhifi/util/QqGroup.kt`
+- Modify: `app/src/main/java/com/chengzi/stayhifi/ui/settings/SettingsScreen.kt:13-25,51-65,265-287`
+- Modify: `app/src/main/java/com/chengzi/stayhifi/MainActivity.kt:407-445`
+- Test: `app/src/test/java/com/chengzi/stayhifi/util/QqGroupTest.kt`
+
+**Interfaces:**
+- Consumes: 现有关于卡、ClipboardManager、Toast 和 SettingsAction 上抛模式；不改变 Task 52/53 接口。
+- Produces:
+  - `QqGroup.GROUP_NUMBER = "1131911367"`、`QqGroup.QQ_PACKAGE = "com.tencent.mobileqq"`、`QqGroup.groupCardUri(): String`。
+  - `SettingsAction.CopyQqGroupNumber`、`SettingsAction.OpenQqGroup`。
+
+- [ ] **Step 1: 先写群名片链接失败测试。**
+
+新建 `QqGroupTest.kt`：
+
+```kotlin
+package com.chengzi.stayhifi.util
+
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+class QqGroupTest {
+    @Test
+    fun groupCardUriUsesApprovedGroupAndQqPackage() {
+        assertEquals("1131911367", QqGroup.GROUP_NUMBER)
+        assertEquals("com.tencent.mobileqq", QqGroup.QQ_PACKAGE)
+        assertEquals(
+            "mqqapi://card/show_pslcard?src_type=internal&version=1" +
+                "&uin=1131911367&card_type=group&source=qrcode",
+            QqGroup.groupCardUri(),
+        )
+    }
+}
+```
+
+- [ ] **Step 2: 运行测试，确认旧实现缺少组件。**
+
+Run：`./gradlew :app:testDebugUnitTest --tests com.chengzi.stayhifi.util.QqGroupTest`
+
+Expected：因 QqGroup 尚不存在而编译失败；记录真实 RED，不得先写生产代码。
+
+- [ ] **Step 3: 最小实现 QqGroup 并跑通测试。**
+
+在 `util/QqGroup.kt` 定义上述常量与 `groupCardUri()`，URI 逐字使用补充设计 §2 的群名片格式；群号为固定数字，不引入编码/网络库。
+
+Run：同 Step 2。
+
+Expected：PASS。
+
+- [ ] **Step 4: 按用户选定布局接入设置页与 Activity 行为。**
+
+`SettingsScreen.kt`：
+- 增加 `CopyQqGroupNumber` / `OpenQqGroup` 两个 SettingsAction。
+- 只在现有关于卡的 GPL 文本之后增加：群号文本 `QQ 交流群：1131911367`，下一行右对齐两个 `TextButton`：`复制`、`打开 QQ`。
+- 不新增 SectionTitle、卡片、图标或第三方库；浅色/深色 Preview 复用现有主题。
+
+`MainActivity.kt`：
+- 处理两个新 action；复制使用 ClipData，成功 Toast `QQ 群号已复制`。
+- 打开使用 `ACTION_VIEW` + `QqGroup.groupCardUri()`，`setPackage(QqGroup.QQ_PACKAGE)`，直接 startActivity，不调用 resolveActivity、不新增 `<queries>`。
+- 捕获 `ActivityNotFoundException` 与 `SecurityException`，复用复制逻辑并 Toast `打开 QQ 失败，群号已复制`。
+- 成功日志只能写已请求打开群资料页；不得写已加群。不得自动入群或浏览器回退。
+
+- [ ] **Step 5: 运行全量测试和构建。**
+
+Run：`./gradlew test assembleDebug`
+
+Expected：全部测试 PASS，BUILD SUCCESSFUL；记录最终测试数。
+
+- [ ] **Step 6: 自审边界并提交 Task 54。**
+
+确认 Manifest/权限/依赖无 diff，关于卡外布局未改，复制与失败回退共用同一群号常量，Task 52/53 功能行未被改写。
+
+```bash
+git add app/src/main/java/com/chengzi/stayhifi/util/QqGroup.kt \
+  app/src/main/java/com/chengzi/stayhifi/ui/settings/SettingsScreen.kt \
+  app/src/main/java/com/chengzi/stayhifi/MainActivity.kt \
+  app/src/test/java/com/chengzi/stayhifi/util/QqGroupTest.kt
+git commit -m "Task 54: 设置页新增 QQ 交流群入口" \
+  -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+```
+
+### Task 55：1.2.1 版本与简短 Release 说明
 
 **Files:**
 - Modify: `app/build.gradle:16-17`
 - Create (gitignored，不提交): `.superpowers/sdd/2026-10-25-lhdc-quality-realtime-diagnostics/release-1.2.1.md`
 
 **Interfaces:**
-- Consumes: Task 52/53 最终代码。
+- Consumes: Task 52/53/54 最终代码。
 - Produces: `versionCode 6 / versionName '1.2.1'` 的 APK 与三条 Release 正文。
 
 - [ ] **Step 1: 修改用户指定的版本元数据，并写 Release 文案。**
@@ -291,8 +378,8 @@ git commit -m "Task 53: 增强 LHDC 实际传输诊断证据" \
 
 ```text
 - 修复部分手机不显示码率档位的问题。
-- 改进运行日志，方便反馈实际传输问题。
-- 实时码率仍取决于手机系统支持，部分机型暂无法显示。
+- 新增 QQ 交流群入口，方便反馈问题。
+- 改进诊断日志；实时码率仍取决于系统支持，部分机型暂无法显示。
 ```
 
 不得加入 Task、cs1、codecType、dumpsys、gate、commit、解析器或测试流水账。
@@ -317,7 +404,7 @@ Expected：无匹配；文案仍为上述三条。
 
 ```bash
 git add app/build.gradle
-git commit -m "Task 54: 版本更新至 1.2.1" \
+git commit -m "Task 55: 版本更新至 1.2.1" \
   -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
 
@@ -326,5 +413,6 @@ git commit -m "Task 54: 版本更新至 1.2.1" \
 - [ ] fresh fable 对 Task 52→54 完整 diff 终审；主 agent 逐条处理发现，不盲目接受。
 - [ ] 使用最终提交重新运行 `./gradlew test assembleDebug`，统计真实测试数并检查 `git diff --check`。
 - [ ] 构建可覆盖安装的包并在 V2505A 真机验证：codecType 10 既有四格、播放/暂停三态、清空后重记、复制日志；记录包版本与最终 commit。
+- [ ] 在关于卡验证 `QQ 交流群：1131911367`、复制按钮和打开 QQ 群资料/加群入口；不得自动入群。无 QQ/拒绝唤起回退只做代码审查，不声称已制造环境实测。
 - [ ] 对照 spec §10.4 准备外部采样指引，明确本机无法证明 Xiaomi/OPlus 实际传输已修复。
-- [ ] 进入 finishing-a-development-branch；merge/push/tag/Release 均另行确认，Release 正文只能使用 Task 54 的三条用户文案。
+- [ ] 进入 finishing-a-development-branch；merge/push/tag/Release 均另行确认，Release 正文只能使用 Task 55 的三条用户文案。

@@ -2,8 +2,9 @@
 
 - 日期：2026-10-25
 - 基线：v1.2.0，master `ef13067`
-- 状态：builder-check 已完成，唯一关键冲突已回填裁决；用户新增 1.2.1 与简短 Release 要求已纳入；待实施
-- 实施任务：Task 52（设置层码率）、Task 53（诊断增强）、Task 54（1.2.1 版本与 Release 文案）
+- 状态：builder-check 已完成；1.2.1、简短 Release 与用户追加 QQ 群入口均已纳入；实施中
+- 实施任务：Task 52（设置层码率）、Task 53（诊断增强）、Task 54（QQ 群入口）、Task 55（1.2.1 版本与 Release 文案）
+- 补充设计：`docs/superpowers/specs/2026-10-25-qq-group-entry-design.md`（用户已选定并入关于卡）
 - 开发方式：每个任务由独立 fable subagent 以 TDD 实施，主 agent 逐任务审查，最后整分支复审
 
 ## 1. 背景与问题陈述
@@ -299,7 +300,7 @@ fun dumpClues(dump: String, limit: Int = 24): List<String>
 
 集成审查必须确认：首页实时状态更新不依赖 gate；即使 available 日志被去重，后续码率变化仍会正常更新 UI。ApplyWorker 在同一 mac+raw 的后续运行中不得为了采集新 sampleKind 而新增 dump；只有 `apply-dump` 首次命中才走既有 dump 路径。
 
-## 8. Task 54：1.2.1 版本与 Release 说明
+## 8. Task 55：1.2.1 版本与 Release 说明
 
 ### 8.1 版本元数据
 
@@ -329,8 +330,8 @@ versionName '1.2.1'
 
 ```text
 - 修复部分手机不显示码率档位的问题。
-- 改进运行日志，方便反馈实际传输问题。
-- 实时码率仍取决于手机系统支持，部分机型暂无法显示。
+- 新增 QQ 交流群入口，方便反馈问题。
+- 改进诊断日志；实时码率仍取决于系统支持，部分机型暂无法显示。
 ```
 
 本任务只准备版本与文案；是否 push、打 tag、创建 GitHub Release 仍按 finishing 流程另行决定，不因版本号确定而自动发布。
@@ -370,7 +371,8 @@ versionName '1.2.1'
 2. 既有 LHDC codecType 10 设备仍显示 `LHDC V5 / 192kHz / 24bit / 1000kbps`。
 3. 实际传输显示不因 gate 去重而冻结；播放/暂停三态行为与基线一致。
 4. 清空日志后，同一样本可重新记录；日志仍只存在本机内存，复制日志可用。
-5. 本机不是 OPlus/Xiaomi 反馈机型，不能据此宣称外部机型的实际传输问题已修复。
+5. 关于卡显示 `QQ 交流群：1131911367` 与「复制 / 打开 QQ」；复制动作可用，点击后 QQ 打开群资料/加群入口（不自动入群）。无 QQ/拒绝唤起的回退由代码审查覆盖，不通过卸载或禁用 QQ 制造环境。
+6. 本机不是 OPlus/Xiaomi 反馈机型，不能据此宣称外部机型的实际传输问题已修复。
 
 ### 10.4 外部回归（下一版收集，不阻塞本次代码验收）
 
@@ -385,10 +387,11 @@ versionName '1.2.1'
 
 1. Task 52：fable implementer，TDD；fable reviewer 审查 spec 符合性和代码质量；主 agent 复审后提交。
 2. Task 53：基于 Task 52 的最终代码，fable implementer，TDD；fable reviewer；主 agent 复审后提交。两任务共享 MainActivity，禁止并行施工。
-3. 主 agent 对完整 diff 做一次独立 fable 终审，重点检查：身份门控、magic、日志刷量、重复 dump、UI 更新与 gate 解耦、ApplyPolicy 未变。
-4. Task 54：fable implementer 修改 `versionCode 6 / versionName '1.2.1'` 并按 §8.2 准备三条以内的 Release 文案；主 agent 审查版本 diff 与文案，配置变更以最终 APK badging 验证。
-5. 主 agent 跑全量测试/构建并执行本机回归；如实报告无法覆盖的外部机型。
-6. 是否合并 master、push、打 tag、创建 Release 另行按项目 finishing 流程决定；本 spec 不授权发布。
+3. Task 54：按补充设计实现 QQ 群入口，必须等 Task 53 审查完成；fable implementer/TDD/reviewer，主 agent 复审。
+4. Task 55：fable implementer 修改 `versionCode 6 / versionName '1.2.1'` 并按 §8.2 准备三条以内的 Release 文案；主 agent 审查版本 diff 与文案，配置变更以最终 APK badging 验证。
+5. 主 agent 对完整 diff 做一次独立 fable 终审，重点检查：身份门控、magic、日志刷量、重复 dump、UI 更新与 gate 解耦、ApplyPolicy 未变、QQ 失败回退与隐私边界。
+6. 主 agent 跑全量测试/构建并执行本机回归；如实报告无法覆盖的外部机型和未制造的失败环境。
+7. 是否合并 master、push、打 tag、创建 Release 另行按项目 finishing 流程决定；本 spec 不授权发布。
 
 ## 12. 明确留给 builder 的事项
 
