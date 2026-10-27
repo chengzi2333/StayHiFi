@@ -56,6 +56,7 @@ import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
+import com.chengzi.stayhifi.codec.RealtimeDisplay
 import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.codec.VendorDiagnosticGate
 import com.chengzi.stayhifi.data.ProfileRepository
@@ -1003,7 +1004,7 @@ class MainActivity : ComponentActivity() {
                     quality = null,
                     realtimeKbps = null,
                     realtimeQualityMode = null,
-                    realtimeNotStreaming = false,
+                    realtimeDisplay = RealtimeDisplay.NO_DATA,
                     fullBars = false,
                 )
                 connectedMac = null
@@ -1043,7 +1044,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeNotStreaming = false, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1056,7 +1057,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeNotStreaming = false, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1074,7 +1075,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeNotStreaming = false, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1093,7 +1094,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeNotStreaming = false, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1147,11 +1148,11 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     parsedCodecName = parsed?.codec
                                 }
-                                realtime = BtStateParser.realtimeDisplay(isMusicActive = true, state = parsed)
+                                realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
                                 if (parsed == null) {
                                     realtimeDiag(current, codecName, "无匹配段落")
                                 } else {
-                                    if (!realtime.notStreaming && realtime.bitrateKbps == null) {
+                                    if (realtime.display == RealtimeDisplay.NO_DATA) {
                                         realtimeDiag(current, codecName, "无码率字段")
                                     } else {
                                         logBtDiag(null)
@@ -1199,7 +1200,7 @@ class MainActivity : ComponentActivity() {
                     quality = presentation.summary.quality,
                     realtimeKbps = realtime.bitrateKbps,
                     realtimeQualityMode = realtime.qualityMode,
-                    realtimeNotStreaming = realtime.notStreaming,
+                    realtimeDisplay = realtime.display,
                     fullBars = fullBars,
                 )
                 connectedMac = mac

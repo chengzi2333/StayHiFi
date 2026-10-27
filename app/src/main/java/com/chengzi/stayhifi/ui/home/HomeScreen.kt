@@ -32,6 +32,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.codec.RealtimeDisplay
+import com.chengzi.stayhifi.codec.RealtimeDisplayFormatter
+import com.chengzi.stayhifi.codec.RealtimeState
 import com.chengzi.stayhifi.ui.nav.StayHiFiIcons
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.util.DeviceNames
@@ -53,19 +56,18 @@ data class HomeUiState(
     /**
      * Task 43/44：传输层实况码率（kbps，如 400），来自 dumpsys 的 "A2DP <codec> State:" 段。
      * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null。
-     * Task 46：该值在 vivo LHDC 下是粘性值（停播仍报 400000），是否真在播放以
-     * realtimeNotStreaming 为准（AudioManager.isMusicActive 即时判定，见 MainActivity）。
+     * Task 7：该值是否有意义由 [realtimeDisplay] 四态裁决（仅 AVAILABLE 携带非 null）。
      */
     val realtimeKbps: Int? = null,
-    /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。 */
+    /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。仅 AVAILABLE 携带。 */
     val realtimeQualityMode: String? = null,
     /**
-     * Task 44/46：判定为未在流式传输 → 实际传输行显示「未在播放」。
-     * 两条路径：AudioManager.isMusicActive=false（Task 46，即时主判定）；
-     * 或栈明确回报 bitrate ≤ 0（LDAC 实证 -1，保留兼容）。
-     * 与「本机暂不支持抓取」（realtimeKbps=null 且本字段 false → 「—」）区分，空态三分。
+     * Task 7：实际传输四态（NOT_PLAYING/AVAILABLE/NO_DATA/STACK_REPORTS_IDLE），
+     * 替换旧 realtimeNotStreaming 布尔；空态拆出 STACK_REPORTS_IDLE——播放中但栈
+     * 回报 idle（PLK110 raw=-1 实证）显示「暂无法确认」而非「未在播放」。
+     * 文案唯一入口见 [RealtimeDisplayFormatter]。
      */
-    val realtimeNotStreaming: Boolean = false,
+    val realtimeDisplay: RealtimeDisplay = RealtimeDisplay.NO_DATA,
     /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
     val fullBars: Boolean = false,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
@@ -277,10 +279,11 @@ private fun DetailGrid(state: HomeUiState) {
 
 /**
  * Task 45：实际传输行（方案 C）——分隔线 + 「实际传输」行 + 超小字解释行。
- * 空态三分（沿 Task 44 语义）：
- *   正常        → 「400 kbps · ABR（自适应）」（ABR 必须带「自适应」三字——别人不认识缩写）
- *   未在播放     → 「未在播放」（Task 46 isMusicActive 即时判定，停歌不再残留粘性码率）
- *   暂不支持抓取 → 「—（本机暂不支持抓取）」（Task 46 用户拍板的人话文案）
+ * Task 7：四态文案统一走 [RealtimeDisplayFormatter]，本层不再自行拼装：
+ *   AVAILABLE           → 「400 kbps · ABR（自适应）」（ABR 必须带「自适应」三字——别人不认识缩写）
+ *   NOT_PLAYING         → 「未在播放」（isMusicActive 即时判定，停歌不再残留粘性码率）
+ *   NO_DATA             → 「—（本机暂不支持抓取）」+ 系统不开放反馈指引
+ *   STACK_REPORTS_IDLE  → 「暂无法确认」（PLK110：播放中但栈回报 -1，不显示未在播放，也不显示反馈指引）
  * 解释行说明「为什么这么设置」；未连接耳机时本段由调用方整段跳过。
  */
 @Composable
@@ -295,26 +298,21 @@ private fun RealtimeSection(state: HomeUiState) {
                 modifier = Modifier.weight(1f),
             )
             Text(
-                text = when {
-                    state.realtimeNotStreaming -> "未在播放"
-                    state.realtimeKbps != null -> {
-                        val qm = state.realtimeQualityMode
-                        when {
-                            qm != null && qm.contains("ABR", ignoreCase = true) ->
-                                "${state.realtimeKbps} kbps · ABR（自适应）"
-                            qm != null -> "${state.realtimeKbps} kbps · $qm"
-                            else -> "${state.realtimeKbps} kbps"
-                        }
-                    }
-                    else -> "—（本机暂不支持抓取）"
-                },
+                text = RealtimeDisplayFormatter.text(
+                    RealtimeState(
+                        state.realtimeDisplay,
+                        state.realtimeKbps,
+                        state.realtimeQualityMode,
+                    ),
+                ),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
             )
         }
         Text(
-            // Task 46（用户中途追加）：只有抓取不支持时换成反馈指引，其余状态保留调度解释。
-            text = if (!state.realtimeNotStreaming && state.realtimeKbps == null) {
+            // Task 46（用户中途追加）：只有抓取不支持（NO_DATA）时换成反馈指引，
+            // STACK_REPORTS_IDLE 不显示该指引，其余状态保留调度解释。
+            text = if (state.realtimeDisplay == RealtimeDisplay.NO_DATA) {
                 "这个机型的系统不开放实时码率读取，欢迎到设置-日志页把日志反馈给作者"
             } else {
                 "部分 vivo LHDC 栈实测固定档仍走 ABR；其他系统样本不足，请对比设置码率与实际传输"
@@ -405,6 +403,7 @@ private fun HomeScreenPreviewLight() {
                 quality = "1000kbps",
                 realtimeKbps = 400,
                 realtimeQualityMode = "ABR",
+                realtimeDisplay = RealtimeDisplay.AVAILABLE,
                 fullBars = true,
             ),
             onAction = {},

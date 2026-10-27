@@ -281,12 +281,14 @@ class BtStateParserTest {
     }
 
     // ── Task 46：isMusicActive 驱动的实际传输三态决策（不再依赖 PCM 两轮增量） ──
+    // ── Task 7：升级 RealtimeDisplay 四态枚举；旧 state 参数 overload 保留但走同一裁决 ──
 
     @Test
     fun realtimeDisplayWhenMusicInactiveImmediatelyShowsNotPlaying() {
         // 粘性 400k 即使仍由栈返回，未播放时也必须首轮直接隐藏，避免闪旧值
         val sticky = BtStateParser.parse(lhdcDump, "LHDC")!!
         val display = BtStateParser.realtimeDisplay(isMusicActive = false, state = sticky)
+        assertEquals(RealtimeDisplay.NOT_PLAYING, display.display)
         assertTrue(display.notStreaming)
         assertNull(display.bitrateKbps)
         assertNull(display.qualityMode)
@@ -296,25 +298,121 @@ class BtStateParserTest {
     fun realtimeDisplayWhenMusicActiveShowsAvailableBitrate() {
         val state = BtStateParser.parse(lhdcDump, "LHDC")!!
         val display = BtStateParser.realtimeDisplay(isMusicActive = true, state = state)
+        assertEquals(RealtimeDisplay.AVAILABLE, display.display)
         assertFalse(display.notStreaming)
         assertEquals(400, display.bitrateKbps)
         assertEquals("ABR", display.qualityMode)
     }
 
     @Test
-    fun realtimeDisplayWhenMusicActiveButStackUnavailableShowsUnknown() {
+    fun realtimeDisplayWhenMusicActiveButStackUnavailableShowsNoData() {
         val display = BtStateParser.realtimeDisplay(isMusicActive = true, state = null)
+        assertEquals(RealtimeDisplay.NO_DATA, display.display)
         assertFalse(display.notStreaming)
         assertNull(display.bitrateKbps)
         assertNull(display.qualityMode)
     }
 
     @Test
-    fun realtimeDisplayWhenMusicActiveButStackReportsNegativeShowsNotPlaying() {
-        // Task 46：LDAC -1 路径保留，与 isMusicActive=false 汇合到同一「未在播放」出口
-        val state = BtStateParser.parse(ldacDump, "LDAC")!!
-        val display = BtStateParser.realtimeDisplay(isMusicActive = true, state = state)
-        assertTrue(display.notStreaming)
+    fun realtimeDisplayWhenMusicActiveButStackReportsNegativeShowsStackReportsIdle() {
+        // Task 7：LDAC -1 旧预期由「未在播放」改为「栈回报空闲」——播放中但栈回报 -1
+        // 不能下「未在播放」结论（与 isMusicActive 即时判定矛盾），只能说暂无法确认。
+        val result = BtStateParser.parseResult(ldacDump, identity("LDAC"))
+        assertEquals(BtStateParseStatus.NOT_STREAMING, result.status)
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+        assertEquals(RealtimeDisplay.STACK_REPORTS_IDLE, display.display)
+        assertFalse(display.notStreaming)
+        assertNull(display.bitrateKbps)
+        assertNull(display.qualityMode)
+        assertEquals("暂无法确认", RealtimeDisplayFormatter.text(display))
+    }
+
+    // ── Task 7：PLK110 实证——播放中 LHDC V3 段回报 raw=-1（栈回报 idle） ──
+
+    @Test
+    fun plkExactV3ParsesAsNotStreaming() {
+        // PLK110 实况事实：V3 段播放中原始码率 -1 → 精确解析必须为 NOT_STREAMING
+        val result = BtStateParser.parseResult(CodecDeviceFixtures.plkDumpV3, identity("LHDC V3"))
+
+        assertEquals(BtStateParseStatus.NOT_STREAMING, result.status)
+        assertEquals(CodecDeviceFixtures.plkV3RawBitrate, result.state?.rawBitrate)
+        assertNull(result.state?.bitrateKbps)
+        assertTrue(result.state!!.notStreaming)
+    }
+
+    @Test
+    fun plkMusicActiveWithNegativeRawShowsStackReportsIdle() {
+        // isMusicActive=true + raw=-1 → 暂无法确认，绝不显示「未在播放」
+        val result = BtStateParser.parseResult(CodecDeviceFixtures.plkDumpV3, identity("LHDC V3"))
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+
+        assertEquals(RealtimeDisplay.STACK_REPORTS_IDLE, display.display)
+        assertEquals("暂无法确认", RealtimeDisplayFormatter.text(display))
+        assertNull(display.bitrateKbps)
+        assertNull(display.qualityMode)
+    }
+
+    @Test
+    fun plkMusicInactiveShowsNotPlaying() {
+        // isMusicActive=false 仍是「未在播放」主判定，不被栈 -1 干扰
+        val result = BtStateParser.parseResult(CodecDeviceFixtures.plkDumpV3, identity("LHDC V3"))
+        val display = BtStateParser.realtimeDisplay(isMusicActive = false, result = result)
+
+        assertEquals(RealtimeDisplay.NOT_PLAYING, display.display)
+        assertEquals("未在播放", RealtimeDisplayFormatter.text(display))
+        assertNull(display.bitrateKbps)
+        assertNull(display.qualityMode)
+    }
+
+    @Test
+    fun musicActiveWithPositiveBitrateShowsAvailableKeepingQualityMode() {
+        // 正码率 → AVAILABLE，ABR/码率原样保留
+        val result = BtStateParser.parseResult(CodecDeviceFixtures.opdDumpV3, identity("LHDC V3"))
+        assertEquals(BtStateParseStatus.AVAILABLE, result.status)
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+
+        assertEquals(RealtimeDisplay.AVAILABLE, display.display)
+        assertEquals(500, display.bitrateKbps)
+        assertEquals("MID", display.qualityMode)
+        assertEquals("500 kbps · MID", RealtimeDisplayFormatter.text(display))
+    }
+
+    @Test
+    fun noSectionAmbiguousAndNoBitrateAllMapToNoData() {
+        // 抓取不可用的三种裁决（无段/歧义/无码率）统一映射 NO_DATA，由文案层区分解释
+        val noSection = BtStateParser.parseResult("", identity("LHDC V3"))
+        assertEquals(BtStateParseStatus.NO_SECTION, noSection.status)
+        assertEquals(
+            RealtimeDisplay.NO_DATA,
+            BtStateParser.realtimeDisplay(isMusicActive = true, result = noSection).display,
+        )
+
+        val ambiguousDump = CodecDeviceFixtures.opdDumpV3 + "\n" + """
+            A2DP LHDC V5 State:
+              LHDC quality mode : HIGH
+              LHDC transmission bitrate (Kbps) : 900000
+        """.trimIndent()
+        val ambiguous = BtStateParser.parseResult(ambiguousDump, identity("LHDC"))
+        assertEquals(BtStateParseStatus.AMBIGUOUS_SECTION, ambiguous.status)
+        assertEquals(
+            RealtimeDisplay.NO_DATA,
+            BtStateParser.realtimeDisplay(isMusicActive = true, result = ambiguous).display,
+        )
+
+        val noBitrate = BtStateParser.parseResult(aacDump, identity("AAC"))
+        assertEquals(BtStateParseStatus.NO_BITRATE, noBitrate.status)
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = noBitrate)
+        assertEquals(RealtimeDisplay.NO_DATA, display.display)
+        assertEquals("—（本机暂不支持抓取）", RealtimeDisplayFormatter.text(display))
+    }
+
+    @Test
+    fun stackReportsIdleStateDoesNotCarryBitrateOrQuality() {
+        // 仅 AVAILABLE 携带码率/quality；STACK_REPORTS_IDLE 两字段必须为 null
+        val result = BtStateParser.parseResult(CodecDeviceFixtures.plkDumpV3, identity("LHDC V3"))
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+
+        assertEquals(RealtimeDisplay.STACK_REPORTS_IDLE, display.display)
         assertNull(display.bitrateKbps)
         assertNull(display.qualityMode)
     }

@@ -41,13 +41,6 @@ object BtStateParser {
         val rawBitrate: Long? = null,
     )
 
-    /** Task 46：实际传输行三态结果；默认值表示「本机暂不支持抓取」。 */
-    data class RealtimeDisplay(
-        val bitrateKbps: Int? = null,
-        val qualityMode: String? = null,
-        val notStreaming: Boolean = false,
-    )
-
     private val SECTION_HEADER = Regex("^A2DP\\s+(.+?)\\s+State:")
 
     private data class RawSection(
@@ -181,15 +174,40 @@ object BtStateParser {
     }
 
     /**
-     * Task 46：isMusicActive 驱动的三态决策。未播放立即返回「未在播放」，不使用粘性码率；
-     * 播放中保留栈返回值；栈不暴露与栈明确回报 -1 分别映射为「暂不支持抓取」和「未在播放」。
+     * Task 7：isMusicActive 驱动的四态裁决，首页实际传输唯一决策入口。
+     * 判定顺序固定：
+     *   music=false                         → NOT_PLAYING（即时主判定，不用粘性码率）
+     *   music=true + AVAILABLE 且有合法码率 → AVAILABLE（唯一携带 bitrate/quality 的态）
+     *   music=true + NOT_STREAMING          → STACK_REPORTS_IDLE（栈回报 idle，与 isMusicActive 矛盾 → 暂无法确认）
+     *   其余（无段/歧义/无码率字段）          → NO_DATA
      */
-    fun realtimeDisplay(isMusicActive: Boolean, state: BtState?): RealtimeDisplay = when {
-        !isMusicActive -> RealtimeDisplay(notStreaming = true)
-        state == null -> RealtimeDisplay()
-        state.notStreaming -> RealtimeDisplay(notStreaming = true)
-        else -> RealtimeDisplay(state.bitrateKbps, state.qualityMode)
+    fun realtimeDisplay(isMusicActive: Boolean, result: BtStateParseResult): RealtimeState {
+        val state = result.state
+        return when {
+            !isMusicActive -> RealtimeState(RealtimeDisplay.NOT_PLAYING)
+            // normalizeBitrate 已保证非 null 即 >0（raw≤0 归一为 null）
+            result.status == BtStateParseStatus.AVAILABLE && state?.bitrateKbps != null ->
+                RealtimeState(RealtimeDisplay.AVAILABLE, state.bitrateKbps, state.qualityMode)
+            result.status == BtStateParseStatus.NOT_STREAMING ->
+                RealtimeState(RealtimeDisplay.STACK_REPORTS_IDLE)
+            else -> RealtimeState(RealtimeDisplay.NO_DATA)
+        }
     }
+
+    /**
+     * 旧 state 参数入口（源码兼容，Task 44/46 调用方/测试）：把裸 BtState 合成等价
+     * [BtStateParseResult] 后走同一四态裁决，语义与 result 入口完全一致
+     * （旧 LDAC -1 的「未在播放」预期有意改为 STACK_REPORTS_IDLE，其余不变）。
+     */
+    fun realtimeDisplay(isMusicActive: Boolean, state: BtState?): RealtimeState = realtimeDisplay(
+        isMusicActive,
+        when {
+            state == null -> BtStateParseResult(BtStateParseStatus.NO_SECTION)
+            state.notStreaming -> BtStateParseResult(BtStateParseStatus.NOT_STREAMING, state)
+            state.bitrateKbps != null -> BtStateParseResult(BtStateParseStatus.AVAILABLE, state)
+            else -> BtStateParseResult(BtStateParseStatus.NO_BITRATE, state)
+        },
+    )
 
     /**
      * 首页第六格显示文案：读不到/未流式 → null（UI 显示「—」，cell 占位不动）。
