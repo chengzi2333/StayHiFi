@@ -48,6 +48,11 @@ import kotlin.math.abs
 import kotlinx.coroutines.delay
 import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
+import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecPresentation
+import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.VendorDiagnostics
@@ -632,6 +637,7 @@ class MainActivity : ComponentActivity() {
                 LogStore.clear()
                 resetVendorDiagnostics()
                 ApplyWorker.resetVendorDiagnostics()
+                CodecIdentityDiagnosticGate.reset()
                 btDiagLast = null
                 logs = emptyList()
             }
@@ -772,9 +778,14 @@ class MainActivity : ComponentActivity() {
                     LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
                     return@launch
                 }
-                val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
+                val presentation = CodecSnapshotPresenter.present(CodecStateSnapshotJson.parse(stateJson))
+                if (presentation == null) {
+                    LogStore.log("刷新连接：当前配置尚未就绪")
+                    return@launch
+                }
+                recordIdentityConflict(mac, presentation)
                 onboardingState = onboardingState.copy(headsetConnected = true, headsetName = name)
-                LogStore.log("已连接: $name ($mac)，当前 ${current.summary()}")
+                LogStore.log("已连接: $name ($mac)，当前 ${presentation.summary.text()}")
             } catch (t: Throwable) {
                 LogStore.log("刷新连接失败: $t")
             }
@@ -883,13 +894,19 @@ class MainActivity : ComponentActivity() {
                     LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
                     return@launch
                 }
-                val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
+                val presentation = CodecSnapshotPresenter.present(CodecStateSnapshotJson.parse(stateJson))
+                if (presentation == null) {
+                    wizardError = "当前参数尚未就绪，请稍后重试"
+                    LogStore.log("录制向导：当前配置尚未就绪")
+                    return@launch
+                }
+                recordIdentityConflict(mac, presentation)
                 capturedMac = mac
                 capturedName = name
-                capturedConfig = current
-                wizardResult = summaryToUi(current.summary())
+                capturedConfig = presentation.current
+                wizardResult = summaryToUi(presentation.summary.text())
                 wizardDeviceLabel = "$name ($mac)"
-                LogStore.log("录制向导抓到: $name ($mac) ${current.summary()}")
+                LogStore.log("录制向导抓到: $name ($mac) ${presentation.summary.text()}")
             } catch (t: Throwable) {
                 wizardError = "抓取失败：${t.message ?: t.toString()}"
                 LogStore.log("录制向导抓取失败: $t")
@@ -953,6 +970,17 @@ class MainActivity : ComponentActivity() {
             "实际传输抓取诊断: 机型=${DeviceNames.marketModel()} " +
                 "codecType=${current.codecType} 编码器=$codecName 原因=$reason"
         )
+    }
+
+    private fun recordIdentityConflict(mac: String, presentation: CodecPresentation) {
+        if (CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT !in presentation.issues) return
+        val identity = presentation.identity
+        if (CodecIdentityDiagnosticGate.shouldRecord(mac, presentation.current, identity)) {
+            LogStore.log(
+                "IDENTITY_CONFLICT: nativeType=${identity.nativeType} " +
+                    "system=${identity.displayName} legacy=${Masks.codecName(identity.nativeType)}"
+            )
+        }
     }
 
     // 每次刷新递增代次；慢读取可并发，但只有最新轮次允许写首页状态与 PCM 前值。
@@ -1056,14 +1084,25 @@ class MainActivity : ComponentActivity() {
                     LogStore.log("首页 readConfig error: ${obj.optString("error")}")
                     return@launch
                 }
-                val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
-                // Task 27 两态裁决：fullBars = 与 ApplyWorker 同一份 deriveTarget 判定
-                // （readConfig 响应已含 selectable），四字段相等即"已达本机最高音质输出"。
-                val selectable = obj.optJSONArray("selectable")?.let { arr ->
-                    (0 until arr.length()).map {
-                        CodecConfig.fromJson(arr.getJSONObject(it).toString())
-                    }
-                } ?: emptyList()
+                val snapshot = CodecStateSnapshotJson.parse(stateJson)
+                val presentation = CodecSnapshotPresenter.present(snapshot)
+                if (presentation == null) {
+                    if (gen != refreshGeneration) return@launch
+                    homeState = homeState.copy(
+                        headsetName = null, codec = null, rate = null,
+                        bits = null, quality = null,
+                        realtimeKbps = null, realtimeQualityMode = null,
+                        realtimeNotStreaming = false, fullBars = false,
+                    )
+                    connectedMac = null
+                    connectedName = null
+                    logBtDiag(null)
+                    return@launch
+                }
+                recordIdentityConflict(mac, presentation)
+                val current = presentation.current
+                val selectable = snapshot.selectable
+                // Task 27 两态裁决：fullBars 仍使用旧 current+selectable/ApplyPolicy。
                 val fullBars = ApplyPolicy.matches(
                     ApplyPolicy.deriveTarget(current, selectable), current,
                 )
@@ -1071,12 +1110,9 @@ class MainActivity : ComponentActivity() {
                 // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
                 // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
                 // （旧 dump 读取块已由下方 isMusicActive 版取代，合并时整段移除。）
-                // Task 45：ColorOS 新栈 LHDC 在 vendor 段（0x10..0x1F），
-                // 用 selectable 能力掩码佐证后再认 LHDC。
                 val capsMask = Masks.capsRateMask(current.codecType, selectable)
-                val codecName = Masks.codecName(current.codecType, capsMask)
+                val codecName = presentation.identity.displayName
                 val isMusicActive = audioManager.isMusicActive
-                var preciseCodec: String? = null
                 var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
                 // 保留本次 dump 原文与 parsed state，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
                 var btDump: String? = null
@@ -1098,17 +1134,13 @@ class MainActivity : ComponentActivity() {
                                 realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
                             } else {
                                 btDump = btObj.optString("dump")
-                                // 必须走 current+selectable 的佐证版名称；单参映射会把
-                                // ColorOS 19 变成 vendor(19)，永远匹配不到 LHDC 段。
-                                val parsed = BtStateParser.parse(
-                                    btDump.orEmpty(), current, selectable,
-                                )
+                                // Task 5：匹配身份固定来自 presentation；dump 不得反向改写身份来源。
+                                val parsed = BtStateParser.parse(btDump.orEmpty(), codecName)
                                 parsedState = parsed
                                 realtime = BtStateParser.realtimeDisplay(isMusicActive = true, state = parsed)
                                 if (parsed == null) {
                                     realtimeDiag(current, codecName, "无匹配段落")
                                 } else {
-                                    preciseCodec = parsed.codec
                                     if (!realtime.notStreaming && realtime.bitrateKbps == null) {
                                         realtimeDiag(current, codecName, "无码率字段")
                                     } else {
@@ -1150,12 +1182,11 @@ class MainActivity : ComponentActivity() {
                 if (gen != refreshGeneration) return@launch
                 homeState = homeState.copy(
                     headsetName = name,
-                    // Task 44：编码器格优先用 dumpsys 段落精确名（如 "LHDC V5"），
-                    // 读不到回落 Masks 映射名；CodecConfig 层语义不动（cs1 档位仍按 codecType）。
-                    codec = preciseCodec ?: Masks.codecName(current.codecType, capsMask),
-                    rate = Masks.rateHz(current.sampleRate),
-                    bits = Masks.bitsDepth(current.bitsPerSample),
-                    quality = Masks.qualityLabel(current.codecType, current.cs1, capsMask),
+                    // Task 5：当前参数全部来自同一次 presentation；dump 只提供实况，不改写身份。
+                    codec = presentation.summary.codec,
+                    rate = presentation.summary.rate,
+                    bits = presentation.summary.bits,
+                    quality = presentation.summary.quality,
                     realtimeKbps = realtime.bitrateKbps,
                     realtimeQualityMode = realtime.qualityMode,
                     realtimeNotStreaming = realtime.notStreaming,

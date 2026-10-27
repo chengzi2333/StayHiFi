@@ -13,7 +13,12 @@ import android.content.pm.ServiceInfo
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.chengzi.stayhifi.LogStore
-import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
+import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecPresentation
+import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
+import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
@@ -339,13 +344,21 @@ class ListenerService : Service() {
                     } else {
                         val mac = arr.getJSONObject(0).getString("mac")
                         val name = arr.getJSONObject(0).getString("name")
-                        val obj = JSONObject(withContext(Dispatchers.IO) { svc.readConfig(mac) })
-                        if (obj.has("error")) null
-                        else {
-                            val current =
-                                CodecConfig.fromJson(obj.getJSONObject("current").toString())
-                            checkDrift(mac, name, current)
-                            "$name · ${current.summary()}"
+                        val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
+                        val obj = JSONObject(stateJson)
+                        if (obj.has("error")) {
+                            null
+                        } else {
+                            val presentation = CodecSnapshotPresenter.present(
+                                CodecStateSnapshotJson.parse(stateJson),
+                            )
+                            if (presentation == null) {
+                                null
+                            } else {
+                                recordIdentityConflict(mac, presentation)
+                                checkDrift(mac, name, presentation)
+                                "$name · ${presentation.summary.text()}"
+                            }
                         }
                     }
                 } finally {
@@ -361,6 +374,17 @@ class ListenerService : Service() {
         }
     }
 
+    private fun recordIdentityConflict(mac: String, presentation: CodecPresentation) {
+        if (CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT !in presentation.issues) return
+        val identity = presentation.identity
+        if (CodecIdentityDiagnosticGate.shouldRecord(mac, presentation.current, identity)) {
+            LogStore.log(
+                "IDENTITY_CONFLICT: nativeType=${identity.nativeType} " +
+                    "system=${identity.displayName} legacy=${Masks.codecName(identity.nativeType)}"
+            )
+        }
+    }
+
     /**
      * Task 43 参数漂移提醒：轮询读回与「最近一次已验证生效目标」不一致时，
      * 弹一条结果通知「检测到系统改回了参数」+ 记 LogStore；每轮漂移期只弹一次，
@@ -369,7 +393,9 @@ class ListenerService : Service() {
      * 取舍：漂移判定只挂在 notifyPersistent=on 的 30s 轮询路径上（off 时没有轮询，
      * 靠连接事件自然重拉即可，不为漂移提醒额外唤醒载体）；通知本身受 notifyResult 开关控制。
      */
-    private suspend fun checkDrift(mac: String, name: String, current: CodecConfig) {
+    private suspend fun checkDrift(mac: String, name: String, presentation: CodecPresentation) {
+        val current = presentation.current
+        val currentSummary = presentation.summary.text()
         val target = VerifiedTargetStore.targetFor(mac) ?: return
         if (ApplyPolicy.matches(target, current)) {
             if (VerifiedTargetStore.isNotified(mac)) {
@@ -380,11 +406,11 @@ class ListenerService : Service() {
         }
         if (VerifiedTargetStore.isNotified(mac)) return
         VerifiedTargetStore.markNotified(mac)
-        LogStore.log("检测到参数漂移: $name ($mac) 目标 ${target.summary()}，读回 ${current.summary()}")
+        LogStore.log("检测到参数漂移: $name ($mac) 目标 ${target.summary()}，读回 $currentSummary")
         if (settings.isNotifyResult()) {
             notifier.notifyResult(
                 "检测到系统改回了参数",
-                "$name 当前 ${current.summary()}，与已拉满目标 ${target.summary()} 不符",
+                "$name 当前 $currentSummary，与已拉满目标 ${target.summary()} 不符",
             )
         }
     }

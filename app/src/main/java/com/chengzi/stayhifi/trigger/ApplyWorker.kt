@@ -7,6 +7,13 @@ import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.LogStore
 import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecIdentity
+import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
+import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecPresentation
+import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
+import com.chengzi.stayhifi.codec.CodecSummaryFormatter
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Negotiation
@@ -51,6 +58,25 @@ class ApplyWorker(context: Context) {
 
     private fun log(msg: String) = LogStore.log(msg)
 
+    private fun recordIdentityConflict(mac: String, presentation: CodecPresentation) {
+        if (CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT !in presentation.issues) return
+        val identity = presentation.identity
+        if (CodecIdentityDiagnosticGate.shouldRecord(mac, presentation.current, identity)) {
+            log(
+                "IDENTITY_CONFLICT: nativeType=${identity.nativeType} " +
+                    "system=${identity.displayName} legacy=${Masks.codecName(identity.nativeType)}"
+            )
+        }
+    }
+
+    /** settled identity 只用于同 codecType 的派生候选与读回；跨类型保留旧摘要。 */
+    private fun summary(config: CodecConfig, identity: CodecIdentity): String =
+        if (config.codecType == identity.nativeType) {
+            CodecSummaryFormatter.formatText(config, identity)
+        } else {
+            config.summary()
+        }
+
     suspend fun run(mac: String?, name: String?, force: Boolean = false) {
         val target = mac?.takeIf { it.isNotBlank() } ?: run {
             log("ACL_CONNECTED 无设备地址，跳过")
@@ -85,11 +111,9 @@ class ApplyWorker(context: Context) {
                 return
             }
             delay(SETTLE_MS)
-            val settled = readState(service, mac) ?: run {
-                log("协商稳定后读取失败，放弃")
-                return
-            }
-            log("当前配置: ${settled.current.summary()}")
+            val settled = readState(service, mac) ?: return
+            recordIdentityConflict(mac, settled.presentation)
+            log("当前配置: ${settled.presentation.summary.text()}")
             // Task 53：轻量厂商诊断（仅现有 LogStore，不改写入/映射行为）——
             // 未识别 vendor 保持原日志；已佐证的 vendor LHDC（含 19 号）也记录 raw 9 字段。
             // dump 前固定使用 apply-dump 去重，真实 sampleKind 只在 dump 后标注本次证据。
@@ -113,7 +137,7 @@ class ApplyWorker(context: Context) {
                             )
                         } else {
                             val dump = dumpObj.optString("dump")
-                            val state = BtStateParser.parse(dump, settled.current, settled.selectable)
+                            val state = BtStateParser.parse(dump, settled.presentation.identity.displayName)
                             val kind = VendorDiagnostics.sampleKind(state)
                             if (state != null) {
                                 log(
@@ -143,7 +167,10 @@ class ApplyWorker(context: Context) {
                 log("已有档案但 autoApply=false，跳过写入")
             } else {
                 log("派生本机最高目标")
-                applyDerived(service, mac, name, settled.current, settled.selectable)
+                applyDerived(
+                    service, mac, name, settled.current, settled.selectable,
+                    settled.presentation.identity,
+                )
             }
         } catch (t: Throwable) {
             log("自动拉满失败: $t")
@@ -156,12 +183,12 @@ class ApplyWorker(context: Context) {
     /** 统一路径：deriveTarget 派生本机最高目标，按降档序列逐候选写入，直到读回一致（设计 §4.2.1）。 */
     private suspend fun applyDerived(
         service: ICodecService, mac: String, name: String?,
-        current: CodecConfig, selectable: List<CodecConfig>,
+        current: CodecConfig, selectable: List<CodecConfig>, identity: CodecIdentity,
     ) {
         val golden = ApplyPolicy.deriveTarget(current, selectable)
         for (candidate in Negotiation.descending(golden)) {
             if (!ApplyPolicy.decide(current, candidate)) {
-                log("当前已是本机最高 ${candidate.summary()}，跳过写入")
+                log("当前已是本机最高 ${summary(candidate, identity)}，跳过写入")
                 notifyResult("音质已拉满", "${name ?: mac} 已是本机最高音质输出")
                 // Task 43：早退=读回已验证与本机最高一致，记入漂移基准（漂移提醒用）。
                 VerifiedTargetStore.record(mac, candidate)
@@ -177,9 +204,9 @@ class ApplyWorker(context: Context) {
             // Task 42：写入第一个候选之前，把写入前原始协商配置（settled.current）记入档案，
             // 供设备页「恢复默认参数」写回。只记第一次，后续触发不覆盖。
             recordOriginConfig(mac, current)
-            log("写入候选: ${candidate.summary()}")
-            if (writeVerified(service, mac, candidate)) {
-                notifyResult("音质拉满成功", "${name ?: mac} → ${candidate.summary()}")
+            log("写入候选: ${summary(candidate, identity)}")
+            if (writeVerified(service, mac, candidate, identity)) {
+                notifyResult("音质拉满成功", "${name ?: mac} → ${summary(candidate, identity)}")
                 // Task 43：写入+读回验证通过 → 记入漂移基准（漂移提醒用）。
                 // 注意：漂移比对用 ApplyPolicy.matches（含 cs1），而服务端 applied 判定
                 // 不含 cs1——栈未套用 cs1 的罕见情况会被判成漂移，属可接受的保守误报。
@@ -189,7 +216,7 @@ class ApplyWorker(context: Context) {
                 autoCreateProfile(mac, name, readState(service, mac)?.current ?: candidate, origin = current)
                 return
             }
-            log("候选 ${candidate.summary()} 读回不一致，降档重试")
+            log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
         }
         log("所有候选均失败")
         notifier.notifyResult("音质拉满失败", "${name ?: mac}：所有候选读回不一致")
@@ -197,7 +224,7 @@ class ApplyWorker(context: Context) {
 
     /** writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。 */
     private suspend fun writeVerified(
-        service: ICodecService, mac: String, target: CodecConfig,
+        service: ICodecService, mac: String, target: CodecConfig, identity: CodecIdentity,
     ): Boolean {
         repeat(OUTER_RETRIES) { attempt ->
             val res = withContext(Dispatchers.IO) { service.writeConfig(mac, target.toJson()) }
@@ -211,13 +238,13 @@ class ApplyWorker(context: Context) {
                     // applied 是服务端按 codecType+rate+bits 语义判定的，直接采信；
                     // final 仅做交叉验证（栈可能规范化 priority/cs1~cs4 等字段）
                     if (final != null && !ApplyPolicy.matches(target, final)) {
-                        log("applied=true 但 final=${final.summary()} 三项与目标不符（以 applied 为准）")
+                        log("applied=true 但 final=${summary(final, identity)} 三项与目标不符（以 applied 为准）")
                     } else {
-                        log("读回一致 ✓ final=${final?.summary()}")
+                        log("读回一致 ✓ final=${final?.let { summary(it, identity) }}")
                     }
                     return true
                 }
-                log("读回不一致: ${final?.summary() ?: "无 final 字段"}")
+                log("读回不一致: ${final?.let { summary(it, identity) } ?: "无 final 字段"}")
             }
             if (attempt < OUTER_RETRIES - 1) {
                 delay(RETRY_DELAY_MS)
@@ -346,16 +373,16 @@ class ApplyWorker(context: Context) {
     private fun readState(service: ICodecService, mac: String): DeviceState? =
         readState(service.readConfig(mac))
 
-    /** 解析 readConfig 结果；{error:...} 或解析失败返回 null。 */
+    /** 解析 readConfig 快照；error、current:null 或解析失败返回 null。 */
     private fun readState(json: String): DeviceState? = try {
         val obj = JSONObject(json)
-        if (obj.has("error")) null
-        else {
-            val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
-            val selectable = obj.optJSONArray("selectable")?.let { arr ->
-                (0 until arr.length()).map { CodecConfig.fromJson(arr.getJSONObject(it).toString()) }
-            } ?: emptyList()
-            DeviceState(current, selectable)
+        if (obj.has("error")) {
+            null
+        } else {
+            val snapshot = CodecStateSnapshotJson.parse(json)
+            CodecSnapshotPresenter.present(snapshot)?.let { presentation ->
+                DeviceState(presentation, snapshot.selectable)
+            }
         }
     } catch (t: Throwable) {
         log("readConfig 结果解析失败: $t")
@@ -387,7 +414,12 @@ class ApplyWorker(context: Context) {
         }
     }
 
-    private data class DeviceState(val current: CodecConfig, val selectable: List<CodecConfig>)
+    private data class DeviceState(
+        val presentation: CodecPresentation,
+        val selectable: List<CodecConfig>,
+    ) {
+        val current: CodecConfig get() = presentation.current
+    }
 
     companion object {
         private const val SHELL_WAIT_STEPS = 6          // 3s
