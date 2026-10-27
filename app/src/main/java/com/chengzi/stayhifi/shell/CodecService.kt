@@ -9,9 +9,11 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import android.util.Log
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -79,20 +81,21 @@ class CodecService : ICodecService.Stub() {
         if (dev == null) {
             error("找不到目标设备 $mac")
         } else {
-            val status = a2dp.javaClass
-                .getMethod("getCodecStatus", BluetoothDevice::class.java)
-                .invoke(a2dp, dev)
-            val cfg = status.javaClass.getMethod("getCodecConfig").invoke(status)
-            val selectable = status.javaClass
-                .getMethod("getCodecsSelectableCapabilities")
-                .invoke(status) as List<*>
-            Log.i(TAG, "readConfig ${safeName(dev)}: ${configFromReflected(cfg!!).summary()}")
-            buildJsonObject {
-                put("current", configFromReflected(cfg).toJsonElement())
-                putJsonArray("selectable") {
-                    for (cap in selectable) add(configFromReflected(cap!!).toJsonElement())
-                }
-            }.toString()
+            // Task 2：分阶段反射读取；codecStatus/current 为 null 或反射异常时
+            // 仍返回含 current:null、各阶段状态与 errors 的 snapshot，绝不用 !! 崩掉。
+            val status = CodecReflectionReader.codecStatus(a2dp, dev)
+            // supported 目录暂直读，下一任务（SupportedTypesCatalogCache）再加缓存
+            val supported = CodecReflectionReader.supportedTypes(a2dp)
+            val snapshot = CodecReflectionReader.readSnapshot(
+                status = status, a2dp = a2dp, supportedTypes = supported,
+                serviceUid = Process.myUid(),
+                bluetoothState = bluetoothState(),
+                a2dpProxyState = a2dpProxyState(),
+            )
+            snapshot.current?.let {
+                Log.i(TAG, "readConfig ${safeName(dev)}: ${it.summary()}")
+            }
+            CodecStateSnapshotJson.encode(snapshot)
         }
     } catch (t: Throwable) {
         errorJson("readConfig", t)
@@ -370,7 +373,8 @@ class CodecService : ICodecService.Stub() {
             .getMethod("getCodecStatus", BluetoothDevice::class.java)
             .invoke(a2dp, dev)
         val cfg = status.javaClass.getMethod("getCodecConfig").invoke(status)
-        return configFromReflected(cfg!!)
+        // 写读回路径行为不变：Task 2 仅把 9 字段转换移入 reader 复用
+        return CodecReflectionReader.configFromReflected(cfg!!)
     }
 
     /** 构造 BluetoothCodecConfig：Android 13+ 用 Builder，更老的走 9 参构造 */
@@ -411,27 +415,24 @@ class CodecService : ICodecService.Stub() {
         return ctor.newInstance(codecType, priority, sampleRate, bits, channel, cs1, cs2, cs3, cs4)
     }
 
-    // ── 反射读字段 ──
-
-    private fun getInt(cfg: Any, getter: String): Int =
-        cfg.javaClass.getMethod(getter).invoke(cfg) as Int
-
-    private fun getLong(cfg: Any, getter: String): Long =
-        cfg.javaClass.getMethod(getter).invoke(cfg) as Long
-
-    private fun configFromReflected(cfg: Any): CodecConfig = CodecConfig(
-        codecType = getInt(cfg, "getCodecType"),
-        priority = getInt(cfg, "getCodecPriority"),
-        sampleRate = getInt(cfg, "getSampleRate"),
-        bitsPerSample = getInt(cfg, "getBitsPerSample"),
-        channelMode = getInt(cfg, "getChannelMode"),
-        cs1 = getLong(cfg, "getCodecSpecific1"),
-        cs2 = getLong(cfg, "getCodecSpecific2"),
-        cs3 = getLong(cfg, "getCodecSpecific3"),
-        cs4 = getLong(cfg, "getCodecSpecific4"),
-    )
+    // ── 反射读字段：9 字段转换已移入 CodecReflectionReader（Task 2），此处保留 JSON 辅助 ──
 
     private fun CodecConfig.toJsonElement(): JsonElement = Json.parseToJsonElement(toJson())
+
+    /** 蓝牙开关状态的安全读取；adapter 缺失或读取异常均为 UNKNOWN */
+    private fun bluetoothState(): String = try {
+        when (mAdapter?.isEnabled) {
+            true -> "ON"
+            false -> "OFF"
+            null -> "UNKNOWN"
+        }
+    } catch (t: Throwable) {
+        "UNKNOWN"
+    }
+
+    /** A2DP 代理连接状态；getA2dp() 成功后必为 CONNECTED */
+    private fun a2dpProxyState(): String =
+        if (mA2dp != null) "CONNECTED" else "DISCONNECTED"
 
     private fun safeName(d: BluetoothDevice): String = try {
         d.name ?: "?"
