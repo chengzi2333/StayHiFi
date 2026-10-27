@@ -47,6 +47,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 import com.chengzi.stayhifi.codec.BtStateParser
+import com.chengzi.stayhifi.codec.BtStateParseStatus
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
 import com.chengzi.stayhifi.codec.CodecIdentityIssue
@@ -1117,6 +1118,7 @@ class MainActivity : ComponentActivity() {
                 // 保留本次 dump 原文与 parsed state，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
                 var btDump: String? = null
                 var parsedState: BtStateParser.BtState? = null
+                var parsedCodecName: String? = null
                 if (!isMusicActive) {
                     logBtDiag(null)
                 } else {
@@ -1134,9 +1136,17 @@ class MainActivity : ComponentActivity() {
                                 realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
                             } else {
                                 btDump = btObj.optString("dump")
-                                // Task 5：匹配身份固定来自 presentation；dump 不得反向改写身份来源。
-                                val parsed = BtStateParser.parse(btDump.orEmpty(), codecName)
+                                // Task 6：身份来自 presentation；仅唯一无歧义段可补充精确版本显示。
+                                val result = BtStateParser.parseResult(
+                                    btDump.orEmpty(), presentation.identity,
+                                )
+                                val parsed = result.state
                                 parsedState = parsed
+                                if (result.status != BtStateParseStatus.NO_SECTION &&
+                                    result.status != BtStateParseStatus.AMBIGUOUS_SECTION
+                                ) {
+                                    parsedCodecName = parsed?.codec
+                                }
                                 realtime = BtStateParser.realtimeDisplay(isMusicActive = true, state = parsed)
                                 if (parsed == null) {
                                     realtimeDiag(current, codecName, "无匹配段落")
@@ -1182,8 +1192,8 @@ class MainActivity : ComponentActivity() {
                 if (gen != refreshGeneration) return@launch
                 homeState = homeState.copy(
                     headsetName = name,
-                    // Task 5：当前参数全部来自同一次 presentation；dump 只提供实况，不改写身份。
-                    codec = presentation.summary.codec,
+                    // Task 6：仅唯一无歧义 dump 段可补精确版本；其余保持 presentation 名称。
+                    codec = parsedCodecName ?: presentation.summary.codec,
                     rate = presentation.summary.rate,
                     bits = presentation.summary.bits,
                     quality = presentation.summary.quality,

@@ -1,5 +1,14 @@
 package com.chengzi.stayhifi.codec
 
+/** dumpsys 实况段落的裁决结果；ambiguous 不携带任何猜测出来的状态。 */
+enum class BtStateParseStatus { NO_SECTION, AMBIGUOUS_SECTION, NOT_STREAMING, NO_BITRATE, AVAILABLE }
+
+data class BtStateParseResult(
+    val status: BtStateParseStatus,
+    val state: BtStateParser.BtState? = null,
+    val candidateSections: List<String> = emptyList(),
+)
+
 /**
  * Task 43：解析 dumpsys bluetooth_manager 中 "A2DP <codec> State:" 段落的传输层实况，
  * 给首页第六格「实际传输」供数。纯函数、无 Android 依赖，单测覆盖（BtStateParserTest）。
@@ -41,6 +50,22 @@ object BtStateParser {
 
     private val SECTION_HEADER = Regex("^A2DP\\s+(.+?)\\s+State:")
 
+    private data class RawSection(
+        val codec: String,
+        val lines: MutableList<String> = mutableListOf(),
+    )
+
+    private data class ParsedSection(val state: BtState) {
+        val status: BtStateParseStatus
+            get() = when {
+                state.bitrateKbps != null -> BtStateParseStatus.AVAILABLE
+                state.notStreaming -> BtStateParseStatus.NOT_STREAMING
+                else -> BtStateParseStatus.NO_BITRATE
+            }
+
+        fun result() = BtStateParseResult(status, state)
+    }
+
     /**
      * 按首页读回的 current + selectable 解析：ColorOS vendor 段必须复用经能力佐证的
      * LHDC 名称，不能退回单参 Masks.codecName 映射得到的 vendor(N) 去匹配段落。
@@ -48,54 +73,111 @@ object BtStateParser {
     fun parse(dump: String, current: CodecConfig, selectable: List<CodecConfig>): BtState? =
         parse(dump, Masks.codecName(current.codecType, Masks.capsRateMask(current.codecType, selectable)))
 
-    /**
-     * 从 dumpsys 文本中找 [codecName]（如 "LHDC"/"LDAC"，与 Masks.codecName 输出一致）对应段落，
-     * 提取 quality mode 与 transmission bitrate；段落不存在 → null。
-     * 段名匹配用「去空格/连字符后双向 contains」：覆盖 "LHDC V5" 这类带后缀的段名，
-     * 也兼容 "aptX HD" 与 codecName "aptX-HD" 的写法差异；
-     * Task 44 反向包含兜底：codecName 为 "LHDC V5" 时旧栈段头 "LHDC"（无后缀）仍命中。
-     */
-    fun parse(dump: String, codecName: String): BtState? {
-        val wanted = normalize(codecName)
-        if (wanted.isEmpty()) return null
-        var inSection = false
-        var found = false
-        // Task 44：命中段落的段头原始名（如 "LHDC V5"），带回给 UI 精确展示
-        var sectionName: String? = null
-        var qualityMode: String? = null
-        var bitrateKbps: Int? = null
-        var rawBitrate: Long? = null
-        var notStreaming = false
+    /** 旧字符串入口仅作兼容包装；新调用方应传入已裁决的 [CodecIdentity]。 */
+    fun parse(dump: String, codecName: String): BtState? = parseResult(
+        dump,
+        CodecIdentity(
+            nativeType = -1,
+            family = codecFamilyOf(codecName),
+            displayName = codecName,
+            source = CodecIdentitySource.UNKNOWN,
+        ),
+    ).state
+
+    /** 先拆分并逐段提取，再在 normalized 精确名、同族泛称或旧无版本段之间裁决。 */
+    fun parseResult(dump: String, identity: CodecIdentity): BtStateParseResult {
+        val wanted = normalize(identity.displayName)
+        if (wanted.isEmpty()) return BtStateParseResult(BtStateParseStatus.NO_SECTION)
+
+        val sections = splitSections(dump).map(::parseSection)
+        val exact = sections.filter { normalize(it.state.codec) == wanted }
+        if (exact.isNotEmpty()) return selectExact(exact)
+        if (identity.family == CodecFamily.UNKNOWN) {
+            return BtStateParseResult(BtStateParseStatus.NO_SECTION)
+        }
+
+        val genericIdentity = wanted == normalize(identity.family.name)
+        val candidates = if (genericIdentity) {
+            sections.filter { sameFamily(it.state.codec, identity.family) }
+        } else {
+            // 带版本身份只能回退到旧无版本段，绝不能借用其他版本的字段。
+            sections.filter { normalize(it.state.codec) == normalize(identity.family.name) }
+        }
+        return if (genericIdentity) selectGeneric(candidates) else selectLegacy(candidates)
+    }
+
+    private fun splitSections(dump: String): List<RawSection> {
+        val sections = mutableListOf<RawSection>()
+        var current: RawSection? = null
         for (raw in dump.lineSequence()) {
             val line = raw.trim()
             val header = SECTION_HEADER.find(line)
             if (header != null) {
-                val norm = normalize(header.groupValues[1])
-                // Task 44：双向 contains——codecName 扩充为 "LHDC V5" 后，
-                // 旧栈段头 "A2DP LHDC State:"（无后缀）也要能命中（反向包含兜底）
-                inSection = norm.contains(wanted) || wanted.contains(norm)
-                if (inSection) {
-                    found = true
-                    sectionName = header.groupValues[1].trim()
-                }
-                continue
-            }
-            if (!inSection) continue
-            if (line.contains("quality mode", ignoreCase = true)) {
-                val v = line.substringAfterLast(':').trim()
-                if (v.isNotEmpty()) qualityMode = v
-            } else if (line.contains("transmission bitrate", ignoreCase = true)) {
-                // 非数字值（如 AAC 的 "bitrate mode : Constant" 不匹配本分支）跳过；
-                // 数字非法也跳过，不污染已解析到的值
-                val v = line.substringAfterLast(':').trim().toLongOrNull() ?: continue
-                rawBitrate = v
-                // Task 44：≤0（实证 -1）= 栈明确回报未在流式，单独标记
-                notStreaming = v <= 0
-                bitrateKbps = normalizeBitrate(v)
+                current = RawSection(header.groupValues[1].trim()).also(sections::add)
+            } else {
+                current?.lines?.add(line)
             }
         }
-        if (!found) return null
-        return BtState(sectionName ?: codecName, qualityMode, bitrateKbps, notStreaming, rawBitrate)
+        return sections
+    }
+
+    private fun parseSection(section: RawSection): ParsedSection {
+        var qualityMode: String? = null
+        var bitrateKbps: Int? = null
+        var rawBitrate: Long? = null
+        var notStreaming = false
+        for (line in section.lines) {
+            if (line.contains("quality mode", ignoreCase = true)) {
+                val value = line.substringAfterLast(':').trim()
+                if (value.isNotEmpty()) qualityMode = value
+            } else if (line.contains("transmission bitrate", ignoreCase = true)) {
+                // 非数字值不覆盖本段已经读到的数值，也绝不会进入其他段。
+                val value = line.substringAfterLast(':').trim().toLongOrNull() ?: continue
+                rawBitrate = value
+                notStreaming = value <= 0
+                bitrateKbps = normalizeBitrate(value)
+            }
+        }
+        return ParsedSection(
+            BtState(section.codec, qualityMode, bitrateKbps, notStreaming, rawBitrate),
+        )
+    }
+
+    private fun selectExact(candidates: List<ParsedSection>): BtStateParseResult {
+        val first = candidates.first()
+        return if (candidates.size == 1 || candidates.all { it.state == first.state }) {
+            first.result()
+        } else {
+            ambiguous(candidates)
+        }
+    }
+
+    private fun selectGeneric(candidates: List<ParsedSection>): BtStateParseResult = when {
+        candidates.isEmpty() -> BtStateParseResult(BtStateParseStatus.NO_SECTION)
+        candidates.size == 1 -> candidates.single().result()
+        else -> {
+            val available = candidates.filter {
+                it.status == BtStateParseStatus.AVAILABLE && (it.state.bitrateKbps ?: 0) > 0
+            }
+            if (available.size == 1) available.single().result() else ambiguous(candidates)
+        }
+    }
+
+    private fun selectLegacy(candidates: List<ParsedSection>): BtStateParseResult = when {
+        candidates.isEmpty() -> BtStateParseResult(BtStateParseStatus.NO_SECTION)
+        candidates.size == 1 -> candidates.single().result()
+        else -> ambiguous(candidates)
+    }
+
+    private fun ambiguous(candidates: List<ParsedSection>) = BtStateParseResult(
+        status = BtStateParseStatus.AMBIGUOUS_SECTION,
+        candidateSections = candidates.map { it.state.codec }.take(4),
+    )
+
+    private fun sameFamily(sectionName: String, family: CodecFamily): Boolean {
+        if (codecFamilyOf(sectionName) == family) return true
+        // codecFamilyOf 接受空格版本；这里同时保留旧 parser 对 LHDC-V3/LHDCV3 的兼容。
+        return family == CodecFamily.LHDC && normalize(sectionName).startsWith("LHDCV")
     }
 
     /**
@@ -128,10 +210,10 @@ object BtStateParser {
      * 归一化为 kbps：值 >10000 判定为 bps 单位 ÷1000（vivo 栈字段名误标 "(Kbps)"，
      * 实测 400000 对应 400kbps）；≤0（如 -1）表示未在流式传输 → null；其余按 kbps 原样。
      */
-    private fun normalizeBitrate(raw: Long): Int? = when {
-        raw <= 0 -> null
-        raw > 10_000 -> (raw / 1000).toInt()
-        else -> raw.toInt()
+    private fun normalizeBitrate(raw: Long): Int? {
+        if (raw <= 0) return null
+        val kbps = if (raw > 10_000) raw / 1000 else raw
+        return kbps.takeIf { it <= Int.MAX_VALUE.toLong() }?.toInt()
     }
 
     private fun normalize(s: String): String =

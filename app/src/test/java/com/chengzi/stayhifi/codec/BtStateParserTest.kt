@@ -153,6 +153,133 @@ class BtStateParserTest {
         assertEquals("990k", BtStateParser.formatDisplay(s))
     }
 
+    // ── Task 6：先拆段再裁决，禁止 LHDC 版本段之间拼字段 ──
+
+    private fun identity(name: String) = CodecIdentity(
+        nativeType = 18,
+        family = codecFamilyOf(name),
+        displayName = name,
+        source = CodecIdentitySource.SYSTEM_TYPE,
+    )
+
+    private val opdDump = CodecDeviceFixtures.opdDumpV3 + "\n" + """
+        A2DP LHDC V5 State:
+          ${CodecDeviceFixtures.opdDumpV5Empty}
+    """.trimIndent()
+
+    @Test
+    fun exactLhdcV3ReturnsOnlyOpdV3State() {
+        val result = BtStateParser.parseResult(opdDump, identity("LHDC V3"))
+
+        assertEquals(BtStateParseStatus.AVAILABLE, result.status)
+        assertEquals("LHDC V3", result.state?.codec)
+        assertEquals("MID", result.state?.qualityMode)
+        assertEquals(500000L, result.state?.rawBitrate)
+        assertEquals(500, result.state?.bitrateKbps)
+    }
+
+    @Test
+    fun genericLhdcSelectsOnlyAvailableOpdSectionWithoutV5Leak() {
+        val result = BtStateParser.parseResult(opdDump, identity("LHDC"))
+
+        assertEquals(BtStateParseStatus.AVAILABLE, result.status)
+        assertEquals("LHDC V3", result.state?.codec)
+        assertEquals("MID", result.state?.qualityMode)
+        assertEquals(500000L, result.state?.rawBitrate)
+        assertEquals(500, result.state?.bitrateKbps)
+    }
+
+    @Test
+    fun genericLhdcWithTwoAvailableSectionsIsAmbiguous() {
+        val dump = CodecDeviceFixtures.opdDumpV3 + "\n" + """
+            A2DP LHDC V5 State:
+              LHDC quality mode : HIGH
+              LHDC transmission bitrate (Kbps) : 900000
+        """.trimIndent()
+
+        val result = BtStateParser.parseResult(dump, identity("LHDC"))
+
+        assertEquals(BtStateParseStatus.AMBIGUOUS_SECTION, result.status)
+        assertNull(result.state)
+        assertEquals(listOf("LHDC V3", "LHDC V5"), result.candidateSections)
+    }
+
+    @Test
+    fun genericLhdcWithMultipleInvalidBitrateSectionsIsAmbiguousAndCapsHeaders() {
+        val dump = (1..5).joinToString("\n") { version ->
+            "A2DP LHDC V$version State:\n  {}"
+        }
+
+        val result = BtStateParser.parseResult(dump, identity("LHDC"))
+
+        assertEquals(BtStateParseStatus.AMBIGUOUS_SECTION, result.status)
+        assertNull(result.state)
+        assertEquals(
+            listOf("LHDC V1", "LHDC V2", "LHDC V3", "LHDC V4"),
+            result.candidateSections,
+        )
+    }
+
+    @Test
+    fun exactLhdcV3DoesNotBorrowAvailableV5Fields() {
+        val dump = """
+            A2DP LHDC V5 State:
+              LHDC quality mode : HIGH
+              LHDC transmission bitrate (Kbps) : 900000
+        """.trimIndent()
+
+        val result = BtStateParser.parseResult(dump, identity("LHDC V3"))
+
+        assertEquals(BtStateParseStatus.NO_SECTION, result.status)
+        assertNull(result.state)
+    }
+
+    @Test
+    fun exactLhdcV3AcceptsUniqueUnversionedLegacySection() {
+        val dump = """
+            A2DP LHDC State:
+              LHDC quality mode : ABR
+              LHDC transmission bitrate (Kbps) : 400000
+        """.trimIndent()
+
+        val result = BtStateParser.parseResult(dump, identity("LHDC V3"))
+
+        assertEquals(BtStateParseStatus.AVAILABLE, result.status)
+        assertEquals("LHDC", result.state?.codec)
+        assertEquals("ABR", result.state?.qualityMode)
+        assertEquals(400, result.state?.bitrateKbps)
+    }
+
+    @Test
+    fun conflictingDuplicateExactSectionsAreAmbiguous() {
+        val dump = CodecDeviceFixtures.opdDumpV3 + "\n" + """
+            A2DP LHDC V3 State:
+              LHDC quality mode : HIGH
+              LHDC transmission bitrate (Kbps) : 900000
+        """.trimIndent()
+
+        val result = BtStateParser.parseResult(dump, identity("LHDC V3"))
+
+        assertEquals(BtStateParseStatus.AMBIGUOUS_SECTION, result.status)
+        assertNull(result.state)
+        assertEquals(listOf("LHDC V3", "LHDC V3"), result.candidateSections)
+    }
+
+    @Test
+    fun overflowingBitrateReturnsNoBitrateInsteadOfNegativeKbps() {
+        val dump = """
+            A2DP LDAC State:
+              LDAC transmission bitrate (Kbps) : ${Long.MAX_VALUE}
+        """.trimIndent()
+
+        val result = BtStateParser.parseResult(dump, identity("LDAC"))
+
+        assertEquals(BtStateParseStatus.NO_BITRATE, result.status)
+        assertEquals(Long.MAX_VALUE, result.state?.rawBitrate)
+        assertNull(result.state?.bitrateKbps)
+        assertFalse(result.state!!.notStreaming)
+    }
+
     // ── Task 46：isMusicActive 驱动的实际传输三态决策（不再依赖 PCM 两轮增量） ──
 
     @Test

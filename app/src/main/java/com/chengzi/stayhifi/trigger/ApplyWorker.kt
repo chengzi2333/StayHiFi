@@ -137,7 +137,9 @@ class ApplyWorker(context: Context) {
                             )
                         } else {
                             val dump = dumpObj.optString("dump")
-                            val state = BtStateParser.parse(dump, settled.presentation.identity.displayName)
+                            val state = BtStateParser.parseResult(
+                                dump, settled.presentation.identity,
+                            ).state
                             val kind = VendorDiagnostics.sampleKind(state)
                             if (state != null) {
                                 log(
