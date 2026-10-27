@@ -37,10 +37,11 @@ internal object CodecReflectionReader {
         findMethod(a2dp, "getCodecStatus", device).invoke(a2dp, device)
     }
 
-    /** `BluetoothA2dp.getSupportedCodecTypes()` 目录；条目读 `getNativeCodecType`（非 getCodecType）、`getCodecId`、`getCodecName`；空目录记 EMPTY。 */
+    /** `BluetoothA2dp.getSupportedCodecTypes()` 目录（AOSP 声明返回 Collection，不限于 List）；条目读 `getNativeCodecType`（非 getCodecType）、`getCodecId`、`getCodecName`；空目录记 EMPTY。 */
     fun supportedTypes(a2dp: Any): ReflectedValue<List<SupportedCodecType>> {
         val r = readStage {
-            val raw = a2dp.javaClass.getMethod("getSupportedCodecTypes").invoke(a2dp) as List<*>?
+            val raw = a2dp.javaClass.getMethod("getSupportedCodecTypes")
+                .invoke(a2dp) as Collection<*>?
             raw?.map { entry ->
                 val codecType = entry ?: throw IllegalStateException("null element in supportedTypes")
                 SupportedCodecType(
@@ -87,11 +88,16 @@ internal object CodecReflectionReader {
         if (status.state == ApiReadState.OK && status.value != null) {
             val s = status.value
 
-            val currentR = readStage { s.javaClass.getMethod("getCodecConfig").invoke(s) }
+            val currentR = readStage {
+                val raw = s.javaClass.getMethod("getCodecConfig").invoke(s)
+                    ?: return@readStage null
+                // 9 字段转换也纳入 current 阶段：任一字段 getter 失败不得逃出阶段隔离
+                raw to configFromReflected(raw)
+            }
             currentState = currentR.state
             if (currentR.state == ApiReadState.OK && currentR.value != null) {
-                currentRaw = currentR.value
-                current = configFromReflected(currentR.value)
+                currentRaw = currentR.value.first
+                current = currentR.value.second
             } else {
                 // codecStatus 可读但 current 不可读：NULL/EMPTY/ERROR/UNAVAILABLE 如实保留
                 currentState = currentR.state

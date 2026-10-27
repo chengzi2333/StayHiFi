@@ -126,6 +126,28 @@ class CodecReflectionReaderTest {
         fun getSupportedCodecTypes(): List<FakeCodecType>? = null
     }
 
+    /** `getSupportedCodecTypes()` 返回非 List 的 Collection（AOSP 实际返回 Collection）。 */
+    private class FakeA2dpWithCollectionCatalog(
+        var status: Any? = null,
+        var catalog: Collection<FakeCodecType>? = null,
+    ) {
+        fun getCodecStatus(device: Any?): Any? = status
+        fun getSupportedCodecTypes(): Collection<FakeCodecType>? = catalog
+    }
+
+    /** 9 字段 getter 之一抛异常的 config 本体（getCodecConfig 本身正常返回）。 */
+    private class FakeConfigWithBrokenField {
+        fun getCodecType(): Int = CodecDeviceFixtures.opdType
+        fun getCodecPriority(): Int = 0
+        fun getSampleRate(): Int = CodecDeviceFixtures.opdCurrentRate
+        fun getBitsPerSample(): Int = CodecDeviceFixtures.opdBits
+        fun getChannelMode(): Int = 0
+        fun getCodecSpecific1(): Long = throw SecurityException("cs1 denied")
+        fun getCodecSpecific2(): Long = 0L
+        fun getCodecSpecific3(): Long = 0L
+        fun getCodecSpecific4(): Long = 0L
+    }
+
     // ─────────────────────────── helpers ───────────────────────────
 
     private val device = FakeDevice()
@@ -236,6 +258,23 @@ class CodecReflectionReaderTest {
         assertEquals(1, s.selectable.size)
         // current 不可读 → 无法尝试 extended，保持 UNAVAILABLE，不产生误导性 NULL
         assertEquals(ApiReadState.UNAVAILABLE, s.identityDiagnostics.extendedTypeStatus)
+        assertNull(s.readStatus.currentSelectable)
+    }
+
+    @Test
+    fun currentFieldConversionFailureStaysInCurrentStage() {
+        // getCodecConfig() 正常返回，但 9 字段 getter 之一抛异常：
+        // 必须隔离在 current 阶段，不得中断 local/selectable，也不得逃出 readSnapshot
+        val status = happyStatus(config = FakeConfigWithBrokenField())
+        val s = read(FakeA2dp(status = status))
+        assertNull(s.current)
+        assertTrue(s.readStatus.currentNull)
+        assertEquals(ApiReadState.ERROR, s.readStatus.currentState)
+        assertEquals("SecurityException: cs1 denied", s.readStatus.errors["current"])
+        assertEquals(ApiReadState.OK, s.readStatus.localCapabilitiesState)
+        assertEquals(1, s.localCapabilities.size)
+        assertEquals(ApiReadState.OK, s.readStatus.selectableState)
+        assertEquals(2, s.selectable.size)
         assertNull(s.readStatus.currentSelectable)
     }
 
@@ -459,6 +498,20 @@ class CodecReflectionReaderTest {
             ),
             s.supportedTypes,
         )
+    }
+
+    @Test
+    fun supportedTypesAcceptsNonListCollection() {
+        // AOSP getSupportedCodecTypes() 声明返回 Collection：非 List 的合法目录不得误报 ERROR
+        val catalog = LinkedHashSet(listOf(FakeCodecType(18, 1000000L, "LHDC V3")))
+        val a2dp = FakeA2dpWithCollectionCatalog(status = happyStatus(), catalog = catalog)
+        val s = read(a2dp)
+        assertEquals(ApiReadState.OK, s.identityDiagnostics.supportedTypesStatus)
+        assertEquals(
+            listOf(SupportedCodecType(nativeType = 18, codecId = 1000000L, codecName = "LHDC V3")),
+            s.supportedTypes,
+        )
+        assertEquals(CodecDeviceFixtures.opdCurrent, s.current)
     }
 
     // ─────────────────────────── 错误文本约束 ───────────────────────────
