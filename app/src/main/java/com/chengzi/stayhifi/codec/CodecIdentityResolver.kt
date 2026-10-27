@@ -45,29 +45,34 @@ object CodecIdentityResolver {
         val issues = mutableSetOf<CodecIdentityIssue>()
 
         // 1. 系统 supported types：先按 current.nativeType 过滤成组。
+        //    整组先过可信门槛：任何一条不可信（blank / UNKNOWN CODEC* / 超长）即整组
+        //    不选、不留残余可信项——冲突/不可信组必须进下一身份来源，不取第一条硬认。
         val group = supportedTypes.filter { it.nativeType == current.codecType }
         if (group.isNotEmpty()) {
-            val valid = group.filter { isTrustedName(it.codecName) }
-            val distinct = valid.distinctBy { it.codecName.trim() to it.codecId }
             when {
-                // 整组不可信（blank / UNKNOWN CODEC* / 超长）→ 留 issue 进下一来源。
-                distinct.isEmpty() -> issues += CodecIdentityIssue.SUPPORTED_TYPE_INVALID
-                // 名称或 codecId 冲突 → 整组忽略，不取第一条硬认。
-                distinct.size > 1 -> issues += CodecIdentityIssue.SUPPORTED_TYPE_CONFLICT
+                group.any { !isTrustedName(it.codecName) } ->
+                    issues += CodecIdentityIssue.SUPPORTED_TYPE_INVALID
+
                 else -> {
-                    val entry = distinct.single()
-                    val systemIdentity = CodecIdentity(
-                        nativeType = current.codecType,
-                        family = codecFamilyOf(entry.codecName),
-                        displayName = entry.codecName.trim(),
-                        codecId = entry.codecId,
-                        source = CodecIdentitySource.SYSTEM_TYPE,
-                    )
-                    val legacyName = VERIFIED_LEGACY_NAMES[current.codecType]
-                    if (legacyName != null && conflictsWithLegacy(systemIdentity, legacyName)) {
-                        issues += CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT
+                    val distinct = group.distinctBy { it.codecName.trim() to it.codecId }
+                    if (distinct.size > 1) {
+                        // 名称或 codecId 冲突 → 整组忽略。
+                        issues += CodecIdentityIssue.SUPPORTED_TYPE_CONFLICT
+                    } else {
+                        val entry = distinct.single()
+                        val systemIdentity = CodecIdentity(
+                            nativeType = current.codecType,
+                            family = codecFamilyOf(entry.codecName),
+                            displayName = entry.codecName.trim(),
+                            codecId = entry.codecId,
+                            source = CodecIdentitySource.SYSTEM_TYPE,
+                        )
+                        val legacyName = VERIFIED_LEGACY_NAMES[current.codecType]
+                        if (legacyName != null && conflictsWithLegacy(systemIdentity, legacyName)) {
+                            issues += CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT
+                        }
+                        return CodecIdentityResolution(systemIdentity, issues)
                     }
-                    return CodecIdentityResolution(systemIdentity, issues)
                 }
             }
         }

@@ -128,6 +128,39 @@ class CodecIdentityResolverTest {
     }
 
     @Test
+    fun mixedValidInvalidGroupIsRejectedAndFallsBack() {
+        // 同 nativeType 组混合可信与不可信条目：不得选中剩余可信项；
+        // 必须留 SUPPORTED_TYPE_INVALID 并进入下一身份来源
+        val withExtended = CodecIdentityResolver.resolve(
+            CodecDeviceFixtures.opdCurrent,
+            opdSelectable(),
+            supportedTypes = listOf(
+                SupportedCodecType(CodecDeviceFixtures.opdType, 0x11L, "LHDC V3"),
+                SupportedCodecType(CodecDeviceFixtures.opdType, 0x22L, "UNKNOWN CODEC(18)"),
+            ),
+            extendedIdentity = ExtendedCodecIdentity(codecId = 0x33L, codecName = "LHDC V3"),
+        )
+
+        assertEquals(CodecIdentityIssue.SUPPORTED_TYPE_INVALID, withExtended.issues.single())
+        assertEquals(CodecIdentitySource.EXTENDED_CONFIG, withExtended.identity.source)
+        assertEquals("LHDC V3", withExtended.identity.displayName)
+
+        // 无下一来源时同样不得返回 SYSTEM_TYPE，落到 vendor(N)/UNKNOWN
+        val withoutExtended = CodecIdentityResolver.resolve(
+            CodecDeviceFixtures.opdCurrent,
+            opdSelectable(),
+            supportedTypes = listOf(
+                SupportedCodecType(CodecDeviceFixtures.opdType, 0x11L, "LHDC V3"),
+                SupportedCodecType(CodecDeviceFixtures.opdType, 0x22L, "UNKNOWN CODEC(18)"),
+            ),
+        )
+
+        assertEquals(CodecIdentityIssue.SUPPORTED_TYPE_INVALID, withoutExtended.issues.single())
+        assertEquals(CodecIdentitySource.UNKNOWN, withoutExtended.identity.source)
+        assertEquals("vendor(18)", withoutExtended.identity.displayName)
+    }
+
+    @Test
     fun supportedEntriesForOtherNativeTypesAreIgnored() {
         // 目录里只有其他 nativeType 的条目时，等同无系统身份，静默落到下一来源
         val res = CodecIdentityResolver.resolve(
