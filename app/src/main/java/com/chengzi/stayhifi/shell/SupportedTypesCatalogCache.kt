@@ -78,7 +78,13 @@ internal class SupportedTypesCatalogCache(private val nowMs: () -> Long) {
         while (cause is InvocationTargetException && cause.cause != null) {
             cause = cause.cause!!
         }
-        return cause.javaClass.simpleName + ": " + cause.message
+        val message = cause.message
+        val text = if (message.isNullOrEmpty()) {
+            cause.javaClass.simpleName
+        } else {
+            "${cause.javaClass.simpleName}: $message"
+        }
+        return text.take(160)
     }
 
     companion object {

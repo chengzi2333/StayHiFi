@@ -60,6 +60,14 @@ class RealtimeDisplayFormatterTest {
     }
 
     @Test
+    fun availableWithNonPositiveBitrateFallsBackToUnknownText() {
+        for (kbps in listOf(0, -1)) {
+            val state = RealtimeState(RealtimeDisplay.AVAILABLE, bitrateKbps = kbps, qualityMode = "ABR")
+            assertEquals("暂无法确认", RealtimeDisplayFormatter.text(state))
+        }
+    }
+
+    @Test
     fun notStreamingComputedPropertyOnlyTrueForNotPlaying() {
         assertTrue(RealtimeState(RealtimeDisplay.NOT_PLAYING).notStreaming)
         assertFalse(RealtimeState(RealtimeDisplay.AVAILABLE, 400, "ABR").notStreaming)

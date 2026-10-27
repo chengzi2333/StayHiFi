@@ -2,6 +2,7 @@ package com.chengzi.stayhifi.shell
 
 import com.chengzi.stayhifi.codec.ApiReadState
 import com.chengzi.stayhifi.codec.SupportedCodecType
+import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -245,6 +246,20 @@ class SupportedTypesCatalogCacheTest {
         val r3 = cache.get(loaderOf(ok(), count))
         assertEquals(ApiReadState.OK, r3.state)
         assertEquals(2, count.get())
+    }
+
+    @Test
+    fun loaderExceptionErrorKeepsTypeAndIsCappedAt160Chars() {
+        val cache = SupportedTypesCatalogCache { 0L }
+
+        val result = cache.get {
+            throw InvocationTargetException(IllegalStateException("x".repeat(240)))
+        }
+        val error = result.error.orEmpty()
+
+        assertEquals(ApiReadState.ERROR, result.state)
+        assertTrue(error.startsWith("IllegalStateException: "))
+        assertEquals(160, error.length)
     }
 
     // ─────────────────────────── adapter ON/OFF 跳变门控 ───────────────────────────

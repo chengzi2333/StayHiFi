@@ -51,7 +51,7 @@ object BtStateParser {
     private data class ParsedSection(val state: BtState) {
         val status: BtStateParseStatus
             get() = when {
-                state.bitrateKbps != null -> BtStateParseStatus.AVAILABLE
+                (state.bitrateKbps ?: 0) > 0 -> BtStateParseStatus.AVAILABLE
                 state.notStreaming -> BtStateParseStatus.NOT_STREAMING
                 else -> BtStateParseStatus.NO_BITRATE
             }
@@ -97,6 +97,23 @@ object BtStateParser {
             sections.filter { normalize(it.state.codec) == normalize(identity.family.name) }
         }
         return if (genericIdentity) selectGeneric(candidates) else selectLegacy(candidates)
+    }
+
+    /** 仅泛称身份可由唯一、无歧义的同族段落补精确版本；精确身份绝不被旧段名降级。 */
+    fun presentedCodecName(identity: CodecIdentity, result: BtStateParseResult?): String {
+        if (result == null || result.status == BtStateParseStatus.NO_SECTION ||
+            result.status == BtStateParseStatus.AMBIGUOUS_SECTION
+        ) {
+            return identity.displayName
+        }
+        val state = result.state ?: return identity.displayName
+        val genericIdentity = identity.family != CodecFamily.UNKNOWN &&
+            normalize(identity.displayName) == normalize(identity.family.name)
+        return if (genericIdentity && sameFamily(state.codec, identity.family)) {
+            state.codec
+        } else {
+            identity.displayName
+        }
     }
 
     private fun splitSections(dump: String): List<RawSection> {
@@ -185,10 +202,9 @@ object BtStateParser {
         val state = result.state
         return when {
             !isMusicActive -> RealtimeState(RealtimeDisplay.NOT_PLAYING)
-            // normalizeBitrate 已保证非 null 即 >0（raw≤0 归一为 null）
-            result.status == BtStateParseStatus.AVAILABLE && state?.bitrateKbps != null ->
-                RealtimeState(RealtimeDisplay.AVAILABLE, state.bitrateKbps, state.qualityMode)
-            result.status == BtStateParseStatus.NOT_STREAMING ->
+            result.status == BtStateParseStatus.AVAILABLE && (state?.bitrateKbps ?: 0) > 0 ->
+                RealtimeState(RealtimeDisplay.AVAILABLE, state?.bitrateKbps, state?.qualityMode)
+            result.status == BtStateParseStatus.NOT_STREAMING || state?.notStreaming == true ->
                 RealtimeState(RealtimeDisplay.STACK_REPORTS_IDLE)
             else -> RealtimeState(RealtimeDisplay.NO_DATA)
         }
@@ -215,7 +231,7 @@ object BtStateParser {
      * 「设置层拉满但传输层没拉满」的关键证据），否则纯码率。
      */
     fun formatDisplay(state: BtState): String? {
-        val kbps = state.bitrateKbps ?: return null
+        val kbps = state.bitrateKbps?.takeIf { it > 0 } ?: return null
         val qm = state.qualityMode
         return if (qm != null && qm.contains("ABR", ignoreCase = true)) {
             "${kbps}k · $qm"

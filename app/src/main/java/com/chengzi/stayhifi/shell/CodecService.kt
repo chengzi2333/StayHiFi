@@ -1,5 +1,6 @@
 package com.chengzi.stayhifi.shell
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
@@ -70,6 +71,8 @@ class CodecService : ICodecService.Stub() {
 
     // ─────────────────────────── IPC 接口 ───────────────────────────
 
+    // Privileged shell/root process; outer IPC calls already catch permission and binder errors.
+    @SuppressLint("MissingPermission")
     override fun dumpDevices(): String = try {
         val a2dp = getA2dp()
         buildJsonArray {
@@ -373,6 +376,8 @@ class CodecService : ICodecService.Stub() {
         }
     }
 
+    // Privileged shell/root process; outer IPC calls already catch permission and binder errors.
+    @SuppressLint("MissingPermission")
     private fun findDevice(a2dp: BluetoothA2dp, mac: String?): BluetoothDevice? {
         val devices = a2dp.connectedDevices
         if (mac == null || mac.trim().isEmpty()) {
@@ -459,6 +464,8 @@ class CodecService : ICodecService.Stub() {
     private fun a2dpProxyState(): String =
         if (mA2dp != null) "CONNECTED" else "DISCONNECTED"
 
+    // Privileged shell/root process; outer IPC calls already catch permission and binder errors.
+    @SuppressLint("MissingPermission")
     private fun safeName(d: BluetoothDevice): String = try {
         d.name ?: "?"
     } catch (t: Throwable) {

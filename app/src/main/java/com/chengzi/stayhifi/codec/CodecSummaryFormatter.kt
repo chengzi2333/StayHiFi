@@ -32,3 +32,21 @@ object CodecSummaryFormatter {
     fun formatText(config: CodecConfig, identity: CodecIdentity): String =
         format(config, identity).text()
 }
+
+/** 当前操作日志与展示共用身份；只有历史档案/跨类型读回才保留旧摘要。 */
+object CodecOperationLog {
+    fun resolvedSummary(config: CodecConfig, identity: CodecIdentity): String =
+        if (config.codecType == identity.nativeType) {
+            CodecSummaryFormatter.formatText(config, identity)
+        } else {
+            config.summary()
+        }
+
+    fun savedProfile(
+        deviceLabel: String, mac: String, config: CodecConfig, identity: CodecIdentity,
+    ): String = "已保存录制档案: $deviceLabel ($mac) ${resolvedSummary(config, identity)}"
+
+    fun autoCreatedProfile(
+        deviceLabel: String, mac: String, config: CodecConfig, identity: CodecIdentity,
+    ): String = "已自动建档: $deviceLabel ($mac) ${resolvedSummary(config, identity)}"
+}

@@ -13,8 +13,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.unit.dp
-import java.util.Locale
 
 /**
  * Task 38：更新弹窗 UI 状态。
@@ -48,6 +48,7 @@ fun UpdateDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val locale = LocalLocale.current.platformLocale
     AlertDialog(
         // 下载中屏蔽点击外部关闭，避免下载中弹窗消失但任务还在跑
         onDismissRequest = { if (!state.downloading) onDismiss() },
@@ -106,7 +107,7 @@ fun UpdateDialog(
                                 LinearProgressIndicator()
                                 Text(
                                     text = "下载中…已下载 " +
-                                        String.format(Locale.getDefault(), "%.1f", state.downloadedMb) +
+                                        String.format(locale, "%.1f", state.downloadedMb) +
                                         " MB",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,

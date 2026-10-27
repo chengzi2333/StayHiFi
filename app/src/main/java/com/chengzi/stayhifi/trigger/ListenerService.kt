@@ -421,7 +421,7 @@ class ListenerService : Service() {
      */
     private fun isA2dpConnectedLocally(): Boolean = try {
         BluetoothAdapter.getDefaultAdapter()
-            ?.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED
+            ?.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothAdapter.STATE_CONNECTED
     } catch (se: SecurityException) {
         LogStore.log("本地 A2DP 状态读取需要 BLUETOOTH_CONNECT: $se")
         true

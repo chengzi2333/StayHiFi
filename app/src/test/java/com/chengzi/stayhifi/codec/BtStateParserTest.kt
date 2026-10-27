@@ -416,4 +416,80 @@ class BtStateParserTest {
         assertNull(display.bitrateKbps)
         assertNull(display.qualityMode)
     }
+
+    @Test
+    fun genericIdentityRefinesToUniqueVersionedSectionName() {
+        val generic = identity("LHDC")
+        val result = BtStateParser.parseResult(CodecDeviceFixtures.opdDumpV3, generic)
+
+        assertEquals("LHDC V3", BtStateParser.presentedCodecName(generic, result))
+    }
+
+    @Test
+    fun versionedIdentityNeverDowngradesThroughLegacySectionName() {
+        val versioned = identity("LHDC V3")
+        val legacyDump = """
+            A2DP LHDC State:
+              LHDC quality mode : ABR
+              LHDC transmission bitrate (Kbps) : 400000
+        """.trimIndent()
+        val result = BtStateParser.parseResult(legacyDump, versioned)
+
+        assertEquals("LHDC V3", BtStateParser.presentedCodecName(versioned, result))
+    }
+
+    @Test
+    fun unresolvedOrAmbiguousResultsKeepPresentationName() {
+        val generic = identity("LHDC")
+        val noSection = BtStateParser.parseResult("", generic)
+        val ambiguousDump = CodecDeviceFixtures.opdDumpV3 + "\n" + """
+            A2DP LHDC V5 State:
+              LHDC transmission bitrate (Kbps) : 900000
+        """.trimIndent()
+        val ambiguous = BtStateParser.parseResult(ambiguousDump, generic)
+
+        assertEquals("LHDC", BtStateParser.presentedCodecName(generic, noSection))
+        assertEquals("LHDC", BtStateParser.presentedCodecName(generic, ambiguous))
+    }
+
+    @Test
+    fun syntheticAvailableWithZeroBitrateShowsNoDataAndNoFormattedBitrate() {
+        val state = BtStateParser.BtState("LDAC", "HIGH", bitrateKbps = 0)
+        val result = BtStateParseResult(BtStateParseStatus.AVAILABLE, state)
+
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+
+        assertEquals(RealtimeDisplay.NO_DATA, display.display)
+        assertNull(display.bitrateKbps)
+        assertNull(display.qualityMode)
+        assertNull(BtStateParser.formatDisplay(state))
+    }
+
+    @Test
+    fun syntheticAvailableWithNegativeIdleBitrateShowsStackReportsIdle() {
+        val state = BtStateParser.BtState(
+            "LDAC", "HIGH", bitrateKbps = -1, notStreaming = true, rawBitrate = -1L,
+        )
+        val result = BtStateParseResult(BtStateParseStatus.AVAILABLE, state)
+
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+
+        assertEquals(RealtimeDisplay.STACK_REPORTS_IDLE, display.display)
+        assertNull(display.bitrateKbps)
+        assertNull(display.qualityMode)
+        assertNull(BtStateParser.formatDisplay(state))
+    }
+
+    @Test
+    fun legacyStateOverloadKeepsNotStreamingPrecedence() {
+        val state = BtStateParser.BtState(
+            "LHDC", "ABR", bitrateKbps = 400, notStreaming = true, rawBitrate = -1L,
+        )
+
+        val display = BtStateParser.realtimeDisplay(isMusicActive = true, state = state)
+
+        assertEquals(RealtimeDisplay.STACK_REPORTS_IDLE, display.display)
+        assertNull(display.bitrateKbps)
+        assertNull(display.qualityMode)
+    }
 }

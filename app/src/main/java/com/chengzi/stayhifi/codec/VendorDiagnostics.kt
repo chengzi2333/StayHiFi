@@ -58,6 +58,14 @@ object VendorDiagnostics {
         }
     }
 
+    /** 无 state 的证据文案按真实裁决区分「无段」与「多候选歧义」。 */
+    fun missingStateEvidence(result: BtStateParseResult): String = when (result.status) {
+        BtStateParseStatus.NO_SECTION -> "无匹配段落"
+        BtStateParseStatus.AMBIGUOUS_SECTION ->
+            "候选段落歧义: 候选=" + result.candidateSections.take(4).joinToString("/")
+        else -> "无可用段落状态"
+    }
+
     /** 只保留排查所需字段，避免把数百行 dumpsys 全倒进 200 行日志缓冲。 */
     fun evidence(state: BtStateParser.BtState): String =
         "段=${state.codec} qualityMode=${state.qualityMode ?: "—"} " +

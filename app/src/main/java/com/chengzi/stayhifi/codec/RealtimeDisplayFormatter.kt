@@ -13,7 +13,7 @@ object RealtimeDisplayFormatter {
         RealtimeDisplay.STACK_REPORTS_IDLE -> "暂无法确认"
         RealtimeDisplay.NO_DATA -> "—（本机暂不支持抓取）"
         RealtimeDisplay.AVAILABLE -> {
-            val kbps = state.bitrateKbps ?: return "暂无法确认"
+            val kbps = state.bitrateKbps?.takeIf { it > 0 } ?: return "暂无法确认"
             val qm = state.qualityMode
             when {
                 // ABR 必须带「自适应」三字——别人不认识缩写（Task 45 既定文案）

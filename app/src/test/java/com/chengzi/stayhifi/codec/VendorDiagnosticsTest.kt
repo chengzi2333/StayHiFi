@@ -177,6 +177,29 @@ class VendorDiagnosticsTest {
     }
 
     @Test
+    fun noSectionMissingStateEvidenceSaysNoMatchingSection() {
+        assertEquals(
+            "无匹配段落",
+            VendorDiagnostics.missingStateEvidence(result(BtStateParseStatus.NO_SECTION)),
+        )
+    }
+
+    @Test
+    fun ambiguousMissingStateEvidenceListsAtMostFourCandidates() {
+        val text = VendorDiagnostics.missingStateEvidence(
+            result(
+                BtStateParseStatus.AMBIGUOUS_SECTION,
+                candidates = (1..5).map { "LHDC V$it" },
+            ),
+        )
+
+        assertTrue(text.contains("歧义"))
+        assertFalse(text.contains("无匹配段落"))
+        for (i in 1..4) assertTrue(text.contains("LHDC V$i"))
+        assertFalse(text.contains("LHDC V5"))
+    }
+
+    @Test
     fun formatsDumpsysEvidenceWithCs1CorrelationFields() {
         val state = BtStateParser.BtState(
             codec = "LHDC V5", qualityMode = "ABR", bitrateKbps = 400,

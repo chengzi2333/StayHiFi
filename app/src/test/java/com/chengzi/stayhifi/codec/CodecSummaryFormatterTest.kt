@@ -95,6 +95,40 @@ class CodecSummaryFormatterTest {
     }
 
     @Test
+    fun capturedProfileLogUsesResolvedSystemIdentitySummary() {
+        val identity = CodecIdentity(
+            nativeType = CodecDeviceFixtures.opdType,
+            family = CodecFamily.LHDC,
+            displayName = "LHDC V3",
+            source = CodecIdentitySource.SYSTEM_TYPE,
+        )
+
+        assertEquals(
+            "已保存录制档案: OPD (AA-BB) LHDC V3·96kHz·24bit·500kbps",
+            CodecOperationLog.savedProfile(
+                "OPD", "AA-BB", CodecDeviceFixtures.opdCurrent, identity,
+            ),
+        )
+    }
+
+    @Test
+    fun automaticProfileLogUsesResolvedSystemIdentitySummary() {
+        val identity = CodecIdentity(
+            nativeType = CodecDeviceFixtures.opdType,
+            family = CodecFamily.LHDC,
+            displayName = "LHDC V3",
+            source = CodecIdentitySource.SYSTEM_TYPE,
+        )
+
+        assertEquals(
+            "已自动建档: OPD (AA-BB) LHDC V3·96kHz·24bit·500kbps",
+            CodecOperationLog.autoCreatedProfile(
+                "OPD", "AA-BB", CodecDeviceFixtures.opdCurrent, identity,
+            ),
+        )
+    }
+
+    @Test
     fun legacyCodecConfigSummaryStringIsUnchanged() {
         // 旧 summary() 路径不得被 formatter 改动（历史档案无身份上下文时仍走旧逻辑）
         assertEquals(

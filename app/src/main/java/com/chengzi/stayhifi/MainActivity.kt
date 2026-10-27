@@ -47,11 +47,12 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 import com.chengzi.stayhifi.codec.BtStateParseResult
-import com.chengzi.stayhifi.codec.BtStateParseStatus
 import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecIdentity
 import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
 import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecOperationLog
 import com.chengzi.stayhifi.codec.CodecPresentation
 import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
@@ -138,6 +139,7 @@ class MainActivity : ComponentActivity() {
     private var capturedMac: String? = null
     private var capturedName: String? = null
     private var capturedConfig: CodecConfig? = null
+    private var capturedIdentity: CodecIdentity? = null
 
     // ---- Home 状态 ----
     private var homeState by mutableStateOf(HomeUiState())
@@ -907,6 +909,7 @@ class MainActivity : ComponentActivity() {
                 capturedMac = mac
                 capturedName = name
                 capturedConfig = presentation.current
+                capturedIdentity = presentation.identity
                 wizardResult = summaryToUi(presentation.summary.text())
                 wizardDeviceLabel = "$name ($mac)"
                 LogStore.log("录制向导抓到: $name ($mac) ${presentation.summary.text()}")
@@ -920,7 +923,8 @@ class MainActivity : ComponentActivity() {
     private fun onWizardSave() {
         val mac = capturedMac
         val config = capturedConfig
-        if (mac == null || config == null) return
+        val identity = capturedIdentity
+        if (mac == null || config == null || identity == null) return
         lifecycleScope.launch {
             // Task 33：save 是 runBlocking + DataStore edit，IO 异常上抛会闪退，包 try/catch。
             try {
@@ -939,7 +943,7 @@ class MainActivity : ComponentActivity() {
                         recordedAtMillis = System.currentTimeMillis(),
                     ))
                 }
-                LogStore.log("已保存录制档案: ${capturedName ?: mac} ($mac) ${config.summary()}")
+                LogStore.log(CodecOperationLog.savedProfile(capturedName ?: mac, mac, config, identity))
                 // 弹层内轻量成功态（Task 33），由用户点「完成」关闭。
                 wizardSaved = true
             } catch (t: Throwable) {
@@ -1121,7 +1125,6 @@ class MainActivity : ComponentActivity() {
                 var btDump: String? = null
                 var parsedState: BtStateParser.BtState? = null
                 var parsedResult: BtStateParseResult? = null
-                var parsedCodecName: String? = null
                 if (!isMusicActive) {
                     logBtDiag(null)
                 } else {
@@ -1156,11 +1159,6 @@ class MainActivity : ComponentActivity() {
                                 val parsed = result.state
                                 parsedState = parsed
                                 parsedResult = result
-                                if (result.status != BtStateParseStatus.NO_SECTION &&
-                                    result.status != BtStateParseStatus.AMBIGUOUS_SECTION
-                                ) {
-                                    parsedCodecName = parsed?.codec
-                                }
                                 realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
                                 // Task 8：实时诊断唯一出口——identity 门控 + 仅无段/无码率/歧义；
                                 // NOT_STREAMING 走下方 vendor 证据，AVAILABLE 复位去重基准。
@@ -1203,7 +1201,7 @@ class MainActivity : ComponentActivity() {
                     } else {
                         LogStore.log(
                             "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
-                                "sample=$kind 无匹配段落"
+                                "sample=$kind ${VendorDiagnostics.missingStateEvidence(result)}"
                         )
                         VendorDiagnostics.dumpClues(btDump)
                             .forEach { LogStore.log("dumpsys线索: $it") }
@@ -1212,8 +1210,8 @@ class MainActivity : ComponentActivity() {
                 if (gen != refreshGeneration) return@launch
                 homeState = homeState.copy(
                     headsetName = name,
-                    // Task 6：仅唯一无歧义 dump 段可补精确版本；其余保持 presentation 名称。
-                    codec = parsedCodecName ?: presentation.summary.codec,
+                    // 仅泛称身份可由唯一无歧义段补精确版本；精确身份不被旧段名降级。
+                    codec = BtStateParser.presentedCodecName(presentation.identity, parsedResult),
                     rate = presentation.summary.rate,
                     bits = presentation.summary.bits,
                     quality = presentation.summary.quality,

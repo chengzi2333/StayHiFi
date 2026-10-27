@@ -10,10 +10,10 @@ import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.CodecIdentity
 import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
 import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecOperationLog
 import com.chengzi.stayhifi.codec.CodecPresentation
 import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
-import com.chengzi.stayhifi.codec.CodecSummaryFormatter
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Negotiation
@@ -71,11 +71,7 @@ class ApplyWorker(context: Context) {
 
     /** settled identity 只用于同 codecType 的派生候选与读回；跨类型保留旧摘要。 */
     private fun summary(config: CodecConfig, identity: CodecIdentity): String =
-        if (config.codecType == identity.nativeType) {
-            CodecSummaryFormatter.formatText(config, identity)
-        } else {
-            config.summary()
-        }
+        CodecOperationLog.resolvedSummary(config, identity)
 
     suspend fun run(mac: String?, name: String?, force: Boolean = false) {
         val target = mac?.takeIf { it.isNotBlank() } ?: run {
@@ -151,7 +147,7 @@ class ApplyWorker(context: Context) {
                             } else {
                                 log(
                                     "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +
-                                        "sample=$kind 无匹配段落"
+                                        "sample=$kind ${VendorDiagnostics.missingStateEvidence(parseResult)}"
                                 )
                                 VendorDiagnostics.dumpClues(dump)
                                     .forEach { log("dumpsys线索: $it") }
@@ -202,7 +198,7 @@ class ApplyWorker(context: Context) {
                 // 早退=已验证与本机最高一致，同样够建档资格。
                 // Task 42：早退分支不回填 originConfig——写入前的状态就是最高，不是「默认」，
                 // 把它当原始配置记下来会让「恢复默认参数」变成再拉满一次，失去后悔药意义。
-                autoCreateProfile(mac, name, current, origin = null)
+                autoCreateProfile(mac, name, current, origin = null, identity = identity)
                 return
             }
             // Task 42：写入第一个候选之前，把写入前原始协商配置（settled.current）记入档案，
@@ -217,7 +213,10 @@ class ApplyWorker(context: Context) {
                 VerifiedTargetStore.record(mac, candidate)
                 // Task 35：确认实际生效（写入+读回验证通过）后才建档，不是写完就建；
                 // 档案 config 记录读回的真实落点（非派生目标）。
-                autoCreateProfile(mac, name, readState(service, mac)?.current ?: candidate, origin = current)
+                autoCreateProfile(
+                    mac, name, readState(service, mac)?.current ?: candidate,
+                    origin = current, identity = identity,
+                )
                 return
             }
             log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
@@ -265,7 +264,9 @@ class ApplyWorker(context: Context) {
      * Task 42：[origin] = 首次写入前的原始协商配置（走写入分支时传入 settled.current）；
      * 早退分支传 null——那时的状态已是最高，不是「默认」。
      */
-    private fun autoCreateProfile(mac: String, name: String?, applied: CodecConfig, origin: CodecConfig?) {
+    private fun autoCreateProfile(
+        mac: String, name: String?, applied: CodecConfig, origin: CodecConfig?, identity: CodecIdentity,
+    ) {
         try {
             if (profiles.profileFor(mac) != null) return
             profiles.save(DeviceProfile(
@@ -281,7 +282,7 @@ class ApplyWorker(context: Context) {
                 recordedAtMillis = System.currentTimeMillis(),
                 originConfig = origin,
             ))
-            log("已自动建档: ${name ?: mac} ($mac) ${applied.summary()}")
+            log(CodecOperationLog.autoCreatedProfile(name ?: mac, mac, applied, identity))
         } catch (t: Throwable) {
             log("自动建档失败（不影响拉满主链路）: $t")
         }
