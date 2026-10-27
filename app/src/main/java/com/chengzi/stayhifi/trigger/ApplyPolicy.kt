@@ -1,6 +1,7 @@
 package com.chengzi.stayhifi.trigger
 
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.Negotiation
 
 /**
  * 自动拉满决策策略（设计 §5 错误与边界；Task 27 两态裁决修订）：
@@ -50,6 +51,57 @@ object ApplyPolicy {
         val cs1 = BEST_CS1[current.codecType] ?: current.cs1
         return current.copy(priority = 1_000_000, sampleRate = rate, bitsPerSample = bits, cs1 = cs1)
     }
+
+    /**
+     * 三态能力裁决（Task B1）：
+     * - current 的 rate/bits/channel 非法（非 AOSP 单比特档位）→ INCOMPLETE_CURRENT，无可写目标；
+     * - 存在同 codecType、channel 兼容、同一条目同时证明的最高 rate/bits → COMPLETE，
+     *   target 的 rate/bits 逐位来自同一条目（绝不跨条目拼档），candidates 为
+     *   [Negotiation.descending] 双参同条目约束链；
+     * - 否则 → CAPABILITY_DEGRADED，target/candidates 严格走旧 [deriveTarget] + 单参降档链。
+     * cs1 规则与 [deriveTarget] 一致（BEST_CS1 表），channel/cs2~cs4 继承 current。
+     */
+    fun assessTarget(current: CodecConfig, selectable: List<CodecConfig>): TargetAssessment {
+        if (!Negotiation.isValidBase(current)) {
+            return TargetAssessment(TargetAssessment.Status.INCOMPLETE_CURRENT, null, emptyList())
+        }
+        val compatible = selectable.filter {
+            it.codecType == current.codecType && (it.channelMode and current.channelMode) != 0
+        }
+        // 先选"存在明确 bits 的最高 rate"，再从支持该 rate 的条目选最高 bits——
+        // 二者必须出自同一条目，杜绝 192+16 与 96+24 拼成 192+24
+        for (rate in Negotiation.RATE_STEPS_DESC) {
+            val supporting = compatible.filter { it.sampleRate and rate == rate && it.bitsPerSample > 0 }
+            if (supporting.isEmpty()) continue
+            val bits = supporting.maxOf { highestBit(it.bitsPerSample) }
+            val target = current.copy(
+                priority = 1_000_000,
+                sampleRate = rate,
+                bitsPerSample = bits,
+                cs1 = BEST_CS1[current.codecType] ?: current.cs1,
+            )
+            return TargetAssessment(
+                TargetAssessment.Status.COMPLETE,
+                target,
+                Negotiation.descending(target, selectable),
+            )
+        }
+        val degradedTarget = deriveTarget(current, selectable)
+        return TargetAssessment(
+            TargetAssessment.Status.CAPABILITY_DEGRADED,
+            degradedTarget,
+            Negotiation.descending(degradedTarget),
+        )
+    }
+
+    /**
+     * 是否已达本机最高：仅 COMPLETE、target 非空且 [matches](target, current) 时为 true；
+     * 能力降档与 current 非法时一律 false（调用方不得据此宣称已拉满）。
+     */
+    fun isAtHighest(assessment: TargetAssessment, current: CodecConfig): Boolean =
+        assessment.status == TargetAssessment.Status.COMPLETE &&
+            assessment.target != null &&
+            matches(assessment.target, current)
 
     private const val LDAC_CODEC_TYPE = 4
     private const val LDAC_QUALITY_HIGH = 1000L
