@@ -10,6 +10,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.codec.CodecConfig
@@ -40,6 +41,13 @@ class CodecService : ICodecService.Stub() {
     private var mThread: HandlerThread                 // A2DP 代理回调需要 Looper
     @Volatile private var mA2dp: BluetoothA2dp? = null
     @Volatile private var mAdapter: BluetoothAdapter? = null
+
+    // Task 3：supported types 目录缓存（限频/失效见 SupportedTypesCatalogCache）。
+    // TTL 用 elapsedRealtime（单调），不依赖墙钟；loader 在缓存锁外执行。
+    private val supportedTypesCache = SupportedTypesCatalogCache { SystemClock.elapsedRealtime() }
+
+    // Task 3：adapter ON/OFF 跳变检测——OFF→ON 后首次读取必须重新加载目录
+    @Volatile private var mAdapterOn = false
 
     init {
         disableHiddenApiChecks()
@@ -84,8 +92,9 @@ class CodecService : ICodecService.Stub() {
             // Task 2：分阶段反射读取；codecStatus/current 为 null 或反射异常时
             // 仍返回含 current:null、各阶段状态与 errors 的 snapshot，绝不用 !! 崩掉。
             val status = CodecReflectionReader.codecStatus(a2dp, dev)
-            // supported 目录暂直读，下一任务（SupportedTypesCatalogCache）再加缓存
-            val supported = CodecReflectionReader.supportedTypes(a2dp)
+            // Task 3：supported 目录走缓存；loader 在缓存锁外执行，并发只发一次 binder
+            applyCatalogInvalidationPolicy()
+            val supported = supportedTypesCache.get { CodecReflectionReader.supportedTypes(a2dp) }
             val snapshot = CodecReflectionReader.readSnapshot(
                 status = status, a2dp = a2dp, supportedTypes = supported,
                 serviceUid = Process.myUid(),
@@ -154,6 +163,8 @@ class CodecService : ICodecService.Stub() {
 
     override fun destroy() {
         Log.i(TAG, "destroy")
+        // Task 3：服务销毁时缓存目录一并失效（纯内存操作，无 binder IO）
+        supportedTypesCache.invalidate()
     }
 
     // Task 43：传输层实况读取——dumpsys bluetooth_manager 的 "A2DP <codec> State:" 段
@@ -258,11 +269,15 @@ class CodecService : ICodecService.Stub() {
                     object : BluetoothProfile.ServiceListener {
                         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                             mA2dp = proxy as BluetoothA2dp
+                            // Task 3：A2DP 代理重建 → 目录缓存失效，下一次读取重新加载
+                            supportedTypesCache.invalidate()
                             latch.countDown()
                         }
 
                         override fun onServiceDisconnected(profile: Int) {
                             mA2dp = null
+                            // Task 3：A2DP 断开 → 目录缓存失效（纯内存操作，无 binder IO）
+                            supportedTypesCache.invalidate()
                         }
                     },
                     BluetoothProfile.A2DP)
@@ -418,6 +433,19 @@ class CodecService : ICodecService.Stub() {
     // ── 反射读字段：9 字段转换已移入 CodecReflectionReader（Task 2），此处保留 JSON 辅助 ──
 
     private fun CodecConfig.toJsonElement(): JsonElement = Json.parseToJsonElement(toJson())
+
+    /**
+     * Task 3 缓存失效策略：adapter 非 ON 时目录不可信，立即失效；
+     * ON/OFF 跳变（含 OFF→ON 恢复）同样失效，保证恢复后首次读取重新加载。
+     * 纯内存操作（读 mAdapter 字段 + 缓存锁），无 binder IO。
+     */
+    private fun applyCatalogInvalidationPolicy() {
+        val on = bluetoothState() == "ON"
+        if (!on || !mAdapterOn) {
+            supportedTypesCache.invalidate()
+        }
+        mAdapterOn = on
+    }
 
     /** 蓝牙开关状态的安全读取；adapter 缺失或读取异常均为 UNKNOWN */
     private fun bluetoothState(): String = try {
