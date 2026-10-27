@@ -117,8 +117,9 @@ class ApplyWorker(context: Context) {
             // Task 53：轻量厂商诊断（仅现有 LogStore，不改写入/映射行为）——
             // 未识别 vendor 保持原日志；已佐证的 vendor LHDC（含 19 号）也记录 raw 9 字段。
             // dump 前固定使用 apply-dump 去重，真实 sampleKind 只在 dump 后标注本次证据。
+            // Task 8：门控改用 identity——标准编码器不进入本块，不为其额外发起 dump。
             val capsMask = Masks.capsRateMask(settled.current.codecType, settled.selectable)
-            if (VendorDiagnostics.shouldLog(settled.current.codecType, capsMask) &&
+            if (VendorDiagnostics.shouldLog(settled.presentation.identity) &&
                 recordUnknownVendor(mac, settled.current, "apply-dump")
             ) {
                 log(
@@ -137,10 +138,11 @@ class ApplyWorker(context: Context) {
                             )
                         } else {
                             val dump = dumpObj.optString("dump")
-                            val state = BtStateParser.parseResult(
+                            val parseResult = BtStateParser.parseResult(
                                 dump, settled.presentation.identity,
-                            ).state
-                            val kind = VendorDiagnostics.sampleKind(state)
+                            )
+                            val state = parseResult.state
+                            val kind = VendorDiagnostics.sampleKind(parseResult)
                             if (state != null) {
                                 log(
                                     "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +

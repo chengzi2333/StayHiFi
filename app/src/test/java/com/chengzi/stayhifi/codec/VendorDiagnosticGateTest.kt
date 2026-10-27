@@ -29,4 +29,12 @@ class VendorDiagnosticGateTest {
         assertTrue(gate.shouldRecord("mac-a", current, "no-bitrate"))
         assertFalse(gate.shouldRecord("mac-a", current, "no-bitrate"))
     }
+
+    @Test
+    fun recordsAmbiguousSectionAsDistinctEvidenceKind() {
+        val gate = VendorDiagnosticGate()
+        assertTrue(gate.shouldRecord("mac-a", current, "no-section"))
+        assertTrue(gate.shouldRecord("mac-a", current, "ambiguous-section"))
+        assertFalse(gate.shouldRecord("mac-a", current, "ambiguous-section"))
+    }
 }

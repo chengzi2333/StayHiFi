@@ -46,8 +46,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.abs
 import kotlinx.coroutines.delay
-import com.chengzi.stayhifi.codec.BtStateParser
+import com.chengzi.stayhifi.codec.BtStateParseResult
 import com.chengzi.stayhifi.codec.BtStateParseStatus
+import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
 import com.chengzi.stayhifi.codec.CodecIdentityIssue
@@ -1116,9 +1117,10 @@ class MainActivity : ComponentActivity() {
                 val codecName = presentation.identity.displayName
                 val isMusicActive = audioManager.isMusicActive
                 var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
-                // 保留本次 dump 原文与 parsed state，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
+                // 保留本次 dump 原文与 parsed state/result，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
                 var btDump: String? = null
                 var parsedState: BtStateParser.BtState? = null
+                var parsedResult: BtStateParseResult? = null
                 var parsedCodecName: String? = null
                 if (!isMusicActive) {
                     logBtDiag(null)
@@ -1129,12 +1131,22 @@ class MainActivity : ComponentActivity() {
                         val btJson = withTimeoutOrNull(8_000) {
                             withContext(Dispatchers.IO) { svc.dumpBtState() }
                         }
+                        // Task 8：超时/error JSON 等抓取诊断先过 identity 门控，
+                        // 标准编码器保持安静；安静路径复位去重基准，身份切回 vendor 可重记。
                         if (btJson == null) {
-                            realtimeDiag(current, codecName, "超时(8s)")
+                            if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                                realtimeDiag(current, codecName, "超时(8s)")
+                            } else {
+                                logBtDiag(null)
+                            }
                         } else {
                             val btObj = JSONObject(btJson)
                             if (btObj.has("error")) {
-                                realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
+                                if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                                    realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
+                                } else {
+                                    logBtDiag(null)
+                                }
                             } else {
                                 btDump = btObj.optString("dump")
                                 // Task 6：身份来自 presentation；仅唯一无歧义段可补充精确版本显示。
@@ -1143,32 +1155,39 @@ class MainActivity : ComponentActivity() {
                                 )
                                 val parsed = result.state
                                 parsedState = parsed
+                                parsedResult = result
                                 if (result.status != BtStateParseStatus.NO_SECTION &&
                                     result.status != BtStateParseStatus.AMBIGUOUS_SECTION
                                 ) {
                                     parsedCodecName = parsed?.codec
                                 }
                                 realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
-                                if (parsed == null) {
-                                    realtimeDiag(current, codecName, "无匹配段落")
+                                // Task 8：实时诊断唯一出口——identity 门控 + 仅无段/无码率/歧义；
+                                // NOT_STREAMING 走下方 vendor 证据，AVAILABLE 复位去重基准。
+                                val issue = VendorDiagnostics.realtimeIssue(presentation.identity, result)
+                                if (issue != null) {
+                                    realtimeDiag(current, codecName, issue)
                                 } else {
-                                    if (realtime.display == RealtimeDisplay.NO_DATA) {
-                                        realtimeDiag(current, codecName, "无码率字段")
-                                    } else {
-                                        logBtDiag(null)
-                                    }
+                                    logBtDiag(null)
                                 }
                             }
                         }
                     } catch (t: Throwable) {
-                        realtimeDiag(current, codecName, "读取异常: $t")
+                        if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                            realtimeDiag(current, codecName, "读取异常: $t")
+                        } else {
+                            logBtDiag(null)
+                        }
                     }
                 }
-                // Task 53：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump 与 parsed state。
+                // Task 53：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump 与 parsed result。
                 // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；首页按 mac+raw+真实类别去重。
+                // Task 8：门控改用 identity，NOT_STREAMING 只经本 gate 留一次 not-streaming 证据。
                 val state = parsedState
-                val kind = VendorDiagnostics.sampleKind(state)
-                if (btDump != null && VendorDiagnostics.shouldLog(current.codecType, capsMask) &&
+                val result = parsedResult
+                val kind = result?.let { VendorDiagnostics.sampleKind(it) }
+                if (btDump != null && result != null && kind != null &&
+                    VendorDiagnostics.shouldLog(presentation.identity) &&
                     recordUnknownVendor(mac, current, kind)
                 ) {
                     LogStore.log(

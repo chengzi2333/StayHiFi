@@ -2,6 +2,7 @@ package com.chengzi.stayhifi.codec
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,6 +47,133 @@ class VendorDiagnosticsTest {
     fun knownNonVendorCodecsStayQuiet() {
         assertFalse(VendorDiagnostics.shouldLog(10, 32))
         assertFalse(VendorDiagnostics.shouldLog(4, 43))
+    }
+
+    // ===== Task 8：identity 门控的实时诊断收敛 =====
+
+    private fun identity(
+        nativeType: Int,
+        family: CodecFamily,
+        displayName: String,
+        source: CodecIdentitySource = CodecIdentitySource.SYSTEM_TYPE,
+    ) = CodecIdentity(nativeType, family, displayName, source = source)
+
+    private val sbcIdentity = identity(0, CodecFamily.SBC, "SBC")
+    private val aacIdentity = identity(2, CodecFamily.AAC, "AAC")
+    private val ldacType10Identity = identity(10, CodecFamily.LDAC, "LDAC")
+    private val vendorLhdcIdentity = identity(0x13, CodecFamily.LHDC, "LHDC V3")
+    private val heuristicLhdcIdentity = identity(
+        0x14, CodecFamily.LHDC, "LHDC", CodecIdentitySource.CAPABILITY_HEURISTIC)
+    private val unknownIdentity = identity(99, CodecFamily.UNKNOWN, "vendor(99)")
+
+    private fun result(
+        status: BtStateParseStatus,
+        state: BtStateParser.BtState? = null,
+        candidates: List<String> = emptyList(),
+    ) = BtStateParseResult(status, state, candidates)
+
+    @Test
+    fun standardIdentitiesStayQuietForRealtimeIssues() {
+        val noSection = result(BtStateParseStatus.NO_SECTION)
+        val noBitrate = result(
+            BtStateParseStatus.NO_BITRATE,
+            BtStateParser.BtState("LDAC", "ABR", null, false, null),
+        )
+        for (id in listOf(sbcIdentity, aacIdentity, ldacType10Identity)) {
+            assertFalse(VendorDiagnostics.shouldLog(id))
+            assertEquals(null, VendorDiagnostics.realtimeIssue(id, noSection))
+            assertEquals(null, VendorDiagnostics.realtimeIssue(id, noBitrate))
+        }
+    }
+
+    @Test
+    fun vendorNativeLhdcIdentityKeepsRealtimeDiagnostics() {
+        assertTrue(VendorDiagnostics.shouldLog(vendorLhdcIdentity))
+        assertTrue(VendorDiagnostics.shouldLog(heuristicLhdcIdentity))
+        assertEquals(
+            "无匹配段落",
+            VendorDiagnostics.realtimeIssue(vendorLhdcIdentity, result(BtStateParseStatus.NO_SECTION)),
+        )
+        assertEquals(
+            "无码率字段",
+            VendorDiagnostics.realtimeIssue(
+                vendorLhdcIdentity,
+                result(BtStateParseStatus.NO_BITRATE, BtStateParser.BtState("LHDC V3", "ABR", null, false, null)),
+            ),
+        )
+    }
+
+    @Test
+    fun unknownIdentityKeepsNoSectionAndNoBitrateIssues() {
+        assertTrue(VendorDiagnostics.shouldLog(unknownIdentity))
+        assertEquals(
+            "无匹配段落",
+            VendorDiagnostics.realtimeIssue(unknownIdentity, result(BtStateParseStatus.NO_SECTION)),
+        )
+        assertEquals(
+            "无码率字段",
+            VendorDiagnostics.realtimeIssue(
+                unknownIdentity,
+                result(BtStateParseStatus.NO_BITRATE, BtStateParser.BtState("vendor(99)", null, null, false, null)),
+            ),
+        )
+    }
+
+    @Test
+    fun notStreamingNeverGeneratesRealtimeIssue() {
+        val notStreaming = result(
+            BtStateParseStatus.NOT_STREAMING,
+            BtStateParser.BtState("LHDC V3", null, null, true, -1L),
+        )
+        assertEquals(null, VendorDiagnostics.realtimeIssue(vendorLhdcIdentity, notStreaming))
+        assertEquals(null, VendorDiagnostics.realtimeIssue(unknownIdentity, notStreaming))
+
+        val available = result(
+            BtStateParseStatus.AVAILABLE,
+            BtStateParser.BtState("LHDC V3", "ABR", 400, false, 400000L),
+        )
+        assertEquals(null, VendorDiagnostics.realtimeIssue(vendorLhdcIdentity, available))
+    }
+
+    @Test
+    fun sampleKindResultMapsFiveLowercaseEvidenceCategories() {
+        assertEquals("no-section", VendorDiagnostics.sampleKind(result(BtStateParseStatus.NO_SECTION)))
+        assertEquals(
+            "ambiguous-section",
+            VendorDiagnostics.sampleKind(
+                result(BtStateParseStatus.AMBIGUOUS_SECTION, candidates = listOf("LHDC V3", "LHDC V5")),
+            ),
+        )
+        assertEquals(
+            "not-streaming",
+            VendorDiagnostics.sampleKind(
+                result(BtStateParseStatus.NOT_STREAMING, BtStateParser.BtState("LHDC", null, null, true, -1L)),
+            ),
+        )
+        assertEquals(
+            "no-bitrate",
+            VendorDiagnostics.sampleKind(
+                result(BtStateParseStatus.NO_BITRATE, BtStateParser.BtState("LHDC", "ABR", null, false, null)),
+            ),
+        )
+        assertEquals(
+            "available",
+            VendorDiagnostics.sampleKind(
+                result(BtStateParseStatus.AVAILABLE, BtStateParser.BtState("LHDC", "ABR", 400, false, 400000L)),
+            ),
+        )
+    }
+
+    @Test
+    fun ambiguousIssueListsAtMostFourCandidateHeaders() {
+        val fiveCandidates = (1..5).map { "LHDC V$it" }
+        val issue = VendorDiagnostics.realtimeIssue(
+            vendorLhdcIdentity,
+            result(BtStateParseStatus.AMBIGUOUS_SECTION, candidates = fiveCandidates),
+        )
+        assertTrue(issue != null)
+        for (i in 1..4) assertTrue(issue!!.contains("LHDC V$i"))
+        assertFalse(issue!!.contains("LHDC V5"))
     }
 
     @Test
