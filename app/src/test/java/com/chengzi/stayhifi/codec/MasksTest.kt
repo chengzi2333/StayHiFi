@@ -156,4 +156,42 @@ class MasksTest {
         )
         assertEquals(34, Masks.capsRateMask(19, selectable))
     }
+
+    // family 版 qualityLabel（Task 4）：接收已裁决身份 family，不用 caps 重新推导身份。
+
+    @Test
+    fun familyQualityLabelDecodesLdacAospTiers() {
+        assertEquals("990kbps", Masks.qualityLabel(CodecFamily.LDAC, 1000L))
+        assertEquals("660kbps", Masks.qualityLabel(CodecFamily.LDAC, 1001L))
+        assertEquals("330kbps", Masks.qualityLabel(CodecFamily.LDAC, 1002L))
+        assertEquals("自适应", Masks.qualityLabel(CodecFamily.LDAC, 1003L))
+        assertEquals(null, Masks.qualityLabel(CodecFamily.LDAC, 999L))
+    }
+
+    @Test
+    fun familyQualityLabelDecodesAllLhdcTiers() {
+        val labels = listOf(
+            "64kbps", "128kbps", "192kbps", "256kbps", "320kbps",
+            "400kbps", "500kbps", "900kbps", "1000kbps", "自适应",
+        )
+        labels.forEachIndexed { index, label ->
+            assertEquals(label, Masks.qualityLabel(CodecFamily.LHDC, 0x8000L or index.toLong()))
+        }
+    }
+
+    @Test
+    fun familyQualityLabelRequiresLhdcMagic() {
+        assertEquals(null, Masks.qualityLabel(CodecFamily.LHDC, 0xC005L))  // 错误 magic
+        assertEquals(null, Masks.qualityLabel(CodecFamily.LHDC, 0x800AL))  // 低字节越界
+        assertEquals(null, Masks.qualityLabel(CodecFamily.LHDC, 5L))       // 无 magic
+    }
+
+    @Test
+    fun familyQualityLabelReturnsNullForNonLdacLhdcFamilies() {
+        // UNKNOWN 即使 cs1 形似 LHDC 也不解码；标准 family 同样无质量档
+        assertEquals(null, Masks.qualityLabel(CodecFamily.UNKNOWN, 0x8006L))
+        assertEquals(null, Masks.qualityLabel(CodecFamily.SBC, 1000L))
+        assertEquals(null, Masks.qualityLabel(CodecFamily.AAC, 50888712L))
+        assertEquals(null, Masks.qualityLabel(CodecFamily.LC3, 1003L))
+    }
 }

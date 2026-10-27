@@ -1,6 +1,7 @@
 package com.chengzi.stayhifi.trigger
 
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecDeviceFixtures
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -19,6 +20,39 @@ class ApplyPolicyTest {
         cs3 = 1543503872L,
         cs4 = 0L,
     )
+
+    @Test
+    fun deriveTargetCapsNxCaps11Stays96k() {
+        // Task 4 回归：NX type14 caps=11（最高 96k），身份识别成功不得新增 192 目标
+        val target = ApplyPolicy.deriveTarget(
+            CodecDeviceFixtures.nxCurrent,
+            listOf(CodecDeviceFixtures.selectableCaps(CodecDeviceFixtures.nxType, CodecDeviceFixtures.nxCapsMask)),
+        )
+
+        assertEquals(8, target.sampleRate)
+    }
+
+    @Test
+    fun deriveTargetCapsOpdCaps10Stays96k() {
+        // Task 4 回归：OPD type18 caps=10（最高 96k），即使系统身份为 LHDC V3 也不变
+        val target = ApplyPolicy.deriveTarget(
+            CodecDeviceFixtures.opdCurrent,
+            listOf(CodecDeviceFixtures.selectableCaps(CodecDeviceFixtures.opdType, CodecDeviceFixtures.opdCapsMask)),
+        )
+
+        assertEquals(8, target.sampleRate)
+    }
+
+    @Test
+    fun deriveTargetCapsPhzCaps42Keeps192() {
+        // Task 4 回归：PHZ type19 caps=42（含 192k 位），目标维持 192kHz
+        val target = ApplyPolicy.deriveTarget(
+            CodecDeviceFixtures.phzCurrent,
+            listOf(CodecDeviceFixtures.selectableCaps(CodecDeviceFixtures.phzType, CodecDeviceFixtures.phzCapsMask)),
+        )
+
+        assertEquals(32, target.sampleRate)
+    }
 
     @Test
     fun decideReturnsFalseWhenAlreadyAligned() {
