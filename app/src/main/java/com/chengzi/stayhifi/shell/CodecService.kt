@@ -46,8 +46,9 @@ class CodecService : ICodecService.Stub() {
     // TTL 用 elapsedRealtime（单调），不依赖墙钟；loader 在缓存锁外执行。
     private val supportedTypesCache = SupportedTypesCatalogCache { SystemClock.elapsedRealtime() }
 
-    // Task 3：adapter ON/OFF 跳变检测——OFF→ON 后首次读取必须重新加载目录
-    @Volatile private var mAdapterOn = false
+    // Task 3：adapter ON/OFF 跳变门控——仅跳变时失效目录缓存（连续 OFF 不重复失效，
+    // 保住 NULL/EMPTY/ERROR 的 10s 限频；OFF→ON 后首次读取仍重新加载）
+    private val catalogAdapterGate = AdapterStateInvalidator(supportedTypesCache)
 
     init {
         disableHiddenApiChecks()
@@ -435,16 +436,12 @@ class CodecService : ICodecService.Stub() {
     private fun CodecConfig.toJsonElement(): JsonElement = Json.parseToJsonElement(toJson())
 
     /**
-     * Task 3 缓存失效策略：adapter 非 ON 时目录不可信，立即失效；
-     * ON/OFF 跳变（含 OFF→ON 恢复）同样失效，保证恢复后首次读取重新加载。
+     * Task 3 缓存失效策略（fix：跳变门控）：adapter ON/OFF 跳变时目录缓存失效；
+     * 连续 OFF 期间不重复失效，OFF 期读取走正常 TTL 限频。
      * 纯内存操作（读 mAdapter 字段 + 缓存锁），无 binder IO。
      */
     private fun applyCatalogInvalidationPolicy() {
-        val on = bluetoothState() == "ON"
-        if (!on || !mAdapterOn) {
-            supportedTypesCache.invalidate()
-        }
-        mAdapterOn = on
+        catalogAdapterGate.onAdapterState(bluetoothState() == "ON")
     }
 
     /** 蓝牙开关状态的安全读取；adapter 缺失或读取异常均为 UNKNOWN */

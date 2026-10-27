@@ -51,9 +51,12 @@ internal class SupportedTypesCatalogCache(private val nowMs: () -> Long) {
             if (gen == generation) {
                 cached = result
                 cachedAtMs = nowMs()
+                return result
             }
         }
-        return result
+        // 加载期间被 invalidate：旧代目录既不写入也不流出给原调用方，
+        // 只返回瞬态 UNAVAILABLE，由下一次 get 重新加载新目录。
+        return ReflectedValue(ApiReadState.UNAVAILABLE, error = "invalidated-during-load")
     }
 
     /** 立即失效：清空缓存；进行中的 loader 完成后其结果也被丢弃。 */
@@ -81,5 +84,25 @@ internal class SupportedTypesCatalogCache(private val nowMs: () -> Long) {
     companion object {
         private const val TTL_OK_MS = 60_000L        // OK / UNAVAILABLE
         private const val TTL_FAILURE_MS = 10_000L   // NULL / EMPTY / ERROR
+    }
+}
+
+/**
+ * Task 3 fix：adapter ON/OFF 跳变门控——仅在状态跳变时失效目录缓存。
+ *
+ * 连续 OFF 期间若每次读取都 invalidate，NULL/EMPTY/ERROR 的 10s 限频会被
+ * 击穿（每次 read 都重新打 binder）。改为跳变检测：ON→OFF、OFF→ON 各失效一次，
+ * OFF 期内的重复读取走正常 TTL 限频；OFF→ON 后的首次读取仍必须重新加载。
+ * 纯内存操作，可在任意线程调用。
+ */
+internal class AdapterStateInvalidator(private val cache: SupportedTypesCatalogCache) {
+
+    @Volatile private var lastOn = false
+
+    fun onAdapterState(on: Boolean) {
+        if (on != lastOn) {
+            cache.invalidate()
+            lastOn = on
+        }
     }
 }

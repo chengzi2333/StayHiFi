@@ -190,23 +190,32 @@ class SupportedTypesCatalogCacheTest {
         val count = AtomicInteger()
         val started = CountDownLatch(1)
         val blocker = CountDownLatch(1)
+        val staleGenList = listOf(SupportedCodecType(nativeType = 1, codecId = 2L, codecName = "LDAC"))
         val loader: () -> ReflectedValue<List<SupportedCodecType>> = {
             count.incrementAndGet()
             started.countDown()
             blocker.await(5, TimeUnit.SECONDS)
-            ok()
+            ReflectedValue(ApiReadState.OK, staleGenList)
         }
         val aResult = AtomicReference<ReflectedValue<List<SupportedCodecType>>>()
         val a = Thread { aResult.set(cache.get(loader)) }.apply { start() }
         assertTrue(started.await(5, TimeUnit.SECONDS))
 
-        cache.invalidate()   // loader 仍在飞行：其结果必须被丢弃
+        cache.invalidate()   // loader 仍在飞行：其结果必须被丢弃，且不得返回给原调用方
         blocker.countDown()
         a.join(5_000)
-        assertEquals(ApiReadState.OK, aResult.get().state)
 
-        // 结果被丢弃 → 下一次 get 必须重新加载
-        cache.get(loader)
+        // 旧代结果不得流出：原调用方只拿到瞬态 UNAVAILABLE，而不是被 invalidate 取代的目录
+        assertEquals(ApiReadState.UNAVAILABLE, aResult.get().state)
+        assertEquals("invalidated-during-load", aResult.get().error)
+
+        // 结果被丢弃 → 下一次 get 必须重新加载且拿到全新目录
+        val freshList = listOf(SupportedCodecType(nativeType = 2, codecId = 3L, codecName = "aptX"))
+        val r = cache.get {
+            count.incrementAndGet()
+            ReflectedValue(ApiReadState.OK, freshList)
+        }
+        assertEquals(freshList, r.value)
         assertEquals(2, count.get())
     }
 
@@ -236,5 +245,60 @@ class SupportedTypesCatalogCacheTest {
         val r3 = cache.get(loaderOf(ok(), count))
         assertEquals(ApiReadState.OK, r3.state)
         assertEquals(2, count.get())
+    }
+
+    // ─────────────────────────── adapter ON/OFF 跳变门控 ───────────────────────────
+
+    @Test
+    fun continuousOffReadsKeepFailureRateLimit() {
+        val clock = Clock()
+        val cache = SupportedTypesCatalogCache { clock.now }
+        val gate = AdapterStateInvalidator(cache)
+        val count = AtomicInteger()
+        val offResult = ReflectedValue<List<SupportedCodecType>>(ApiReadState.NULL)
+
+        // 首次 OFF（跳变）：失效一次，随后加载 NULL 目录
+        gate.onAdapterState(false)
+        assertEquals(ApiReadState.NULL, cache.get(loaderOf(offResult, count)).state)
+        assertEquals(1, count.get())
+
+        // 连续 OFF 读取：不得再 invalidate，NULL 结果仍受 10s 限频
+        clock.now = 5_000
+        gate.onAdapterState(false)
+        cache.get(loaderOf(offResult, count))
+        assertEquals("连续 OFF 不得绕过 10s 限频", 1, count.get())
+
+        clock.now = 11_000
+        gate.onAdapterState(false)
+        cache.get(loaderOf(offResult, count))
+        assertEquals("超过 10s TTL 才重试", 2, count.get())
+    }
+
+    @Test
+    fun offToOnTransitionForcesReloadWhileContinuousOffDoesNot() {
+        val clock = Clock()
+        val cache = SupportedTypesCatalogCache { clock.now }
+        val gate = AdapterStateInvalidator(cache)
+        val count = AtomicInteger()
+        val offResult = ReflectedValue<List<SupportedCodecType>>(ApiReadState.NULL)
+
+        gate.onAdapterState(true)
+        cache.get(loaderOf(ok(), count))          // count=1，TTL 60s
+        clock.now = 5_000
+
+        gate.onAdapterState(false)                // ON→OFF 跳变：目录失效
+        gate.onAdapterState(false)                // 连续 OFF：不得重复失效
+        gate.onAdapterState(false)
+        assertEquals(ApiReadState.NULL, cache.get(loaderOf(offResult, count)).state)
+        assertEquals(2, count.get())
+
+        clock.now = 8_000                         // OFF 期读取：NULL 结果 10s TTL 内限频
+        gate.onAdapterState(false)
+        cache.get(loaderOf(offResult, count))
+        assertEquals("OFF 期内不得绕过限频", 2, count.get())
+
+        gate.onAdapterState(true)                 // OFF→ON：必须重载
+        assertEquals(ApiReadState.OK, cache.get(loaderOf(ok(), count)).state)
+        assertEquals(3, count.get())
     }
 }
