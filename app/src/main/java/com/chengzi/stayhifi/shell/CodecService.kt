@@ -29,9 +29,14 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 
 /**
- * 本类运行在 Shizuku 拉起的独立进程（:codec）中，身份是 adb shell (uid 2000)，
- * 天然持有 BLUETOOTH_PRIVILEGED，因此可以调用隐藏 API：
+ * 本类运行在特权进程（独立进程 :codec）中，由两种载体拉起，身份可诊断：
+ *   - Shizuku/Stellar：adb shell（uid 2000）；
+ *   - Root（实验）：libsu RootService，uid 由 Root 管理器决定。
+ * 特权身份天然持有（或应持有）BLUETOOTH_PRIVILEGED，因此可以调用隐藏 API：
  *   BluetoothA2dp.getCodecStatus() / setCodecConfigPreference()
+ *
+ * Task D1：不再假设 uid 0 必然等价于 shell 的蓝牙权限（部分 ROM/SELinux 下不成立）；
+ * 服务侧首条 read/write 诊断记录实际 Process.myUid()，read/write/dump 需分别外部验证。
  *
  * PoC 原则：全部走反射，不依赖任何隐藏类的编译期符号。
  * 逻辑与 PoC CodecService.java 一一对应（git e5973cb）。
@@ -42,6 +47,9 @@ class CodecService : ICodecService.Stub() {
     private var mThread: HandlerThread                 // A2DP 代理回调需要 Looper
     @Volatile private var mA2dp: BluetoothA2dp? = null
     @Volatile private var mAdapter: BluetoothAdapter? = null
+
+    // Task D1：首条 read/write 诊断只记一次实际 serviceUid
+    private val serviceUidLogged = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // Task 3：supported types 目录缓存（限频/失效见 SupportedTypesCatalogCache）。
     // TTL 用 elapsedRealtime（单调），不依赖墙钟；loader 在缓存锁外执行。
@@ -88,6 +96,7 @@ class CodecService : ICodecService.Stub() {
     }
 
     override fun readConfig(mac: String?): String = try {
+        logServiceUidOnce("readConfig")
         val a2dp = getA2dp()
         val dev = findDevice(a2dp, mac)
         if (dev == null) {
@@ -115,6 +124,7 @@ class CodecService : ICodecService.Stub() {
     }
 
     override fun writeConfig(mac: String?, configJson: String?): String = try {
+        logServiceUidOnce("writeConfig")
         val target = CodecConfig.fromJson(configJson ?: "")
         val a2dp = getA2dp()
         val dev = findDevice(a2dp, mac)
@@ -220,6 +230,17 @@ class CodecService : ICodecService.Stub() {
     }
 
     // ─────────────────────────── 内部实现（PoC 一一对应） ───────────────────────────
+
+    /**
+     * Task D1：服务侧首条 read/write 诊断记录实际 [Process.myUid()]。
+     * 可诊断身份：不假设 uid 0 拥有 shell 等价蓝牙权限（部分 ROM/SELinux 不成立），
+     * read/write/dump 的可用性需分别外部验证（设计 §11.1）。
+     */
+    private fun logServiceUidOnce(op: String) {
+        if (serviceUidLogged.compareAndSet(false, true)) {
+            Log.i(TAG, "first privileged op=$op serviceUid=${Process.myUid()}")
+        }
+    }
 
     private fun getA2dp(): BluetoothA2dp {
         mA2dp?.let { return it }

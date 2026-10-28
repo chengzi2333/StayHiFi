@@ -96,7 +96,13 @@ dependencies {
 
     implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0'
 
+    // Task D1：libsu RootService（设计 §11.5：固定 6.0.0，只引入 service，
+    // core 由 service 传递带入；不声明 nio/io，不用 +/SNAPSHOT/master）
+    implementation 'com.github.topjohnwu.libsu:service:6.0.0'
+
     testImplementation 'junit:junit:4.13.2'
+    // Task D1：ProviderCoordinator 首读暂停/协程断言
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2'
 
     // Task B4：JVM 单测需要真实 org.json（android.jar 内为 not-mocked stub，readState/parseError 无法跑）。
     testImplementation 'org.json:json:20240303'
