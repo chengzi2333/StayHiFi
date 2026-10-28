@@ -86,6 +86,11 @@ data class HomeUiState(
     val manualActive: Boolean = false,
     /** 手动调参面板数据面；null（未连接/读不到）时「自定义音质」入口禁用。 */
     val manualEditor: ManualEditorInput? = null,
+    /**
+     * v1.2.2：特权参数是否可读。false=已连接但参数不可用（未授权/读取失败）——
+     * 保留耳机名，明细显示「—」，Apply/自定义写入禁用，状态行显示「已连接，授权后可用」。
+     */
+    val paramsAvailable: Boolean = true,
     /** 当前目标能力完整性；null 表示尚无快照或沿用旧展示状态。 */
     val targetStatus: TargetAssessment.Status? = null,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
@@ -158,7 +163,9 @@ fun HomeScreen(
 
             Button(
                 onClick = { onAction(HomeAction.ApplyNow) },
-                enabled = state.headsetName != null && !state.applying,
+                // v1.2.2：已连接但参数读不到（未授权/读取失败）时禁用——
+                // 状态行已说明「已连接，授权后可用」，不给一个点了必失败的按钮。
+                enabled = state.headsetName != null && state.paramsAvailable && !state.applying,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 56.dp),
@@ -280,6 +287,7 @@ private fun StatusCard(state: HomeUiState) {
                     status = state.targetStatus,
                     fullBars = state.fullBars,
                     manualActive = state.manualActive,
+                    paramsAvailable = state.paramsAvailable,
                 )
             }
             // 机型行（Task 28 + Task C4）：面客机型名 + Android 版。
@@ -319,6 +327,7 @@ private fun StatusLine(state: HomeUiState) {
             status = state.targetStatus,
             fullBars = state.fullBars,
             manualActive = state.manualActive,
+            paramsAvailable = state.paramsAvailable,
         ),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -421,6 +430,7 @@ private fun StayHiFiBadge(
     status: TargetAssessment.Status?,
     fullBars: Boolean,
     manualActive: Boolean = false,
+    paramsAvailable: Boolean = true,
 ) {
     val container = if (fullBars && !manualActive) {
         MaterialTheme.colorScheme.primary
@@ -447,7 +457,7 @@ private fun StayHiFiBadge(
                 .background(content),
         )
         Text(
-            text = HomeTargetStatus.badgeLabel(status, fullBars, manualActive),
+            text = HomeTargetStatus.badgeLabel(status, fullBars, manualActive, paramsAvailable),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Bold,
             color = content,

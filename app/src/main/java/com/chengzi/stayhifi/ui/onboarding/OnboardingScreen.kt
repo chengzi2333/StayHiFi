@@ -122,6 +122,9 @@ sealed interface OnboardingAction {
 
     data object RefreshConnection : OnboardingAction
 
+    /** v1.2.2：连接页「排障日志」次级入口——直接复用运行日志页，不要求完成引导。 */
+    data object OpenLogs : OnboardingAction
+
     data object OpenAutostartSettings : OnboardingAction
     data object OpenBatteryWhitelist : OnboardingAction
     /** 第三道闸：后台高耗电（+ 卡片锁定在文案里引导，系统无 API 可查/可跳）。 */
@@ -496,6 +499,14 @@ private fun ConnectPage(state: OnboardingUiState, onAction: (OnboardingAction) -
                 ) { Text("刷新") }
             }
         }
+        // v1.2.2：排障日志次级入口——连接异常时用户可就地查看/复制日志反馈，
+        // 不强制完成引导；返回经 LogsScreen BackHandler 回到本页。
+        TextButton(
+            onClick = { onAction(OnboardingAction.OpenLogs) },
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .heightIn(min = 48.dp),
+        ) { Text("排障日志") }
     }
 }
 

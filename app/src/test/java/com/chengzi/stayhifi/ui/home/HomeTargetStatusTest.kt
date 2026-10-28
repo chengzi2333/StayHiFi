@@ -132,4 +132,40 @@ class HomeTargetStatusTest {
         )
         assertEquals("未满血", HomeTargetStatus.badgeLabel(status = null, fullBars = true))
     }
+
+    @Test
+    fun connectedButParamsUnavailableNeverPromptsRetryClick() {
+        // v1.2.2：已连接但特权参数读不到——禁用按钮不能配「点下方按钮重试」文案
+        assertEquals(
+            "已连接，授权后可用",
+            HomeTargetStatus.statusLine(
+                connected = true, status = null, fullBars = false, paramsAvailable = false,
+            ),
+        )
+        assertEquals(
+            "已连接，授权后可用",
+            HomeTargetStatus.statusLine(
+                connected = true,
+                status = TargetAssessment.Status.COMPLETE,
+                fullBars = true,
+                paramsAvailable = false,
+            ),
+        )
+        assertEquals(
+            "待确认",
+            HomeTargetStatus.badgeLabel(
+                status = TargetAssessment.Status.COMPLETE, fullBars = true, paramsAvailable = false,
+            ),
+        )
+    }
+
+    @Test
+    fun disconnectedStillTakesPriorityOverParamsUnavailable() {
+        assertEquals(
+            "等待耳机连接",
+            HomeTargetStatus.statusLine(
+                connected = false, status = null, fullBars = false, paramsAvailable = false,
+            ),
+        )
+    }
 }

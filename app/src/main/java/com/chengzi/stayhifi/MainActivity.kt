@@ -69,8 +69,13 @@ import com.chengzi.stayhifi.codec.VendorDiagnosticGate
 import com.chengzi.stayhifi.codec.VendorStackDiagnosticRecorder
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
+import com.chengzi.stayhifi.device.ConnectionPresentation
+import com.chengzi.stayhifi.device.LocalHeadset
+import com.chengzi.stayhifi.device.LocalHeadsetResult
+import com.chengzi.stayhifi.device.LocalHeadsetSource
 import com.chengzi.stayhifi.notify.QsTileService
 import com.chengzi.stayhifi.shell.ProviderKind
+import com.chengzi.stayhifi.shell.ProviderLease
 import com.chengzi.stayhifi.shell.ProviderOwner
 import com.chengzi.stayhifi.shell.ProviderProbe
 import com.chengzi.stayhifi.shell.ProviderSource
@@ -198,6 +203,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var profileRepo: ProfileRepository
     // Task 46：公开 API 本地即时判定音乐播放，替代需要两轮采样的 PCM 计数增量。
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
+    // v1.2.2：本机 A2DP 设备来源（普通系统 API，无需特权）——连接事实的第一裁决来源。
+    private val localHeadsetSource by lazy { LocalHeadsetSource(this) }
 
     // ---- Onboarding 状态 ----
     private var onboardingState by mutableStateOf(OnboardingUiState())
@@ -231,6 +238,8 @@ class MainActivity : ComponentActivity() {
     private var selectedTab by mutableStateOf(0)
     private var logsVisible by mutableStateOf(false)
     private var logs by mutableStateOf<List<String>>(emptyList())
+    // v1.2.2：教程连接页「排障日志」覆盖层——复用 LogsScreen，不要求完成引导。
+    private var onboardingLogsVisible by mutableStateOf(false)
 
     // ---- Task D11：设置页「特权方式」区状态 ----
     /** Root 授权/切换操作进行中（本 Activity 粒度，立即反馈禁用重复点击）。 */
@@ -485,7 +494,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (logsVisible) {
-                    LogsScreen(state = LogsUiState(logs), onAction = ::onLogsAction)
+                    LogsScreen(
+                        state = LogsUiState(logs),
+                        onAction = { onLogsAction(it) { logsVisible = false } },
+                    )
                 }
             }
         }
@@ -852,7 +864,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun onLogsAction(action: LogsAction) {
+    private fun onLogsAction(action: LogsAction, onBack: () -> Unit) {
         when (action) {
             LogsAction.Copy -> copyLogs()
             LogsAction.Clear -> {
@@ -873,7 +885,7 @@ class MainActivity : ComponentActivity() {
                 VendorStackDiagnosticRecorder.shared.drainSuppressedCount()
                 logs = emptyList()
             }
-            LogsAction.Back -> logsVisible = false
+            LogsAction.Back -> onBack()
         }
     }
 
@@ -966,7 +978,17 @@ class MainActivity : ComponentActivity() {
             }
             if (wanted.isNotEmpty()) permLauncher.launch(wanted.toTypedArray())
         }
-        OnboardingScreen(state = onboardingState, onAction = ::onOnboardingAction)
+        // v1.2.2：连接页「排障日志」覆盖层——复用 LogsScreen（单一口吻复制/清空/系统返回），
+        // 不要求完成引导；BackHandler 关闭覆盖层即回到原教程页。
+        Box(Modifier.fillMaxSize()) {
+            OnboardingScreen(state = onboardingState, onAction = ::onOnboardingAction)
+            if (onboardingLogsVisible) {
+                LogsScreen(
+                    state = LogsUiState(logs),
+                    onAction = ::onOnboardingLogsAction,
+                )
+            }
+        }
         // Task D10：Root 卡与门槛的三路只读数据源——持久选择/生效通道/Root 快照流。
         // 只进 UI 态，绝不触发授权/写盘；离开 Onboarding 组合即停止收集。
         LaunchedEffect(Unit) {
@@ -978,6 +1000,10 @@ class MainActivity : ComponentActivity() {
                 onboardingState = onboardingState.copy(root = snap) } }
         }
     }
+
+    /** v1.2.2：教程日志覆盖层的复制/清空与设置页同一实现（含脱敏与诊断复位），返回仅关覆盖层。 */
+    private fun onOnboardingLogsAction(action: LogsAction) =
+        onLogsAction(action) { onboardingLogsVisible = false }
 
     private fun onOnboardingAction(action: OnboardingAction) {
         when (action) {
@@ -992,6 +1018,10 @@ class MainActivity : ComponentActivity() {
             OnboardingAction.CancelRootAuthorization ->
                 coordinator.cancelForegroundAttempt(activityOwner)
             OnboardingAction.RefreshConnection -> onRefreshConnection()
+            OnboardingAction.OpenLogs -> {
+                logs = LogStore.snapshot().asReversed()
+                onboardingLogsVisible = true
+            }
             OnboardingAction.OpenAutostartSettings -> onOpenAutostartSettings()
             OnboardingAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
             OnboardingAction.OpenBackgroundPower -> onOpenBackgroundPower()
@@ -1112,8 +1142,72 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Connect 页「刷新」：非交互 ensure + lease 内 dumpDevices/readConfig；命中内置预设且无档案时弹确认。 */
+    /**
+     * v1.2.2 修复：Connect 页「刷新」——本机 API 先判连接（BluetoothManager A2DP，
+     * 无需特权），特权 dump/read/presentation 只作参数增强；未授权、空列表、
+     * read error、解析失败都不能覆盖本机已连接。本机读不到（UNKNOWN 不等于断开）
+     * 才回退旧特权全路径。
+     */
     private fun onRefreshConnection() {
+        lifecycleScope.launch {
+            try {
+                val local = withContext(Dispatchers.IO) { localHeadsetSource.current() }
+                when (local) {
+                    is LocalHeadsetResult.Connected -> onLocalHeadsetConnected(local.headset)
+                    LocalHeadsetResult.Disconnected -> {
+                        onboardingState = onboardingState.copy(
+                            headsetConnected = false, headsetName = null,
+                        )
+                        logConnectRefreshDedup("刷新连接：本机无已连接 A2DP 设备")
+                    }
+                    LocalHeadsetResult.SecurityBlocked,
+                    LocalHeadsetResult.Unknown -> onRefreshConnectionViaProvider(local)
+                }
+            } catch (t: Throwable) {
+                LogStore.log("刷新连接失败: $t")
+            }
+        }
+    }
+
+    /** 本机已确认连接：先点亮教程连接态，再尽力用特权通道读当前参数留证（失败不影响连接态）。 */
+    private fun onLocalHeadsetConnected(headset: LocalHeadset) {
+        onboardingState = onboardingState.copy(headsetConnected = true, headsetName = headset.name)
+        lifecycleScope.launch {
+            try {
+                if (!ensureCarrierReady()) return@launch
+                val lease = coordinator.acquire(activityOwner, ProviderSource.ONBOARDING)
+                try {
+                    lease.withService { svc ->
+                        val stateJson = withContext(Dispatchers.IO) { svc.readConfig(headset.mac) }
+                        val obj = JSONObject(stateJson)
+                        if (obj.has("error")) {
+                            LogStore.log("读取当前参数 error: ${obj.optString("error")}")
+                            return@withService
+                        }
+                        val presentation = CodecSnapshotPresenter.present(
+                            CodecStateSnapshotJson.parse(stateJson),
+                        )
+                        if (presentation == null) {
+                            LogStore.log("读取当前参数：当前配置尚未就绪")
+                            return@withService
+                        }
+                        recordIdentityConflict(headset.mac, presentation)
+                        LogStore.log("已连接: ${headset.name} (${headset.mac})，当前 ${presentation.summary.text()}")
+                    }
+                } finally {
+                    lease.close()
+                }
+            } catch (t: Throwable) {
+                LogStore.log("读取当前参数失败（不影响连接状态）: $t")
+            }
+        }
+    }
+
+    /**
+     * 本机读不到时的旧特权全路径（ensure + lease 内 dumpDevices/readConfig）。
+     * 仅 Unknown/SecurityBlocked 会走到这里，特权空列表此时才可改判为未连接。
+     */
+    private fun onRefreshConnectionViaProvider(local: LocalHeadsetResult) {
         lifecycleScope.launch {
             try {
                 if (!ensureCarrierReady()) return@launch
@@ -1122,10 +1216,15 @@ class MainActivity : ComponentActivity() {
                     lease.withService { svc ->
                         val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
                         if (arr.length() == 0) {
-                            onboardingState = onboardingState.copy(
-                                headsetConnected = false, headsetName = null,
-                            )
-                            LogStore.log("刷新连接：无已连接 A2DP 设备")
+                            if (ConnectionPresentation.providerEmptyListAuthoritative(local)) {
+                                onboardingState = onboardingState.copy(
+                                    headsetConnected = false, headsetName = null,
+                                )
+                                logConnectRefreshDedup("刷新连接：无已连接 A2DP 设备")
+                            } else {
+                                // 路由已保证本机读不到才进本路径；此处防御未来改动覆盖本机裁决
+                                LogStore.log("刷新连接：特权空列表被本机裁决拦截，保持连接态")
+                            }
                             return@withService
                         }
                         val mac = arr.getJSONObject(0).getString("mac")
@@ -1136,7 +1235,9 @@ class MainActivity : ComponentActivity() {
                             LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
                             return@withService
                         }
-                        val presentation = CodecSnapshotPresenter.present(CodecStateSnapshotJson.parse(stateJson))
+                        val presentation = CodecSnapshotPresenter.present(
+                            CodecStateSnapshotJson.parse(stateJson),
+                        )
                         if (presentation == null) {
                             LogStore.log("刷新连接：当前配置尚未就绪")
                             return@withService
@@ -1154,6 +1255,14 @@ class MainActivity : ComponentActivity() {
                 LogStore.log("刷新连接失败: $t")
             }
         }
+    }
+
+    /** v1.2.2：教程连接页 2.5s 轮询期间同一事实只记一次日志。 */
+    private var lastConnectRefreshLog: String? = null
+    private fun logConnectRefreshDedup(message: String) {
+        if (lastConnectRefreshLog == message) return
+        lastConnectRefreshLog = message
+        LogStore.log(message)
     }
 
     private fun onOpenAutostartSettings() {
@@ -1433,299 +1542,410 @@ class MainActivity : ComponentActivity() {
     // 每次刷新递增代次；慢读取可并发，但只有最新轮次允许写首页状态与 PCM 前值。
     @Volatile private var refreshGeneration = 0L
 
-    /** onResume / ApplyNow 后刷新：当前通道未就绪 → 事实红条；否则经 lease 读第一台设备实况。 */
+    /**
+     * v1.2.2 修复：本机普通 API（BluetoothManager A2DP connectedDevices）先做连接事实裁决，
+     * 特权 dump/read 只作参数增强——特权未就绪/读取失败不再把系统蓝牙已连接误判为「未连接」。
+     *  - Connected              → refreshHomeConnected：先落耳机名，再尽力增强参数；
+     *  - Disconnected           → 本机确认无 A2DP 连接：清空连接态，廉价 probe 顺带维护红条事实；
+     *  - SecurityBlocked/Unknown→ 本机读不到（UNKNOWN 不等于断开）：回退旧特权全路径。
+     */
     private fun refreshHome() {
         lifecycleScope.launch {
             val gen = ++refreshGeneration
-            // Task D9：只读 probe 判定当前选择是否可 bind（Root=READY 复查，
-            // Shizuku=pingBinder/checkSelfPermission），绝不 requestPermission/openShell。
-            val check = withContext(Dispatchers.IO) {
-                coordinator.probeSelected(ProviderSource.SETTINGS)
-            }.foregroundCheck()
-            if (!check.bindable) {
-                if (check.carrierAlert != null) {
-                    if (gen != refreshGeneration) return@launch
+            val local = withContext(Dispatchers.IO) { localHeadsetSource.current() }
+            if (gen != refreshGeneration) return@launch
+            when (local) {
+                is LocalHeadsetResult.Connected -> refreshHomeConnected(gen, local.headset)
+                LocalHeadsetResult.Disconnected -> {
                     homeState = homeState.copy(
-                        carrierAlert = check.carrierAlert,
-                        headsetName = null,
-                        codec = null,
-                        rate = null,
-                        bits = null,
-                        quality = null,
-                        realtimeKbps = null,
-                        realtimeQualityMode = null,
-                        realtimeDisplay = RealtimeDisplay.NO_DATA,
-                        fullBars = false,
-                        targetStatus = null,
-                        manualActive = false,
-                        manualEditor = null,
+                        headsetName = null, codec = null, rate = null,
+                        bits = null, quality = null,
+                        realtimeKbps = null, realtimeQualityMode = null,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+                        manualActive = false, manualEditor = null,
                     )
                     connectedMac = null
                     connectedName = null
-                    return@launch
+                    // 未连接时没有 3s 轮询，廉价 probe 仅维护红条事实（不记未授权日志）。
+                    val check = withContext(Dispatchers.IO) {
+                        coordinator.probeSelected(ProviderSource.SETTINGS)
+                    }.foregroundCheck()
+                    if (gen != refreshGeneration) return@launch
+                    homeState = homeState.copy(carrierAlert = check.carrierAlert)
                 }
-                // 未授权（running 但未 granted）：保持原行为——先消红条，再记日志跳过读取
-                if (gen != refreshGeneration) return@launch
-                homeState = homeState.copy(carrierAlert = null)
-                LogStore.log("首页刷新：${check.notReadyLog}，跳过设备读取")
-                return@launch
-            }
-            if (gen != refreshGeneration) return@launch
-            homeState = homeState.copy(carrierAlert = null)
-            try {
-                val lease = coordinator.acquire(activityOwner, ProviderSource.SETTINGS)
-                try {
-                    // Task 46（Task 3 审查捎带裁定）：bind 同为 binder 调用，ColorOS 冻结载体
-                    // 时同样可能永久阻塞，与 dumpDevices/readConfig 同口径包 8s 超时；
-                    // 超时早退与「特权未授予」分支一致（直接 return，不清空已有状态）。
-                    // 超时必须在 IO 外层：取消的是等待线程，已发出的同步 binder 调用本身
-                    // 不可中断，IO 线程可能滞留。
-                    // Task D9：首趟 withService 只完成通道就绪（Shizuku=首次 bind，缓存在
-                    // provider 内；Root=READY 复查+取 IPC Mutex），8s 窗口口径不变；
-                    // 正式读取在第二趟 withService（Root IPC 必须在 Mutex 内串行）。
-                    val bound = withTimeoutOrNull(8_000) { lease.withService { } }
-                    if (bound == null) {
-                        LogStore.log("首页刷新：bind 超时(8s)，本轮跳过")
-                        return@launch
-                    }
-                    lease.withService { svc ->
-                        // Task 45：ColorOS 可能冻结载体进程使 binder 永久阻塞（ListenerService
-                        // 浸泡实测已踩过），dumpDevices/readConfig 各包 8s 超时（同
-                        // ListenerService 兜底口径）；超时按「本轮读不到」走与无设备相同的
-                        // 清空/早退路径，避免首页协程挂起停旧数据被误诊为「参数显示不出来」。
-                        val devicesJson = withTimeoutOrNull(8_000) {
-                            withContext(Dispatchers.IO) { svc.dumpDevices() }
-                        }
-                        if (devicesJson == null) {
-                            LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
-                            if (gen != refreshGeneration || !lease.isCurrent()) return@withService
-                            homeState = homeState.copy(
-                                headsetName = null, codec = null, rate = null,
-                                bits = null, quality = null,
-                                realtimeKbps = null, realtimeQualityMode = null,
-                                realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
-                                manualActive = false, manualEditor = null,
-                            )
-                            connectedMac = null
-                            connectedName = null
-                            return@withService
-                        }
-                        val arr = JSONArray(devicesJson)
-                        if (arr.length() == 0) {
-                            if (gen != refreshGeneration || !lease.isCurrent()) return@withService
-                            homeState = homeState.copy(
-                                headsetName = null, codec = null, rate = null,
-                                bits = null, quality = null,
-                                realtimeKbps = null, realtimeQualityMode = null,
-                                realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
-                                manualActive = false, manualEditor = null,
-                            )
-                            connectedMac = null
-                            connectedName = null
-                            return@withService
-                        }
-                        val mac = arr.getJSONObject(0).getString("mac")
-                        val name = arr.getJSONObject(0).getString("name")
-                        val stateJson = withTimeoutOrNull(8_000) {
-                            withContext(Dispatchers.IO) { svc.readConfig(mac) }
-                        }
-                        if (stateJson == null) {
-                            LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
-                            if (gen != refreshGeneration || !lease.isCurrent()) return@withService
-                            homeState = homeState.copy(
-                                headsetName = null, codec = null, rate = null,
-                                bits = null, quality = null,
-                                realtimeKbps = null, realtimeQualityMode = null,
-                                realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
-                                manualActive = false, manualEditor = null,
-                            )
-                            connectedMac = null
-                            connectedName = null
-                            return@withService
-                        }
-                        val obj = JSONObject(stateJson)
-                        if (obj.has("error")) {
-                            LogStore.log("首页 readConfig error: ${obj.optString("error")}")
-                            return@withService
-                        }
-                        val snapshot = CodecStateSnapshotJson.parse(stateJson)
-                        val presentation = CodecSnapshotPresenter.present(snapshot)
-                        if (presentation == null) {
-                            // Task B5：current 缺失轮也留证（currentNull 等 reason）并缓存同轮快照。
-                            val diagContext = homeDiagnosticContext(
-                                mac, DiagnosticTrigger.CODEC_UPDATE, dumpClues = emptyList(),
-                                providerKind = lease.kind.stored,
-                            )
-                            VendorStackDiagnosticRecorder.shared.record(snapshot, diagContext)
-                            lastDiagnosticSnapshot = snapshot
-                            lastDiagnosticMac = mac
-                            lastDiagnosticProviderKind = lease.kind.stored
-                            if (gen != refreshGeneration || !lease.isCurrent()) return@withService
-                            homeState = homeState.copy(
-                                headsetName = null, codec = null, rate = null,
-                                bits = null, quality = null,
-                                realtimeKbps = null, realtimeQualityMode = null,
-                                realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
-                                manualActive = false, manualEditor = null,
-                            )
-                            connectedMac = null
-                            connectedName = null
-                            logBtDiag(null)
-                            return@withService
-                        }
-                        recordIdentityConflict(mac, presentation)
-                        val current = presentation.current
-                        val selectable = snapshot.selectable
-                        val targetAssessment = ApplyPolicy.assessTarget(current, selectable)
-                        val fullBars = ApplyPolicy.isAtHighest(targetAssessment, current)
-                        // Task 46：播放判定先行——isMusicActive=false 时不再读 dump，首轮直接
-                        // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
-                        // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
-                        // （旧 dump 读取块已由下方 isMusicActive 版取代，合并时整段移除。）
-                        val capsMask = Masks.capsRateMask(current.codecType, selectable)
-                        val codecName = presentation.identity.displayName
-                        val isMusicActive = audioManager.isMusicActive
-                        var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
-                        // 保留本次 dump 原文与 parsed state/result，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
-                        var btDump: String? = null
-                        var parsedState: BtStateParser.BtState? = null
-                        var parsedResult: BtStateParseResult? = null
-                        if (!isMusicActive) {
-                            logBtDiag(null)
-                        } else {
-                            try {
-                                // Task 46 并行分支：dumpBtState 超时必须在 IO 外层（对齐
-                                // ListenerService 范式；取消的是等待，阻塞中的 binder 不可中断）。
-                                val btJson = withTimeoutOrNull(8_000) {
-                                    withContext(Dispatchers.IO) { svc.dumpBtState() }
-                                }
-                                // Task 8：超时/error JSON 等抓取诊断先过 identity 门控，
-                                // 标准编码器保持安静；安静路径复位去重基准，身份切回 vendor 可重记。
-                                if (btJson == null) {
-                                    if (VendorDiagnostics.shouldLog(presentation.identity)) {
-                                        realtimeDiag(current, codecName, "超时(8s)")
-                                    } else {
-                                        logBtDiag(null)
-                                    }
-                                } else {
-                                    val btObj = JSONObject(btJson)
-                                    if (btObj.has("error")) {
-                                        if (VendorDiagnostics.shouldLog(presentation.identity)) {
-                                            realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
-                                        } else {
-                                            logBtDiag(null)
-                                        }
-                                    } else {
-                                        btDump = btObj.optString("dump")
-                                        // Task 6：身份来自 presentation；仅唯一无歧义段可补充精确版本显示。
-                                        val result = BtStateParser.parseResult(
-                                            btDump.orEmpty(), presentation.identity,
-                                        )
-                                        val parsed = result.state
-                                        parsedState = parsed
-                                        parsedResult = result
-                                        realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
-                                        // Task 8：实时诊断唯一出口——identity 门控 + 仅无段/无码率/歧义；
-                                        // NOT_STREAMING 走下方 vendor 证据，AVAILABLE 复位去重基准。
-                                        val issue = VendorDiagnostics.realtimeIssue(presentation.identity, result)
-                                        if (issue != null) {
-                                            realtimeDiag(current, codecName, issue)
-                                        } else {
-                                            logBtDiag(null)
-                                        }
-                                    }
-                                }
-                            } catch (t: Throwable) {
-                                if (VendorDiagnostics.shouldLog(presentation.identity)) {
-                                    realtimeDiag(current, codecName, "读取异常: $t")
-                                } else {
-                                    logBtDiag(null)
-                                }
-                            }
-                        }
-                        // Task 53：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump 与 parsed result。
-                        // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；首页按 mac+raw+真实类别去重。
-                        // Task 8：门控改用 identity，NOT_STREAMING 只经本 gate 留一次 not-streaming 证据。
-                        val state = parsedState
-                        val result = parsedResult
-                        val kind = result?.let { VendorDiagnostics.sampleKind(it) }
-                        if (btDump != null && result != null && kind != null &&
-                            VendorDiagnostics.shouldLog(presentation.identity) &&
-                            recordUnknownVendor(mac, current, kind)
-                        ) {
-                            LogStore.log(
-                                "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
-                                    "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
-                                    "mac=$mac capsRateMask=$capsMask current=${current.toJson()}"
-                            )
-                            if (state != null) {
-                                LogStore.log(
-                                    "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
-                                        "sample=$kind ${VendorDiagnostics.evidence(state)}"
-                                )
-                            } else {
-                                LogStore.log(
-                                    "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
-                                        "sample=$kind ${VendorDiagnostics.missingStateEvidence(result)}"
-                                )
-                                VendorDiagnostics.dumpClues(btDump)
-                                    .forEach { LogStore.log("dumpsys线索: $it") }
-                            }
-                        }
-                        // Task B5：同一轮 readConfig 的通用厂商栈留证——播放中 PLAYING、否则 CODEC_UPDATE；
-                        // dumpClues 只复用本轮已取的 dump（不新增 dumpBtState 调用）。旧 dumpsys 证据/
-                        // 24 行线索与专用 gate 仍负责原实时诊断，通用 recorder 不重复 raw current 块。
-                        lastDiagnosticSnapshot = snapshot
-                        lastDiagnosticMac = mac
-                        lastDiagnosticProviderKind = lease.kind.stored
-                        VendorStackDiagnosticRecorder.shared.record(
-                            snapshot,
-                            homeDiagnosticContext(
-                                mac,
-                                trigger = if (isMusicActive) DiagnosticTrigger.PLAYING
-                                    else DiagnosticTrigger.CODEC_UPDATE,
-                                dumpClues = btDump?.let { VendorDiagnostics.dumpClues(it) }.orEmpty(),
-                                providerKind = lease.kind.stored,
-                            ),
-                        )
-                        // Task D9：refreshGeneration + lease.generation 双重代次守卫，
-                        // 旧轮次/旧通道的迟到返回一律不得写新 UI
-                        if (gen != refreshGeneration || !lease.isCurrent()) return@withService
-                        // 自定义音质会话：读回与手动目标一致才保持「自定义」展示；
-                        // 不一致（重连/系统改回/重新拉满）即失效，绝不跨重连重放。
-                        val manual = manualSession
-                        val manualActive = manual != null && manual.first == mac &&
-                            ApplyPolicy.matches(manual.second, current)
-                        if (manual != null && !manualActive) manualSession = null
-                        homeState = homeState.copy(
-                            headsetName = name,
-                            // 仅泛称身份可由唯一无歧义段补精确版本；精确身份不被旧段名降级。
-                            codec = BtStateParser.presentedCodecName(presentation.identity, parsedResult),
-                            rate = presentation.summary.rate,
-                            bits = presentation.summary.bits,
-                            quality = presentation.summary.quality,
-                            realtimeKbps = realtime.bitrateKbps,
-                            realtimeQualityMode = realtime.qualityMode,
-                            realtimeDisplay = realtime.display,
-                            fullBars = fullBars,
-                            targetStatus = targetAssessment.status,
-                            manualActive = manualActive,
-                            // 系统已裁决身份随数据面进弹层：佐证当前 codec 家族/显示名
-                            // （OPD 这类 LHDC V3 caps 仅 48/96 的自救场景）
-                            manualEditor = ManualEditorInput(
-                                current, selectable, presentation.identity,
-                            ),
-                        )
-                        connectedMac = mac
-                        connectedName = name
-                    }
-                } finally {
-                    lease.close()
-                }
-            } catch (t: Throwable) {
-                LogStore.log("首页刷新失败: $t")
+                LocalHeadsetResult.SecurityBlocked,
+                LocalHeadsetResult.Unknown -> refreshHomeProviderPath(gen, local)
             }
         }
+    }
+
+    /**
+     * 本机已确认连接：先落耳机名（连接事实），特权读取只增强参数。
+     * 未授权/读取失败：保留耳机名，参数置不可用（paramsAvailable=false），
+     * 状态行显示「已连接，授权后可用」，Apply/自定义写入禁用；
+     * 未授权日志按原因去重，3s 轮询不再每轮刷一条。
+     */
+    private suspend fun refreshHomeConnected(gen: Long, headset: LocalHeadset) {
+        if (gen != refreshGeneration) return
+        if (homeState.headsetName == null) {
+            // 断开→已连接首次落名：参数尚不可知，避免瞬时「未拉满，点下方按钮重试」误态
+            homeState = homeState.copy(headsetName = headset.name, paramsAvailable = false)
+        } else {
+            homeState = homeState.copy(headsetName = headset.name)
+        }
+        connectedMac = headset.mac
+        connectedName = headset.name
+        // Task D9：只读 probe 判定当前选择是否可 bind（Root=READY 复查，
+        // Shizuku=pingBinder/checkSelfPermission），绝不 requestPermission/openShell。
+        val check = withContext(Dispatchers.IO) {
+            coordinator.probeSelected(ProviderSource.SETTINGS)
+        }.foregroundCheck()
+        if (!check.bindable) {
+            if (check.carrierAlert != null) {
+                if (gen != refreshGeneration) return
+                homeState = homeState.copy(carrierAlert = check.carrierAlert)
+                markHomeParamsUnavailable()
+                return
+            }
+            // 未授权（running 但未 granted）：保留耳机名，参数不可用，去重日志后跳过读取
+            if (gen != refreshGeneration) return
+            homeState = homeState.copy(carrierAlert = null)
+            markHomeParamsUnavailable()
+            logHomeNotReadyDedup("首页刷新：${check.notReadyLog}，跳过设备读取")
+            return
+        }
+        if (gen != refreshGeneration) return
+        homeState = homeState.copy(carrierAlert = null)
+        lastHomeNotReadyLog = null
+        try {
+            val lease = coordinator.acquire(activityOwner, ProviderSource.SETTINGS)
+            try {
+                // Task 46：bind 同为 binder 调用，ColorOS 冻结载体时同样可能永久阻塞，
+                // 包 8s 超时；超时早退不清空已有状态（连接事实已由本机裁决，
+                // 参数至多停留在旧值，绝不回写断开）。
+                val bound = withTimeoutOrNull(8_000) { lease.withService { } }
+                if (bound == null) {
+                    LogStore.log("首页刷新：bind 超时(8s)，本轮跳过")
+                    return
+                }
+                lease.withService { svc ->
+                    readHomeState(gen, lease, svc, headset.mac, headset.name)
+                }
+            } finally {
+                lease.close()
+            }
+        } catch (t: Throwable) {
+            LogStore.log("首页刷新失败: $t")
+        }
+    }
+
+    /**
+     * 本机读不到时的旧特权全路径（probe → lease → dumpDevices 找第一台 → readConfig 增强）。
+     * 仅 Unknown/SecurityBlocked 会走到这里，特权空列表此时才可改判为未连接。
+     */
+    private suspend fun refreshHomeProviderPath(gen: Long, local: LocalHeadsetResult) {
+        // Task D9：只读 probe 判定当前选择是否可 bind，绝不 requestPermission/openShell。
+        val check = withContext(Dispatchers.IO) {
+            coordinator.probeSelected(ProviderSource.SETTINGS)
+        }.foregroundCheck()
+        if (!check.bindable) {
+            if (check.carrierAlert != null) {
+                if (gen != refreshGeneration) return
+                homeState = homeState.copy(
+                    carrierAlert = check.carrierAlert,
+                    headsetName = null,
+                    codec = null, rate = null, bits = null, quality = null,
+                    realtimeKbps = null, realtimeQualityMode = null,
+                    realtimeDisplay = RealtimeDisplay.NO_DATA,
+                    fullBars = false, targetStatus = null,
+                    manualActive = false, manualEditor = null,
+                )
+                connectedMac = null
+                connectedName = null
+                return
+            }
+            // 未授权（running 但未 granted）：保持原行为——先消红条，去重日志后跳过读取
+            if (gen != refreshGeneration) return
+            homeState = homeState.copy(carrierAlert = null)
+            logHomeNotReadyDedup("首页刷新：${check.notReadyLog}，跳过设备读取")
+            return
+        }
+        if (gen != refreshGeneration) return
+        homeState = homeState.copy(carrierAlert = null)
+        lastHomeNotReadyLog = null
+        try {
+            val lease = coordinator.acquire(activityOwner, ProviderSource.SETTINGS)
+            try {
+                // Task 46：bind 同为 binder 调用，ColorOS 冻结载体时同样可能永久阻塞，
+                // 与 dumpDevices/readConfig 同口径包 8s 超时；超时早退与「特权未授予」
+                // 分支一致（直接 return，不清空已有状态）。
+                // Task D9：首趟 withService 只完成通道就绪，正式读取在第二趟 withService
+                // （Root IPC 必须在 Mutex 内串行）。
+                val bound = withTimeoutOrNull(8_000) { lease.withService { } }
+                if (bound == null) {
+                    LogStore.log("首页刷新：bind 超时(8s)，本轮跳过")
+                    return
+                }
+                lease.withService { svc ->
+                    // Task 45：ColorOS 可能冻结载体进程使 binder 永久阻塞（ListenerService
+                    // 浸泡实测已踩过），dumpDevices 包 8s 超时（同 readConfig 兜底口径）。
+                    val devicesJson = withTimeoutOrNull(8_000) {
+                        withContext(Dispatchers.IO) { svc.dumpDevices() }
+                    }
+                    if (devicesJson == null) {
+                        LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+                        if (gen != refreshGeneration || !lease.isCurrent()) return@withService
+                        clearHomeConnection()
+                        return@withService
+                    }
+                    val arr = JSONArray(devicesJson)
+                    if (arr.length() == 0) {
+                        if (gen != refreshGeneration || !lease.isCurrent()) return@withService
+                        if (ConnectionPresentation.providerEmptyListAuthoritative(local)) {
+                            clearHomeConnection()
+                        } else {
+                            // 路由已保证本机读不到才进本路径；此处防御未来改动覆盖本机裁决
+                            LogStore.log("首页刷新：特权空列表被本机裁决拦截，保持连接态")
+                        }
+                        return@withService
+                    }
+                    val mac = arr.getJSONObject(0).getString("mac")
+                    val name = arr.getJSONObject(0).getString("name")
+                    readHomeState(gen, lease, svc, mac, name)
+                }
+            } finally {
+                lease.close()
+            }
+        } catch (t: Throwable) {
+            LogStore.log("首页刷新失败: $t")
+        }
+    }
+
+    /** 清空首页连接态（本机确认断开/特权空列表/特权超时）；不触碰 carrierAlert 字段。 */
+    private fun clearHomeConnection() {
+        homeState = homeState.copy(
+            headsetName = null, codec = null, rate = null, bits = null, quality = null,
+            realtimeKbps = null, realtimeQualityMode = null,
+            realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+            manualActive = false, manualEditor = null,
+        )
+        connectedMac = null
+        connectedName = null
+    }
+
+    /**
+     * v1.2.2：参数置不可用但保留连接事实——耳机名/connectedMac 不动，
+     * 明细格显示「—」，状态行显示「已连接，授权后可用」，Apply/自定义写入禁用。
+     */
+    private fun markHomeParamsUnavailable() {
+        homeState = homeState.copy(
+            codec = null, rate = null, bits = null, quality = null,
+            realtimeKbps = null, realtimeQualityMode = null,
+            realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+            manualActive = false, manualEditor = null, paramsAvailable = false,
+        )
+    }
+
+    /** v1.2.2：同一未就绪原因只记一次，避免首页 3s 轮询每轮刷一条错误日志。 */
+    private var lastHomeNotReadyLog: String? = null
+    private fun logHomeNotReadyDedup(message: String) {
+        if (lastHomeNotReadyLog == message) return
+        lastHomeNotReadyLog = message
+        LogStore.log(message)
+    }
+
+    /**
+     * 特权参数读取（v1.2.2 从 refreshHome 抽出，dumpBtState/诊断/B5 recorder 行为不变）：
+     * 锁定设备 (mac/name) 后 readConfig + 实况 dump + 厂商诊断 + UI 写入。
+     * 连接事实由调用方裁决（本机 API 或特权 dumpDevices），本函数任何读取失败
+     * 只把参数置为不可用并保留耳机名，绝不回写断开。
+     */
+    private suspend fun readHomeState(
+        gen: Long,
+        lease: ProviderLease,
+        svc: ICodecService,
+        mac: String,
+        name: String,
+    ) {
+        val stateJson = withTimeoutOrNull(8_000) {
+            withContext(Dispatchers.IO) { svc.readConfig(mac) }
+        }
+        if (stateJson == null) {
+            LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            return
+        }
+        val obj = JSONObject(stateJson)
+        if (obj.has("error")) {
+            LogStore.log("首页 readConfig error: ${obj.optString("error")}")
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            return
+        }
+        val snapshot = CodecStateSnapshotJson.parse(stateJson)
+        val presentation = CodecSnapshotPresenter.present(snapshot)
+        if (presentation == null) {
+            // Task B5：current 缺失轮也留证（currentNull 等 reason）并缓存同轮快照。
+            val diagContext = homeDiagnosticContext(
+                mac, DiagnosticTrigger.CODEC_UPDATE, dumpClues = emptyList(),
+                providerKind = lease.kind.stored,
+            )
+            VendorStackDiagnosticRecorder.shared.record(snapshot, diagContext)
+            lastDiagnosticSnapshot = snapshot
+            lastDiagnosticMac = mac
+            lastDiagnosticProviderKind = lease.kind.stored
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            logBtDiag(null)
+            return
+        }
+        recordIdentityConflict(mac, presentation)
+        val current = presentation.current
+        val selectable = snapshot.selectable
+        val targetAssessment = ApplyPolicy.assessTarget(current, selectable)
+        val fullBars = ApplyPolicy.isAtHighest(targetAssessment, current)
+        // Task 46：播放判定先行——isMusicActive=false 时不再读 dump，首轮直接
+        // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
+        // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
+        val capsMask = Masks.capsRateMask(current.codecType, selectable)
+        val codecName = presentation.identity.displayName
+        val isMusicActive = audioManager.isMusicActive
+        var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
+        // 保留本次 dump 原文与 parsed state/result，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
+        var btDump: String? = null
+        var parsedState: BtStateParser.BtState? = null
+        var parsedResult: BtStateParseResult? = null
+        if (!isMusicActive) {
+            logBtDiag(null)
+        } else {
+            try {
+                // Task 46 并行分支：dumpBtState 超时必须在 IO 外层（对齐
+                // ListenerService 范式；取消的是等待，阻塞中的 binder 不可中断）。
+                val btJson = withTimeoutOrNull(8_000) {
+                    withContext(Dispatchers.IO) { svc.dumpBtState() }
+                }
+                // Task 8：超时/error JSON 等抓取诊断先过 identity 门控，
+                // 标准编码器保持安静；安静路径复位去重基准，身份切回 vendor 可重记。
+                if (btJson == null) {
+                    if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                        realtimeDiag(current, codecName, "超时(8s)")
+                    } else {
+                        logBtDiag(null)
+                    }
+                } else {
+                    val btObj = JSONObject(btJson)
+                    if (btObj.has("error")) {
+                        if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                            realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
+                        } else {
+                            logBtDiag(null)
+                        }
+                    } else {
+                        btDump = btObj.optString("dump")
+                        // Task 6：身份来自 presentation；仅唯一无歧义段可补充精确版本显示。
+                        val result = BtStateParser.parseResult(
+                            btDump.orEmpty(), presentation.identity,
+                        )
+                        val parsed = result.state
+                        parsedState = parsed
+                        parsedResult = result
+                        realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+                        // Task 8：实时诊断唯一出口——identity 门控 + 仅无段/无码率/歧义；
+                        // NOT_STREAMING 走下方 vendor 证据，AVAILABLE 复位去重基准。
+                        val issue = VendorDiagnostics.realtimeIssue(presentation.identity, result)
+                        if (issue != null) {
+                            realtimeDiag(current, codecName, issue)
+                        } else {
+                            logBtDiag(null)
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                    realtimeDiag(current, codecName, "读取异常: $t")
+                } else {
+                    logBtDiag(null)
+                }
+            }
+        }
+        // Task 53：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump 与 parsed result。
+        // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；首页按 mac+raw+真实类别去重。
+        // Task 8：门控改用 identity，NOT_STREAMING 只经本 gate 留一次 not-streaming 证据。
+        val state = parsedState
+        val result = parsedResult
+        val kind = result?.let { VendorDiagnostics.sampleKind(it) }
+        if (btDump != null && result != null && kind != null &&
+            VendorDiagnostics.shouldLog(presentation.identity) &&
+            recordUnknownVendor(mac, current, kind)
+        ) {
+            LogStore.log(
+                "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
+                    "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
+                    "mac=$mac capsRateMask=$capsMask current=${current.toJson()}"
+            )
+            if (state != null) {
+                LogStore.log(
+                    "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
+                        "sample=$kind ${VendorDiagnostics.evidence(state)}"
+                )
+            } else {
+                LogStore.log(
+                    "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
+                        "sample=$kind ${VendorDiagnostics.missingStateEvidence(result)}"
+                )
+                VendorDiagnostics.dumpClues(btDump)
+                    .forEach { LogStore.log("dumpsys线索: $it") }
+            }
+        }
+        // Task B5：同一轮 readConfig 的通用厂商栈留证——播放中 PLAYING、否则 CODEC_UPDATE；
+        // dumpClues 只复用本轮已取的 dump（不新增 dumpBtState 调用）。旧 dumpsys 证据/
+        // 24 行线索与专用 gate 仍负责原实时诊断，通用 recorder 不重复 raw current 块。
+        lastDiagnosticSnapshot = snapshot
+        lastDiagnosticMac = mac
+        lastDiagnosticProviderKind = lease.kind.stored
+        VendorStackDiagnosticRecorder.shared.record(
+            snapshot,
+            homeDiagnosticContext(
+                mac,
+                trigger = if (isMusicActive) DiagnosticTrigger.PLAYING
+                    else DiagnosticTrigger.CODEC_UPDATE,
+                dumpClues = btDump?.let { VendorDiagnostics.dumpClues(it) }.orEmpty(),
+                providerKind = lease.kind.stored,
+            ),
+        )
+        // Task D9：refreshGeneration + lease.generation 双重代次守卫，
+        // 旧轮次/旧通道的迟到返回一律不得写新 UI
+        if (gen != refreshGeneration || !lease.isCurrent()) return
+        // 自定义音质会话：读回与手动目标一致才保持「自定义」展示；
+        // 不一致（重连/系统改回/重新拉满）即失效，绝不跨重连重放。
+        val manual = manualSession
+        val manualActive = manual != null && manual.first == mac &&
+            ApplyPolicy.matches(manual.second, current)
+        if (manual != null && !manualActive) manualSession = null
+        homeState = homeState.copy(
+            headsetName = name,
+            // 仅泛称身份可由唯一无歧义段补精确版本；精确身份不被旧段名降级。
+            codec = BtStateParser.presentedCodecName(presentation.identity, parsedResult),
+            rate = presentation.summary.rate,
+            bits = presentation.summary.bits,
+            quality = presentation.summary.quality,
+            realtimeKbps = realtime.bitrateKbps,
+            realtimeQualityMode = realtime.qualityMode,
+            realtimeDisplay = realtime.display,
+            fullBars = fullBars,
+            targetStatus = targetAssessment.status,
+            manualActive = manualActive,
+            // 系统已裁决身份随数据面进弹层：佐证当前 codec 家族/显示名
+            // （OPD 这类 LHDC V3 caps 仅 48/96 的自救场景）
+            manualEditor = ManualEditorInput(
+                current, selectable, presentation.identity,
+            ),
+            // v1.2.2：读回成功即参数可用（Apply/自定义恢复可用）。
+            paramsAvailable = true,
+        )
+        connectedMac = mac
+        connectedName = name
     }
 
     private fun onApplyNow() {
