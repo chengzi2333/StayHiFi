@@ -44,13 +44,9 @@ import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private const val PAGE_COUNT = 5
-
-/** 参数来源选择。 */
-enum class SourceMode(val title: String, val description: String) {
-    AUTO_FULL("自动拉满（推荐）", "连上耳机就把本机当前能谈出的最高音质参数写上去并验证，全程无感。"),
-    RECORD_WIZARD("录制向导", "诊断工具：抓一次当前参数存作本机记录，不参与拉满决策。"),
-}
+// UX 收敛：「参数来源」页撤出主路径（诊断工具不与自动拉满并列），引导 5→4 页；
+// 记录当前参数的入口移到设备页（空态按钮 + 设备卡「重新记录」）。
+private const val PAGE_COUNT = 4
 
 /** 特权载体类型。 */
 enum class CarrierKind(val displayName: String) {
@@ -89,7 +85,6 @@ data class OnboardingUiState(
     val providerOperationInFlight: Boolean = false,
     val headsetConnected: Boolean = false,
     val headsetName: String? = null,
-    val sourceMode: SourceMode = SourceMode.AUTO_FULL,
     val autostartEnabled: Boolean = false,
     val batteryWhitelistEnabled: Boolean = false,
 )
@@ -127,18 +122,14 @@ sealed interface OnboardingAction {
 
     data object RefreshConnection : OnboardingAction
 
-    data class SelectSource(val mode: SourceMode) : OnboardingAction
-
     data object OpenAutostartSettings : OnboardingAction
     data object OpenBatteryWhitelist : OnboardingAction
     /** 第三道闸：后台高耗电（+ 卡片锁定在文案里引导，系统无 API 可查/可跳）。 */
     data object OpenBackgroundPower : OnboardingAction
-
-    data object OpenRecordWizard : OnboardingAction
 }
 
 /**
- * 五页首次引导：欢迎 → 载体检测 → 连接耳机 → 参数来源 → 保活设置。
+ * 四页首次引导：欢迎 → 特权方式 → 连接耳机 → 保活设置。
  * 状态全部上抛，页面自身无状态、无业务逻辑。
  */
 @Composable
@@ -178,8 +169,7 @@ fun OnboardingScreen(
                     0 -> WelcomePage()
                     1 -> CarrierPage(state, onAction)
                     2 -> ConnectPage(state, onAction)
-                    3 -> SourcePage(state, onAction)
-                    4 -> BatteryPage(state, onAction)
+                    3 -> BatteryPage(state, onAction)
                 }
             }
 
@@ -510,59 +500,6 @@ private fun ConnectPage(state: OnboardingUiState, onAction: (OnboardingAction) -
 }
 
 @Composable
-private fun SourcePage(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        PageHeader(
-            title = "参数从哪里来？",
-            subtitle = "选一个方式，之后随时可以改。",
-        )
-        SourceMode.entries.forEach { mode ->
-            val selected = state.sourceMode == mode
-            Card(
-                onClick = { onAction(OnboardingAction.SelectSource(mode)) },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (selected) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
-                ),
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = mode.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Spacer(Modifier.weight(1f))
-                        if (selected) {
-                            StatusBadge(text = "已选", positive = true)
-                        }
-                    }
-                    Text(
-                        text = mode.description,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun BatteryPage(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
     Column(
         modifier = Modifier
@@ -598,14 +535,6 @@ private fun BatteryPage(state: OnboardingUiState, onAction: (OnboardingAction) -
             actionLabel = "去设置",
             onAction = { onAction(OnboardingAction.OpenBackgroundPower) },
         )
-        if (state.sourceMode == SourceMode.RECORD_WIZARD) {
-            Button(
-                onClick = { onAction(OnboardingAction.OpenRecordWizard) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp),
-            ) { Text("现在去录制参数模板") }
-        }
     }
 }
 
@@ -801,7 +730,6 @@ private fun OnboardingScreenPreviewDark() {
             state = OnboardingUiState(
                 headsetConnected = true,
                 headsetName = "OPPO Enco X3",
-                sourceMode = SourceMode.RECORD_WIZARD,
                 autostartEnabled = true,
             ),
             onAction = {},

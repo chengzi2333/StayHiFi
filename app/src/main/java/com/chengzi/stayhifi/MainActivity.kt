@@ -517,6 +517,15 @@ class MainActivity : ComponentActivity() {
                 wizardVisible = true
             }
             is DevicesAction.RestoreDefault -> onRestoreDefault(action.mac)
+            DevicesAction.OpenRecordWizard -> {
+                // UX 收敛：设备页空态入口，不带目标 MAC 约束（抓取当前连接的设备）。
+                wizardResult = null
+                wizardDeviceLabel = null
+                wizardError = null
+                wizardSaved = false
+                wizardTargetMac = null
+                wizardVisible = true
+            }
         }
     }
 
@@ -983,20 +992,9 @@ class MainActivity : ComponentActivity() {
             OnboardingAction.CancelRootAuthorization ->
                 coordinator.cancelForegroundAttempt(activityOwner)
             OnboardingAction.RefreshConnection -> onRefreshConnection()
-            is OnboardingAction.SelectSource ->
-                onboardingState = onboardingState.copy(sourceMode = action.mode)
             OnboardingAction.OpenAutostartSettings -> onOpenAutostartSettings()
             OnboardingAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
             OnboardingAction.OpenBackgroundPower -> onOpenBackgroundPower()
-            OnboardingAction.OpenRecordWizard -> {
-                // Task 33：Onboarding 入口不带目标 MAC 约束，清空重录锁定的 MAC。
-                wizardResult = null
-                wizardDeviceLabel = null
-                wizardError = null
-                wizardSaved = false
-                wizardTargetMac = null
-                wizardVisible = true
-            }
         }
     }
 

@@ -51,14 +51,17 @@ data class DevicesUiState(
 /** 设备页全部动作上抛，本层无逻辑。 */
 sealed interface DevicesAction {
     data class SetAutoApply(val mac: String, val enabled: Boolean) : DevicesAction
-    /** 「重录」：复用 RecordWizard 流程重新抓取这台设备的参数。 */
+    /** 「重新记录」：复用 RecordWizard 流程重新抓取这台设备的参数。 */
     data class ReRecord(val mac: String) : DevicesAction
     /** Task 42：「恢复默认参数」——把首次拉满前的原始协商配置写回设备。 */
     data class RestoreDefault(val mac: String) : DevicesAction
+    /** UX 收敛：空态「记录当前参数」入口（原首次引导的录制向导，撤出主路径后落在设备页）。 */
+    data object OpenRecordWizard : DevicesAction
 }
 
 /**
- * 设备档案页：名称 / MAC / 参数摘要 / 来源徽章 / 单设备 autoApply 开关 / 重录按钮。
+ * 设备页：名称 / MAC / 参数摘要 / 来源徽章 / 单设备 autoApply 开关 / 重新记录按钮；
+ * 空态提供「记录当前参数」入口（原首次引导录制向导，UX 收敛后落在这里）。
  */
 @Composable
 fun DevicesScreen(
@@ -91,15 +94,21 @@ fun DevicesScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        text = "还没有设备档案",
+                        text = "还没有设备记录",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        text = "连上耳机自动拉满后自动建档；也可用录制向导手动存档",
+                        text = "连上耳机自动拉满后自动建档，也可以手动记录当前参数",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    TextButton(
+                        onClick = { onAction(DevicesAction.OpenRecordWizard) },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Text("记录当前参数")
+                    }
                 }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
