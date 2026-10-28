@@ -25,6 +25,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -34,6 +35,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.shell.ProviderKind
+import com.chengzi.stayhifi.shell.RootShellStatus
+import com.chengzi.stayhifi.shell.RootSnapshot
+import com.chengzi.stayhifi.shell.RootStatus
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -66,12 +71,41 @@ data class CarrierUiState(
 data class OnboardingUiState(
     val shizuku: CarrierUiState = CarrierUiState(CarrierKind.SHIZUKU),
     val stellar: CarrierUiState = CarrierUiState(CarrierKind.STELLAR),
+    /** Task D10：教程内的通道选择（纯 UI 态，默认 Shizuku/Stellar 组）。仅选择/查看不写 DataStore；
+     *  Root 只有「请求 Root 授权」验证+提交成功后才经 Coordinator 持久化（§11.2/§11.3）。 */
+    val providerChoice: ProviderKind = ProviderKind.SHIZUKU,
+    /** Coordinator 持久选择 / 生效通道（首读前为 null）；Root 门槛要求二者均为 ROOT。 */
+    val selectedProvider: ProviderKind? = null,
+    val activeProvider: ProviderKind? = null,
+    /** Root 可观察快照（Root 状态卡数据源，初值与 RootTransport 冷启动一致）。 */
+    val root: RootSnapshot = RootSnapshot(
+        status = RootStatus.UNVERIFIED,
+        granted = null,
+        shellStatus = RootShellStatus.UNKNOWN,
+        observedReason = "cold start",
+    ),
+    /** Root 前台授权/切换事务进行中：禁用重复点击（§11.3 单飞/有界切换）。 */
+    val providerOperationInFlight: Boolean = false,
     val headsetConnected: Boolean = false,
     val headsetName: String? = null,
     val sourceMode: SourceMode = SourceMode.AUTO_FULL,
     val autostartEnabled: Boolean = false,
     val batteryWhitelistEnabled: Boolean = false,
 )
+
+/**
+ * Task D10：载体页「下一步」门槛（设计 §11.2）。
+ *  - Shizuku/Stellar 组沿用「任一载体三灯就绪」；
+ *  - Root 组只有 持久选择=生效通道=ROOT 且 RootSnapshot=READY 才放行——
+ *    Shizuku ready 不放行；candidate 健康（transport READY）但尚未 commit 也不放行。
+ */
+fun carrierPageReady(state: OnboardingUiState): Boolean = when (state.providerChoice) {
+    ProviderKind.SHIZUKU -> state.shizuku.ready || state.stellar.ready
+    ProviderKind.ROOT ->
+        state.selectedProvider == ProviderKind.ROOT &&
+            state.activeProvider == ProviderKind.ROOT &&
+            state.root.status == RootStatus.READY
+}
 
 /** 引导页全部动作上抛，本层无逻辑。 */
 sealed interface OnboardingAction {
@@ -82,6 +116,13 @@ sealed interface OnboardingAction {
     data class InstallCarrier(val kind: CarrierKind) : OnboardingAction
     data class OpenCarrierGuide(val kind: CarrierKind) : OnboardingAction
     data class RequestCarrierPermission(val kind: CarrierKind) : OnboardingAction
+
+    /** Task D10：教程内切换通道选择（纯 UI 态，不写 DataStore；改选同时作废进行中 attempt）。 */
+    data class SelectProvider(val kind: ProviderKind) : OnboardingAction
+    /** Task D10：Root 卡唯一授权入口——显式点击才触发前台验证+提交（§11.2/§11.4.6）。 */
+    data object RequestRootAuthorization : OnboardingAction
+    /** Task D10：离页/改选时作废进行中的前台 Root attempt，迟到成功不得提交（§11.4.6）。 */
+    data object CancelRootAuthorization : OnboardingAction
 
     data object RefreshConnection : OnboardingAction
 
@@ -142,10 +183,11 @@ fun OnboardingScreen(
             }
 
             val isLastPage = pagerState.currentPage == PAGE_COUNT - 1
-            // 硬门槛：第 1 页要求至少一个特权载体就绪，第 2 页要求耳机已连接；
+            // 硬门槛：第 1 页按当前所选通道判定（Task D10，§11.2：Shizuku 组任一载体就绪；
+            // Root 组需 selected=active=ROOT 且快照 READY），第 2 页要求耳机已连接；
             // 未达标时「下一步」置灰，但保留「稍后再说」逃生口，避免用户被卡死。
             val nextEnabled = when (pagerState.currentPage) {
-                1 -> state.shizuku.ready || state.stellar.ready
+                1 -> carrierPageReady(state)
                 2 -> state.headsetConnected
                 else -> true
             }
@@ -226,11 +268,186 @@ private fun CarrierPage(state: OnboardingUiState, onAction: (OnboardingAction) -
     ) {
         PageHeader(
             title = "选择特权方式",
-            subtitle = "StayHiFi 需要通过 Shizuku 或 Stellar 获得系统权限，任选其一准备好即可。",
+            subtitle = "StayHiFi 需要系统权限才能调校耳机参数，选一种方式准备好即可。",
         )
-        CarrierCard(state.shizuku, onAction)
-        CarrierCard(state.stellar, onAction)
+        // Task D10（§11.2）：顶部两个明确选择，不按谁先 ready 自动改选；
+        // 选择是纯 UI 态，Root 只有显式「请求 Root 授权」验证成功后才持久化。
+        ProviderChoiceCard(
+            title = "Shizuku / Stellar（默认）",
+            description = "借助 Shizuku 或 Stellar 获得系统权限，任选其一准备好即可。",
+            selected = state.providerChoice == ProviderKind.SHIZUKU,
+            onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.SHIZUKU)) },
+        )
+        ProviderChoiceCard(
+            title = "Root（实验）",
+            // spec §11.2 原文，不得改写
+            description = "适用于已经 Root 的设备。仅提供系统权限通道，不会提高耳机或编码器能力上限。" +
+                "兼容性仍在收集反馈，可随时手动切回 Shizuku/Stellar。",
+            selected = state.providerChoice == ProviderKind.ROOT,
+            onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.ROOT)) },
+        )
+        when (state.providerChoice) {
+            ProviderKind.SHIZUKU -> {
+                CarrierCard(state.shizuku, onAction)
+                CarrierCard(state.stellar, onAction)
+            }
+            ProviderKind.ROOT -> RootStatusCard(state, onAction)
+        }
     }
+}
+
+@Composable
+private fun ProviderChoiceCard(
+    title: String,
+    description: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                if (selected) {
+                    StatusBadge(text = "已选", positive = true)
+                }
+            }
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * Task D10：Root 独立状态卡（§11.2）——不硬套「已安装/运行中/已授权」三灯，
+ * 展示 Root 可用性、授权状态、服务连接状态和最近错误（事实与推测分列）。
+ * 离开组合（离页/改选）即作废进行中的前台 attempt，迟到成功不得提交（§11.4.6）。
+ */
+@Composable
+private fun RootStatusCard(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
+    DisposableEffect(Unit) {
+        onDispose { onAction(OnboardingAction.CancelRootAuthorization) }
+    }
+    val root = state.root
+    val ready = root.status == RootStatus.READY
+    val busy = state.providerOperationInFlight ||
+        root.status == RootStatus.REQUESTING || root.status == RootStatus.BINDING
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (ready) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Root 状态",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                if (ready) {
+                    StatusBadge(text = "已就绪", positive = true)
+                }
+            }
+            RootFactRow("Root 可用性", rootAvailabilityText(root))
+            RootFactRow("授权状态", rootGrantText(root))
+            RootFactRow("服务连接", rootServiceText(root))
+            RootFactRow("最近错误", rootLastErrorText(root))
+            if (!ready) {
+                Button(
+                    onClick = { onAction(OnboardingAction.RequestRootAuthorization) },
+                    enabled = !busy,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text(
+                        if (busy) "正在验证…" else "请求 Root 授权",
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RootFactRow(label: String, value: String) {
+    Row {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.size(8.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Root 可用性（事实）：是否拿到过 root shell；libsu 默认 shell 可能回落普通 sh（§11.4.1）。 */
+private fun rootAvailabilityText(root: RootSnapshot): String = when (root.shellStatus) {
+    RootShellStatus.ROOT_SHELL -> "可用（已获取 Root shell）"
+    RootShellStatus.NON_ROOT_SHELL -> "不可用（当前 shell 非 Root）"
+    RootShellStatus.UNKNOWN -> "尚未验证"
+}
+
+/** 授权状态（可观察三态，§11.4.2）：无法区分「用户拒绝/没有 su/管理器不兼容」，如实合并表述。 */
+private fun rootGrantText(root: RootSnapshot): String = when (root.granted) {
+    true -> "已授权"
+    false -> "未获得 Root 权限（可能被拒绝，或设备没有可用 Root）"
+    null -> "尚未验证"
+}
+
+private fun rootServiceText(root: RootSnapshot): String = when (root.status) {
+    RootStatus.READY -> "已连接并通过健康检查"
+    RootStatus.BINDING -> "连接中…"
+    RootStatus.BIND_NULL, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED -> "连接失败"
+    RootStatus.DISCONNECTED -> "已断开"
+    else -> "未连接"
+}
+
+/** 最近错误：只写可观察事实；推测原因（reasonHint）按 §11.6 另列，不与事实混写。 */
+private fun rootLastErrorText(root: RootSnapshot): String {
+    val isError = when (root.status) {
+        RootStatus.NOT_GRANTED, RootStatus.SHELL_FAILURE, RootStatus.AUTH_TIMEOUT,
+        RootStatus.BIND_NULL, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED,
+        RootStatus.DISCONNECTED, RootStatus.NEEDS_FOREGROUND_REVALIDATION,
+        -> true
+        else -> false
+    }
+    if (!isError) return "无"
+    val fact = root.observedReason.ifBlank { root.status.name }
+    return root.reasonHint?.let { "$fact\n推测原因：$it" } ?: fact
 }
 
 @Composable
@@ -625,6 +842,26 @@ private fun OnboardingScreenPreviewCarrierNotReady() {
             state = OnboardingUiState(
                 shizuku = CarrierUiState(CarrierKind.SHIZUKU, installed = true, running = false, granted = false),
                 stellar = CarrierUiState(CarrierKind.STELLAR, installed = false, running = false, granted = false),
+            ),
+            onAction = {},
+            initialPage = 1,
+        )
+    }
+}
+
+@Preview(showBackground = true, name = "引导页-Root（实验）未授权")
+@Composable
+private fun OnboardingScreenPreviewRootChoice() {
+    StayHiFiTheme(dynamicColor = false) {
+        OnboardingScreen(
+            state = OnboardingUiState(
+                providerChoice = ProviderKind.ROOT,
+                root = RootSnapshot(
+                    status = RootStatus.NOT_GRANTED,
+                    granted = false,
+                    shellStatus = RootShellStatus.UNKNOWN,
+                    observedReason = "isAppGrantedRoot=false",
+                ),
             ),
             onAction = {},
             initialPage = 1,

@@ -74,6 +74,7 @@ import com.chengzi.stayhifi.shell.ProviderKind
 import com.chengzi.stayhifi.shell.ProviderOwner
 import com.chengzi.stayhifi.shell.ProviderProbe
 import com.chengzi.stayhifi.shell.ProviderSource
+import com.chengzi.stayhifi.shell.RootVerificationResult
 import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyTriggers
 import com.chengzi.stayhifi.trigger.ApplyWorker
@@ -178,6 +179,8 @@ class MainActivity : ComponentActivity() {
 
     // Task D9：进程级 Coordinator（StayHiFiApp 持有）；本 Activity 以固定 owner 租约访问。
     private val coordinator get() = (application as StayHiFiApp).providerCoordinator
+    // Task D10：Root 状态卡的只读快照流（RootTransport 归 Application 进程级持有）。
+    private val rootTransport get() = (application as StayHiFiApp).rootTransport
     private val activityOwner = ProviderOwner("main-activity")
     private lateinit var settingsRepo: SettingsRepository
     private lateinit var profileRepo: ProfileRepository
@@ -828,6 +831,16 @@ class MainActivity : ComponentActivity() {
             if (wanted.isNotEmpty()) permLauncher.launch(wanted.toTypedArray())
         }
         OnboardingScreen(state = onboardingState, onAction = ::onOnboardingAction)
+        // Task D10：Root 卡与门槛的三路只读数据源——持久选择/生效通道/Root 快照流。
+        // 只进 UI 态，绝不触发授权/写盘；离开 Onboarding 组合即停止收集。
+        LaunchedEffect(Unit) {
+            launch { coordinator.selectedProvider.collect { sel ->
+                onboardingState = onboardingState.copy(selectedProvider = sel) } }
+            launch { coordinator.activeProvider.collect { act ->
+                onboardingState = onboardingState.copy(activeProvider = act) } }
+            launch { rootTransport.state.collect { snap ->
+                onboardingState = onboardingState.copy(root = snap) } }
+        }
     }
 
     private fun onOnboardingAction(action: OnboardingAction) {
@@ -838,6 +851,10 @@ class MainActivity : ComponentActivity() {
             is OnboardingAction.InstallCarrier -> onInstallCarrier(action.kind)
             is OnboardingAction.OpenCarrierGuide -> openPackageOrLog(carrierPackage(action.kind))
             is OnboardingAction.RequestCarrierPermission -> onRequestCarrierPermission()
+            is OnboardingAction.SelectProvider -> onSelectProvider(action.kind)
+            OnboardingAction.RequestRootAuthorization -> onRequestRootAuthorization()
+            OnboardingAction.CancelRootAuthorization ->
+                coordinator.cancelForegroundAttempt(activityOwner)
             OnboardingAction.RefreshConnection -> onRefreshConnection()
             is OnboardingAction.SelectSource ->
                 onboardingState = onboardingState.copy(sourceMode = action.mode)
@@ -857,9 +874,10 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 载体卡状态（Task D9）：installed 仍查包管理器；running/granted 改读当前所选通道的
-     * Coordinator probe（只读，不 bind、不请求授权）。D10 通道选择 UI 落地前，
-     * Onboarding 的持久选择恒为 shizuku，两卡仍反映同一 rikka 通道。
+     * 载体卡状态（Task D9/D10）：installed 仍查包管理器；running/granted 只取
+     * Coordinator probe 的「持久所选」通道事实（只读，不 bind、不请求授权）。
+     * 持久选择为 Root 时，两张载体卡不继承 Root 的运行/授权灯（Root 状态由
+     * RootSnapshot 流独立喂给 Root 卡），仅保留安装态，运行/授权显示为未知。
      */
     private fun refreshCarriers() {
         lifecycleScope.launch {
@@ -868,20 +886,60 @@ class MainActivity : ComponentActivity() {
             val probe = withContext(Dispatchers.IO) {
                 coordinator.probeSelected(ProviderSource.ONBOARDING)
             }
+            val rikkaFacts = probe.takeIf { it.kind == ProviderKind.SHIZUKU }
             onboardingState = onboardingState.copy(
                 shizuku = CarrierUiState(
                     kind = CarrierKind.SHIZUKU,
                     installed = shizukuInstalled,
-                    running = probe.isRunning,
-                    granted = probe.hasPermission,
+                    running = rikkaFacts?.isRunning == true,
+                    granted = rikkaFacts?.hasPermission == true,
                 ),
                 stellar = CarrierUiState(
                     kind = CarrierKind.STELLAR,
                     installed = stellarInstalled,
-                    running = probe.isRunning,
-                    granted = probe.hasPermission,
+                    running = rikkaFacts?.isRunning == true,
+                    granted = rikkaFacts?.hasPermission == true,
                 ),
             )
+        }
+    }
+
+    /**
+     * Task D10：教程内切换通道选择（§11.2）。纯 UI 态——不写 DataStore、不探测、不交互；
+     * 改选同时作废进行中的前台 Root attempt（§11.4.6），迟到成功不得提交。
+     */
+    private fun onSelectProvider(kind: ProviderKind) {
+        if (onboardingState.providerChoice == kind) return
+        coordinator.cancelForegroundAttempt(activityOwner)
+        onboardingState = onboardingState.copy(providerChoice = kind)
+    }
+
+    /**
+     * Task D10：Root 卡「请求 Root 授权」——唯一 Root 交互入口（§11.2/§11.4.6）。
+     * 前台验证+提交全走 Coordinator：auth（单飞）→ bind+健康检查 → commit；
+     * candidate 三者全部成功才写盘，失败/取消只清 candidate。进行中禁用重复点击。
+     */
+    private fun onRequestRootAuthorization() {
+        if (onboardingState.providerOperationInFlight) return
+        onboardingState = onboardingState.copy(providerOperationInFlight = true)
+        lifecycleScope.launch {
+            try {
+                when (val r = coordinator.verifyRootFromForeground(
+                    activityOwner, ProviderSource.ONBOARDING)) {
+                    is RootVerificationResult.Committed ->
+                        LogStore.log("Root 前台验证已提交（generation=${r.generation}）")
+                    is RootVerificationResult.Failed ->
+                        LogStore.log("Root 前台验证失败: ${r.status} ${r.message ?: ""}")
+                    is RootVerificationResult.NotCommitted ->
+                        LogStore.log("Root 验证成功但切换未提交: ${r.reason}")
+                }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                LogStore.log("Root 前台验证异常: $t")
+            } finally {
+                onboardingState = onboardingState.copy(providerOperationInFlight = false)
+            }
         }
     }
 
