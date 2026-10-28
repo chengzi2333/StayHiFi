@@ -130,8 +130,7 @@ fun ManualEditorSheet(
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                // UX 收敛（主 agent 裁决）：说明压成一句，保留「置灰≠不支持」边界
-                text = "自动拉满异常时可在这里降档；置灰仅表示当前连接未提供该档。",
+                text = "拉满后无声或杂音时，可在这里降档；灰色是手机或耳机暂不支持的选项。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
