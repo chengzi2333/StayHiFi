@@ -4,6 +4,8 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 
+import android.annotation.SuppressLint
+
 /**
  * 本机 A2DP 链路状态（Task B4 锁后复查）。
  * UNKNOWN 是兼容回退（读取不可得），不代表「已确认连接」——调用方须如实记录。
@@ -28,6 +30,8 @@ class LocalBluetoothA2dpProbe(context: Context) : LocalA2dpProbe {
         null
     }
 
+    // SecurityException（BLUETOOTH_CONNECT 未授权）按设计落 UNKNOWN，与 CodecService 同款抑制。
+    @SuppressLint("MissingPermission")
     override fun state(mac: String): LocalA2dpState = try {
         stateOf(manager?.getConnectedDevices(BluetoothProfile.A2DP)?.map { it.address }, mac)
     } catch (t: Throwable) {

@@ -75,6 +75,7 @@ import com.chengzi.stayhifi.shell.ProviderOwner
 import com.chengzi.stayhifi.shell.ProviderProbe
 import com.chengzi.stayhifi.shell.ProviderSource
 import com.chengzi.stayhifi.shell.ProviderSwitchResult
+import com.chengzi.stayhifi.shell.RootFeedbackFields
 import com.chengzi.stayhifi.shell.RootVerificationResult
 import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyTriggers
@@ -845,6 +846,8 @@ class MainActivity : ComponentActivity() {
                 // Task B7：反馈脱敏映射仅内存，清空即弃；通用 recorder 的 reset/drain
                 // 已由 ApplyWorker.resetVendorDiagnostics 覆盖（gate 与 suppressedCount 清零）。
                 feedbackLogSanitizer.reset()
+                // Task D12：清空同时重置 Root gate 与 suppressedCount（§11.6）。
+                rootTransport.logger.reset()
                 VendorStackDiagnosticRecorder.shared.drainSuppressedCount()
                 logs = emptyList()
             }
@@ -886,6 +889,8 @@ class MainActivity : ComponentActivity() {
     private fun copyLogs() {
         recordManualSnapshotForCopy()
         drainSuppressedDiagnosticCount()
+        // Task D12：快照前 flush Root gate，被抑制的重复计数随 suppressedCount 带出（§11.6）。
+        rootTransport.logger.flushSuppressed()
         val lines = LogStore.snapshot()
         if (lines.isEmpty()) {
             Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
@@ -914,15 +919,23 @@ class MainActivity : ComponentActivity() {
     private fun copyFeedbackLogs() {
         recordManualSnapshotForCopy()
         drainSuppressedDiagnosticCount()
+        // Task D12：快照前 flush Root gate，被抑制的重复计数随 suppressedCount 带出（§11.6）。
+        rootTransport.logger.flushSuppressed()
         val sanitized = feedbackLogSanitizer.sanitize(LogStore.snapshot())
         if (sanitized.isEmpty()) {
             Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
             return
         }
-        val header = "logSchemaVersion=1 " +
-            "app=v${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) " +
-            "device=${DeviceNames.marketModelWithAndroid()} " +
-            "display=${Build.DISPLAY}"
+        // Task D12：Root 段与手填模板并入同一行 header（单行后缀，不新增报告行）；
+        // 只含可观察状态与手填占位，不自动识别/上传 Root 管理器类型（§11.6/§12）。
+        val header = RootFeedbackFields.header(
+            selectedProvider = coordinator.selectedProvider.value,
+            activeProvider = coordinator.activeProvider.value,
+            root = rootTransport.state.value,
+        ) + " app=v${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE})" +
+            " device=${DeviceNames.marketModelWithAndroid()}" +
+            " display=${Build.DISPLAY}" +
+            " " + RootFeedbackFields.template()
         try {
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(

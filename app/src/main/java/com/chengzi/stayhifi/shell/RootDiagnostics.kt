@@ -97,6 +97,40 @@ data class RootLogEvent(
 )
 
 /**
+ * Task D12：Root 反馈导出字段（设计 §11.6/§12）。
+ *
+ * [header] 只渲染可观察状态：logSchemaVersion、持久 provider、active provider、
+ * transport 状态（枚举名原样）与是否需前台重验；[template] 是纯手填占位
+ * （Root 实现/版本、su 版本、ROM、Android、SELinux），绝不自动识别或上报
+ * Root 管理器类型。两者都是单行，由调用方追加进计划 B 同一行 header，
+ * 不新增报告行（报告仍为 1 行 header + 最近 199 行日志）。
+ */
+object RootFeedbackFields {
+
+    /** 反馈报告 schema 版本（计划 B 定义为 1；Root 段并入同一行，不改版本）。 */
+    const val LOG_SCHEMA_VERSION: Int = 1
+
+    /** 单行 Root 段：只含可观察字段，selected/active 未首读完成时为 null。 */
+    fun header(
+        selectedProvider: ProviderKind?,
+        activeProvider: ProviderKind?,
+        root: RootSnapshot,
+    ): String = buildString {
+        append("logSchemaVersion=").append(LOG_SCHEMA_VERSION)
+        append(" selectedProvider=").append(selectedProvider?.stored ?: "null")
+        append(" activeProvider=").append(activeProvider?.stored ?: "null")
+        append(" rootTransport=").append(root.status.name)
+        append(" needsForegroundRevalidation=")
+            .append(root.status == RootStatus.NEEDS_FOREGROUND_REVALIDATION)
+    }
+
+    /** 单行手填模板：全部是占位符，不含任何自动采集/识别值。 */
+    fun template(): String =
+        "rootImpl=<手填> rootImplVersion=<手填> suVersion=<手填>" +
+            " rom=<手填> android=<手填> selinux=<手填>"
+}
+
+/**
  * Task D3：Root 诊断日志 gate（设计 §11.6）。
  *
  * 去重键 = provider+event+outcome+generation+errorClass：同键重发只累计
