@@ -55,12 +55,18 @@ import com.chengzi.stayhifi.codec.CodecIdentityIssue
 import com.chengzi.stayhifi.codec.CodecOperationLog
 import com.chengzi.stayhifi.codec.CodecPresentation
 import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshot
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.DeviceProfile
+import com.chengzi.stayhifi.codec.DiagnosticSource
+import com.chengzi.stayhifi.codec.DiagnosticTrigger
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.RealtimeDisplay
+import com.chengzi.stayhifi.codec.VendorDiagnosticContext
+import com.chengzi.stayhifi.codec.VendorDiagnosticMetadata
 import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.codec.VendorDiagnosticGate
+import com.chengzi.stayhifi.codec.VendorStackDiagnosticRecorder
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.QsTileService
@@ -153,6 +159,10 @@ class MainActivity : ComponentActivity() {
     private var selectedTab by mutableStateOf(0)
     private var logsVisible by mutableStateOf(false)
     private var logs by mutableStateOf<List<String>>(emptyList())
+
+    // ---- 通用厂商栈诊断（Task B5）：缓存最近一轮 readConfig 快照供 MANUAL 复制复用 ----
+    private var lastDiagnosticSnapshot: CodecStateSnapshot? = null
+    private var lastDiagnosticMac: String? = null
 
     // ---- 自更新（Task 38） ----
     private var updateChecking by mutableStateOf(false)
@@ -647,14 +657,49 @@ class MainActivity : ComponentActivity() {
                 ApplyWorker.resetVendorDiagnostics()
                 CodecIdentityDiagnosticGate.reset()
                 btDiagLast = null
+                // Task B5：清空同时清同轮快照缓存（shared recorder 的 reset 在 ApplyWorker 内）。
+                lastDiagnosticSnapshot = null
+                lastDiagnosticMac = null
                 logs = emptyList()
             }
             LogsAction.Back -> logsVisible = false
         }
     }
 
+    /** Task B5：手动复制前的 MANUAL 留证。只复用最近一轮同轮快照缓存；没有同轮数据时
+     *  只记一行「无同轮快照」，绝不为此重新 bind/readConfig/dump。 */
+    private fun recordManualSnapshotForCopy() {
+        val snapshot = lastDiagnosticSnapshot
+        val mac = lastDiagnosticMac
+        if (snapshot == null || mac == null) {
+            LogStore.log("通用厂商诊断: 无同轮快照，跳过手动留证")
+            return
+        }
+        VendorStackDiagnosticRecorder.shared.record(
+            snapshot,
+            VendorDiagnosticContext(
+                mac = mac,
+                trigger = DiagnosticTrigger.MANUAL,
+                source = DiagnosticSource.MANUAL,
+                timestampMillis = System.currentTimeMillis(),
+                providerKind = DIAGNOSTIC_PROVIDER_KIND,
+                device = VendorDiagnosticMetadata.current(),
+            ),
+        )
+    }
+
+    /** Task B5：复制前把被 gate 抑制的重复计数汇总成一行，随后由 LogStore.snapshot 带出。 */
+    private fun drainSuppressedDiagnosticCount() {
+        val suppressed = VendorStackDiagnosticRecorder.shared.drainSuppressedCount()
+        if (suppressed > 0) {
+            LogStore.log("通用厂商诊断: 已抑制 $suppressed 条重复快照证据")
+        }
+    }
+
     /** 用户主动复制现有内存日志；不新增持久化或上传通道。 */
     private fun copyLogs() {
+        recordManualSnapshotForCopy()
+        drainSuppressedDiagnosticCount()
         val lines = LogStore.snapshot()
         if (lines.isEmpty()) {
             Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
@@ -993,6 +1038,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Task B5：首页轮询轮的通用诊断上下文。device 只读 Build/现有 DeviceNames，
+     * providerKind 如实记录单 rikka 通道（Stellar 透明兼容）；dumpClues 由调用方
+     * 只传入本轮已取 dump 解析出的线索。
+     */
+    private fun homeDiagnosticContext(
+        mac: String, trigger: DiagnosticTrigger, dumpClues: List<String>,
+    ) = VendorDiagnosticContext(
+        mac = mac,
+        trigger = trigger,
+        source = DiagnosticSource.HOME,
+        timestampMillis = System.currentTimeMillis(),
+        providerKind = DIAGNOSTIC_PROVIDER_KIND,
+        device = VendorDiagnosticMetadata.current(),
+        dumpClues = dumpClues,
+    )
+
     // 每次刷新递增代次；慢读取可并发，但只有最新轮次允许写首页状态与 PCM 前值。
     @Volatile private var refreshGeneration = 0L
 
@@ -1098,6 +1160,13 @@ class MainActivity : ComponentActivity() {
                 val snapshot = CodecStateSnapshotJson.parse(stateJson)
                 val presentation = CodecSnapshotPresenter.present(snapshot)
                 if (presentation == null) {
+                    // Task B5：current 缺失轮也留证（currentNull 等 reason）并缓存同轮快照。
+                    val diagContext = homeDiagnosticContext(
+                        mac, DiagnosticTrigger.CODEC_UPDATE, dumpClues = emptyList(),
+                    )
+                    VendorStackDiagnosticRecorder.shared.record(snapshot, diagContext)
+                    lastDiagnosticSnapshot = snapshot
+                    lastDiagnosticMac = mac
                     if (gen != refreshGeneration) return@launch
                     homeState = homeState.copy(
                         headsetName = null, codec = null, rate = null,
@@ -1209,6 +1278,20 @@ class MainActivity : ComponentActivity() {
                             .forEach { LogStore.log("dumpsys线索: $it") }
                     }
                 }
+                // Task B5：同一轮 readConfig 的通用厂商栈留证——播放中 PLAYING、否则 CODEC_UPDATE；
+                // dumpClues 只复用本轮已取的 dump（不新增 dumpBtState 调用）。旧 dumpsys 证据/
+                // 24 行线索与专用 gate 仍负责原实时诊断，通用 recorder 不重复 raw current 块。
+                lastDiagnosticSnapshot = snapshot
+                lastDiagnosticMac = mac
+                VendorStackDiagnosticRecorder.shared.record(
+                    snapshot,
+                    homeDiagnosticContext(
+                        mac,
+                        trigger = if (isMusicActive) DiagnosticTrigger.PLAYING
+                            else DiagnosticTrigger.CODEC_UPDATE,
+                        dumpClues = btDump?.let { VendorDiagnostics.dumpClues(it) }.orEmpty(),
+                    ),
+                )
                 if (gen != refreshGeneration) return@launch
                 homeState = homeState.copy(
                     headsetName = name,
@@ -1332,6 +1415,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val STELLAR_PACKAGE = "roro.stellar.manager"
+        /** Task B5：单一 rikka 通道（Stellar 透明兼容），诊断 providerKind 如实记录。 */
+        private const val DIAGNOSTIC_PROVIDER_KIND = "shizuku"
         /** Task 38：自动更新检查节流间隔（24h）。 */
         private const val AUTO_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
         /** Task 38：自动弹窗每进程最多一次（伴生对象，配置变更重建后仍记得已弹过）。 */

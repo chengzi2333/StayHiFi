@@ -13,12 +13,18 @@ import com.chengzi.stayhifi.codec.CodecIdentityIssue
 import com.chengzi.stayhifi.codec.CodecOperationLog
 import com.chengzi.stayhifi.codec.CodecPresentation
 import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshot
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.DeviceProfile
+import com.chengzi.stayhifi.codec.DiagnosticSource
+import com.chengzi.stayhifi.codec.DiagnosticTrigger
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Negotiation
+import com.chengzi.stayhifi.codec.VendorDiagnosticContext
+import com.chengzi.stayhifi.codec.VendorDiagnosticMetadata
 import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.codec.VendorDiagnosticGate
+import com.chengzi.stayhifi.codec.VendorStackDiagnosticRecorder
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
@@ -93,6 +99,20 @@ class ApplyWorker(context: Context) {
     private fun summary(config: CodecConfig, identity: CodecIdentity): String =
         CodecOperationLog.resolvedSummary(config, identity)
 
+    /**
+     * Task B5：通用厂商栈诊断上下文（CONNECTION/APPLY）。只读 Build/现有 DeviceNames，
+     * 单 rikka 通道（Stellar 透明兼容），不新增任何载体 IO；dumpClues 留空——
+     * ApplyWorker 的 dumpsys 证据/24 行线索仍由旧专用 gate 负责，避免重复 raw 块。
+     */
+    private fun diagnosticContext(mac: String) = VendorDiagnosticContext(
+        mac = mac,
+        trigger = DiagnosticTrigger.CONNECTION,
+        source = DiagnosticSource.APPLY,
+        timestampMillis = System.currentTimeMillis(),
+        providerKind = DIAGNOSTIC_PROVIDER_KIND,
+        device = VendorDiagnosticMetadata.current(),
+    )
+
     suspend fun run(mac: String?, name: String?, force: Boolean = false) {
         val target = mac?.takeIf { it.isNotBlank() } ?: run {
             log("ACL_CONNECTED 无设备地址，跳过")
@@ -127,7 +147,19 @@ class ApplyWorker(context: Context) {
                 return
             }
             delay(SETTLE_MS)
-            val settled = readState(service, mac) ?: return
+            // Task B5：settled 快照在统一解析点留证——解析 Throwable 走 recordFailure，
+            // error JSON 同样留失败证据；正常 settled snapshot 进入通用 recorder
+            // （有 reason 或状态跃迁才留行，重复轮询由 gate 抑制），不新增任何载体 IO。
+            val diagContext = diagnosticContext(mac)
+            val settledJson = withContext(Dispatchers.IO) { service.readConfig(mac) }
+            val settledSnapshot = parseSettledSnapshot(settledJson, diagContext) ?: return
+            val settledPresentation = CodecSnapshotPresenter.present(settledSnapshot) ?: run {
+                // current 缺失（null/解析降级）：currentNull 等 reason 照常留证。
+                vendorStackRecorder.record(settledSnapshot, diagContext)
+                return
+            }
+            val settled = DeviceState(settledPresentation, settledSnapshot)
+            vendorStackRecorder.record(settledSnapshot, diagContext)
             recordIdentityConflict(mac, settled.presentation)
             log("当前配置: ${settled.presentation.summary.text()}")
             // Task 53：轻量厂商诊断（仅现有 LogStore，不改写入/映射行为）——
@@ -432,11 +464,33 @@ class ApplyWorker(context: Context) {
         } else {
             val snapshot = CodecStateSnapshotJson.parse(json)
             CodecSnapshotPresenter.present(snapshot)?.let { presentation ->
-                DeviceState(presentation, snapshot.selectable)
+                DeviceState(presentation, snapshot)
             }
         }
     } catch (t: Throwable) {
         log("readConfig 结果解析失败: $t")
+        null
+    }
+
+    /**
+     * Task B5：settled 快照的解析与失败留证。error JSON 与解析 Throwable 都走
+     * recordFailure（分阶段 root cause，重复失败被 gate 抑制），返回 null 结束本轮；
+     * 正常解析返回完整 snapshot 供通用 recorder 与后续主链路共用（不新增读取）。
+     */
+    private fun parseSettledSnapshot(
+        json: String, context: VendorDiagnosticContext,
+    ): CodecStateSnapshot? = try {
+        val obj = JSONObject(json)
+        if (obj.has("error")) {
+            vendorStackRecorder.recordFailure(
+                context, "readConfig", IllegalStateException(obj.optString("error")),
+            )
+            null
+        } else {
+            CodecStateSnapshotJson.parse(json)
+        }
+    } catch (t: Throwable) {
+        vendorStackRecorder.recordFailure(context, "readConfig 解析", t)
         null
     }
 
@@ -467,9 +521,10 @@ class ApplyWorker(context: Context) {
 
     private data class DeviceState(
         val presentation: CodecPresentation,
-        val selectable: List<CodecConfig>,
+        val snapshot: CodecStateSnapshot,
     ) {
         val current: CodecConfig get() = presentation.current
+        val selectable: List<CodecConfig> get() = snapshot.selectable
     }
 
     /** 恢复默认载体的环境接缝（Task B4，JVM 单测注入 fake；默认即生产实现，见 [restoreEnv]）。 */
@@ -492,6 +547,11 @@ class ApplyWorker(context: Context) {
         private const val SETTLE_MS = 1500L             // 等 A2DP 协商稳定
         private const val OUTER_RETRIES = 3             // 读回不一致重试次数
         private const val RETRY_DELAY_MS = 1000L
+        /** Task B5：单一 rikka 通道（Stellar 透明兼容），诊断 providerKind 如实记录。 */
+        private const val DIAGNOSTIC_PROVIDER_KIND = "shizuku"
+
+        /** Task B5：ApplyWorker 与 MainActivity 共用的通用厂商栈 recorder。 */
+        private val vendorStackRecorder = VendorStackDiagnosticRecorder.shared
 
         /** Task 53：ApplyWorker 只用固定 apply-dump 类别做首次配置去重。 */
         private val vendorDiagnosticGate = VendorDiagnosticGate()
@@ -503,6 +563,7 @@ class ApplyWorker(context: Context) {
         /** 日志页清空后允许「重连一次」重新留下同配置证据。 */
         internal fun resetVendorDiagnostics() {
             vendorDiagnosticGate.reset()
+            vendorStackRecorder.reset()
         }
     }
 }
