@@ -39,7 +39,6 @@ data class LogsUiState(
 /** 日志页动作：上抛，本层无逻辑。 */
 sealed interface LogsAction {
     data object Copy : LogsAction
-    data object CopyFeedback : LogsAction
     data object Clear : LogsAction
     data object Back : LogsAction
 }
@@ -101,8 +100,9 @@ fun LogsScreen(
                     )
                 }
             }
-            // Task B7：三个动作（复制日志/复制反馈日志/清空）放可横向滑动的 Row，
-            // 小屏宁可滑动也不裁掉动作。
+            // Task B7：动作（复制日志/清空）放可横向滑动的 Row，
+            // 小屏宁可滑动也不裁掉动作。日志页只有「复制日志」一个复制入口：
+            // 输出即脱敏且排障信息完整，用户无需在原始/反馈之间做选择。
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -120,13 +120,6 @@ fun LogsScreen(
                     modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Text("复制日志")
-                }
-                TextButton(
-                    onClick = { onAction(LogsAction.CopyFeedback) },
-                    enabled = state.lines.isNotEmpty(),
-                    modifier = Modifier.heightIn(min = 48.dp),
-                ) {
-                    Text("复制反馈日志")
                 }
                 TextButton(
                     onClick = { onAction(LogsAction.Clear) },

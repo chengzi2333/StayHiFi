@@ -835,7 +835,6 @@ class MainActivity : ComponentActivity() {
     private fun onLogsAction(action: LogsAction) {
         when (action) {
             LogsAction.Copy -> copyLogs()
-            LogsAction.CopyFeedback -> copyFeedbackLogs()
             LogsAction.Clear -> {
                 LogStore.clear()
                 resetVendorDiagnostics()
@@ -889,38 +888,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 用户主动复制现有内存日志；不新增持久化或上传通道。 */
-    private fun copyLogs() {
-        recordManualSnapshotForCopy()
-        drainSuppressedDiagnosticCount()
-        // Task D12：快照前 flush Root gate，被抑制的重复计数随 suppressedCount 带出（§11.6）。
-        rootTransport.logger.flushSuppressed()
-        val lines = LogStore.snapshot()
-        if (lines.isEmpty()) {
-            Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val header = "StayHiFi v${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) · " +
-            "${DeviceNames.marketModelWithAndroid()} · ${Build.DISPLAY}"
-        try {
-            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(
-                ClipData.newPlainText("StayHiFi 运行日志", (listOf(header) + lines).joinToString("\n"))
-            )
-            Toast.makeText(this, "已复制 ${lines.size} 条日志", Toast.LENGTH_SHORT).show()
-        } catch (t: Throwable) {
-            LogStore.log("复制日志失败: $t")
-            Toast.makeText(this, "复制失败，请查看日志页", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     /**
-     * Task B7：复制脱敏反馈日志。MANUAL 留证与 suppressedCount drain 复用 Task B5 同款
-     * 同轮快照逻辑（无缓存不读载体）；sanitizer 只接收日志行，MAC/设备名在单次报告内
-     * 稳定映射 deviceN；输出前加 1 行 header，总行数最多 200（199 行日志 + 1 行 header）。
-     * 原 [copyLogs] 保持未脱敏原文与 label，二者互不调用。
+     * 唯一的日志复制入口（原 Task B7 脱敏反馈路径升级为默认路径）：MANUAL 留证与
+     * suppressedCount drain 复用 Task B5 同款同轮快照逻辑（无缓存不读载体）；
+     * sanitizer 只接收日志行，MAC/设备名在单次报告内稳定映射 deviceN；输出前加 1 行
+     * header（含 RootFeedbackFields 与手填模板），总行数最多 200（199 行日志 + 1 行
+     * header）。剪贴板 label 与 Toast 用普通排障语境，不区分原始/反馈。
      */
-    private fun copyFeedbackLogs() {
+    private fun copyLogs() {
         recordManualSnapshotForCopy()
         drainSuppressedDiagnosticCount()
         // Task D12：快照前 flush Root gate，被抑制的重复计数随 suppressedCount 带出（§11.6）。
@@ -943,11 +918,11 @@ class MainActivity : ComponentActivity() {
         try {
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(
-                ClipData.newPlainText("StayHiFi 反馈日志", "$header\n$sanitized")
+                ClipData.newPlainText("StayHiFi 日志", "$header\n$sanitized")
             )
-            Toast.makeText(this, "已复制脱敏反馈日志", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已复制日志，可直接粘贴给作者排障", Toast.LENGTH_SHORT).show()
         } catch (t: Throwable) {
-            LogStore.log("复制反馈日志失败: $t")
+            LogStore.log("复制日志失败: $t")
             Toast.makeText(this, "复制失败，请查看日志页", Toast.LENGTH_SHORT).show()
         }
     }
