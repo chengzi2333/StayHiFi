@@ -1,5 +1,6 @@
 package com.chengzi.stayhifi.ui.logs
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Card
@@ -37,6 +39,7 @@ data class LogsUiState(
 /** 日志页动作：上抛，本层无逻辑。 */
 sealed interface LogsAction {
     data object Copy : LogsAction
+    data object CopyFeedback : LogsAction
     data object Clear : LogsAction
     data object Back : LogsAction
 }
@@ -98,15 +101,18 @@ fun LogsScreen(
                     )
                 }
             }
+            // Task B7：三个动作（复制日志/复制反馈日志/清空）放可横向滑动的 Row，
+            // 小屏宁可滑动也不裁掉动作。
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     text = "${state.lines.size} 条",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
                 )
                 TextButton(
                     onClick = { onAction(LogsAction.Copy) },
@@ -114,6 +120,13 @@ fun LogsScreen(
                     modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Text("复制日志")
+                }
+                TextButton(
+                    onClick = { onAction(LogsAction.CopyFeedback) },
+                    enabled = state.lines.isNotEmpty(),
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text("复制反馈日志")
                 }
                 TextButton(
                     onClick = { onAction(LogsAction.Clear) },

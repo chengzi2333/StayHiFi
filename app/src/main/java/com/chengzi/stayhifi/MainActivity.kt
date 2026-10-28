@@ -164,6 +164,9 @@ class MainActivity : ComponentActivity() {
     private var lastDiagnosticSnapshot: CodecStateSnapshot? = null
     private var lastDiagnosticMac: String? = null
 
+    // ---- 反馈日志脱敏（Task B7）：仅内存，映射不写入 DataStore/文件、不跨报告跟踪 ----
+    private val feedbackLogSanitizer = FeedbackLogSanitizer()
+
     // ---- 自更新（Task 38） ----
     private var updateChecking by mutableStateOf(false)
     private var updateMessage by mutableStateOf<String?>(null)
@@ -651,6 +654,7 @@ class MainActivity : ComponentActivity() {
     private fun onLogsAction(action: LogsAction) {
         when (action) {
             LogsAction.Copy -> copyLogs()
+            LogsAction.CopyFeedback -> copyFeedbackLogs()
             LogsAction.Clear -> {
                 LogStore.clear()
                 resetVendorDiagnostics()
@@ -660,6 +664,10 @@ class MainActivity : ComponentActivity() {
                 // Task B5：清空同时清同轮快照缓存（shared recorder 的 reset 在 ApplyWorker 内）。
                 lastDiagnosticSnapshot = null
                 lastDiagnosticMac = null
+                // Task B7：反馈脱敏映射仅内存，清空即弃；通用 recorder 的 reset/drain
+                // 已由 ApplyWorker.resetVendorDiagnostics 覆盖（gate 与 suppressedCount 清零）。
+                feedbackLogSanitizer.reset()
+                VendorStackDiagnosticRecorder.shared.drainSuppressedCount()
                 logs = emptyList()
             }
             LogsAction.Back -> logsVisible = false
@@ -715,6 +723,36 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "已复制 ${lines.size} 条日志", Toast.LENGTH_SHORT).show()
         } catch (t: Throwable) {
             LogStore.log("复制日志失败: $t")
+            Toast.makeText(this, "复制失败，请查看日志页", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * Task B7：复制脱敏反馈日志。MANUAL 留证与 suppressedCount drain 复用 Task B5 同款
+     * 同轮快照逻辑（无缓存不读载体）；sanitizer 只接收日志行，MAC/设备名在单次报告内
+     * 稳定映射 deviceN；输出前加 1 行 header，总行数最多 200（199 行日志 + 1 行 header）。
+     * 原 [copyLogs] 保持未脱敏原文与 label，二者互不调用。
+     */
+    private fun copyFeedbackLogs() {
+        recordManualSnapshotForCopy()
+        drainSuppressedDiagnosticCount()
+        val sanitized = feedbackLogSanitizer.sanitize(LogStore.snapshot())
+        if (sanitized.isEmpty()) {
+            Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val header = "logSchemaVersion=1 " +
+            "app=v${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) " +
+            "device=${DeviceNames.marketModelWithAndroid()} " +
+            "display=${Build.DISPLAY}"
+        try {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("StayHiFi 反馈日志", "$header\n$sanitized")
+            )
+            Toast.makeText(this, "已复制脱敏反馈日志", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            LogStore.log("复制反馈日志失败: $t")
             Toast.makeText(this, "复制失败，请查看日志页", Toast.LENGTH_SHORT).show()
         }
     }
