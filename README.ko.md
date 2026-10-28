@@ -23,6 +23,7 @@ StayHiFi가 이 귀찮은 일을 대신합니다. 헤드폰이 연결되는 순�
   <img src="docs/assets/screenshots/01-home.png" width="260" alt="홈 상태 카드">
   <img src="docs/assets/screenshots/02-devices.png" width="260" alt="기기 페이지">
   <img src="docs/assets/screenshots/03-settings.png" width="260" alt="설정 페이지">
+  <img src="docs/assets/screenshots/04-custom.png" width="260" alt="사용자 지정 음질 파라미터 페이지">
 </p>
 
 ## 주요 기능

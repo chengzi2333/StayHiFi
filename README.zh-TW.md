@@ -23,6 +23,7 @@ StayHiFi 替你盯死這件事：連上耳機的一瞬間，把參數寫回這�
   <img src="docs/assets/screenshots/01-home.png" width="260" alt="首頁狀態卡">
   <img src="docs/assets/screenshots/02-devices.png" width="260" alt="裝置頁">
   <img src="docs/assets/screenshots/03-settings.png" width="260" alt="設定頁">
+  <img src="docs/assets/screenshots/04-custom.png" width="260" alt="自訂音質參數頁">
 </p>
 
 ## 功能特性

@@ -23,6 +23,7 @@ StayHiFi takes that chore off your plate: the instant a headset connects, it wri
   <img src="docs/assets/screenshots/01-home.png" width="260" alt="Home status card">
   <img src="docs/assets/screenshots/02-devices.png" width="260" alt="Devices page">
   <img src="docs/assets/screenshots/03-settings.png" width="260" alt="Settings page">
+  <img src="docs/assets/screenshots/04-custom.png" width="260" alt="Custom Quality parameters">
 </p>
 
 ## Features

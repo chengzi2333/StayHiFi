@@ -23,6 +23,7 @@ StayHiFi 替你盯死这件事：连上耳机的一瞬间，把参数写回这�
   <img src="docs/assets/screenshots/01-home.png" width="260" alt="首页状态卡">
   <img src="docs/assets/screenshots/02-devices.png" width="260" alt="设备页">
   <img src="docs/assets/screenshots/03-settings.png" width="260" alt="设置页">
+  <img src="docs/assets/screenshots/04-custom.png" width="260" alt="自定义音质参数页">
 </p>
 
 ## 功能特性
