@@ -68,6 +68,21 @@ enum class RootLogEventKind {
 }
 
 /**
+ * RootLogEvent 的 Coordinator 上下文（§11.6 generation/selectedProvider/activeProvider）。
+ * 由 RootTransport 构造注入（生产接线 ProviderCoordinator 当前值），日志落笔时取值。
+ */
+data class RootLogContext(
+    val generation: Long,
+    val selected: ProviderKind?,
+    val active: ProviderKind?,
+) {
+    companion object {
+        /** 未接线/测试默认：与 D7 前硬编码等价（generation=0、selected/active=null）。 */
+        val EMPTY = RootLogContext(0L, null, null)
+    }
+}
+
+/**
  * 一条 Root 诊断事件（字段对应设计 §11.6 日志行）。
  * [observedReason] 只写事实；[reasonHint] 是推测，渲染时另列 hint= 字段。
  * [rootCause] 渲染前经 [sanitizeRootCause] 清洗（≤3 层、≤240 字符）。
@@ -121,7 +136,9 @@ object RootFeedbackFields {
         append(" activeProvider=").append(activeProvider?.stored ?: "null")
         append(" rootTransport=").append(root.status.name)
         append(" needsForegroundRevalidation=")
-            .append(root.status == RootStatus.NEEDS_FOREGROUND_REVALIDATION)
+            // active=ROOT 且 transport 非 READY（含 UNVERIFIED/DISCONNECTED/BIND_* 等）
+            // 都需前台重验；active=SHIZUKU 时当前通道不依赖 Root transport，恒为 false。
+            .append(activeProvider == ProviderKind.ROOT && root.status != RootStatus.READY)
     }
 
     /** 单行手填模板：全部是占位符，不含任何自动采集/识别值。 */

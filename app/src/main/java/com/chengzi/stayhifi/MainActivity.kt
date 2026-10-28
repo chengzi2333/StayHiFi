@@ -234,6 +234,8 @@ class MainActivity : ComponentActivity() {
     // ---- 通用厂商栈诊断（Task B5）：缓存最近一轮 readConfig 快照供 MANUAL 复制复用 ----
     private var lastDiagnosticSnapshot: CodecStateSnapshot? = null
     private var lastDiagnosticMac: String? = null
+    /** 快照采集时的实际通道（final review fix）：MANUAL 复制留证复用它，不拿复制当下通道冒充。 */
+    private var lastDiagnosticProviderKind: String? = null
 
     // ---- 反馈日志脱敏（Task B7）：仅内存，映射不写入 DataStore/文件、不跨报告跟踪 ----
     private val feedbackLogSanitizer = FeedbackLogSanitizer()
@@ -843,6 +845,7 @@ class MainActivity : ComponentActivity() {
                 // Task B5：清空同时清同轮快照缓存（shared recorder 的 reset 在 ApplyWorker 内）。
                 lastDiagnosticSnapshot = null
                 lastDiagnosticMac = null
+                lastDiagnosticProviderKind = null
                 // Task B7：反馈脱敏映射仅内存，清空即弃；通用 recorder 的 reset/drain
                 // 已由 ApplyWorker.resetVendorDiagnostics 覆盖（gate 与 suppressedCount 清零）。
                 feedbackLogSanitizer.reset()
@@ -871,7 +874,8 @@ class MainActivity : ComponentActivity() {
                 trigger = DiagnosticTrigger.MANUAL,
                 source = DiagnosticSource.MANUAL,
                 timestampMillis = System.currentTimeMillis(),
-                providerKind = DIAGNOSTIC_PROVIDER_KIND,
+                // final review fix：复用快照采集时的 provider kind，不拿复制当下通道冒充
+                providerKind = lastDiagnosticProviderKind ?: DIAGNOSTIC_PROVIDER_KIND,
                 device = VendorDiagnosticMetadata.current(),
             ),
         )
@@ -1387,18 +1391,18 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Task B5：首页轮询轮的通用诊断上下文。device 只读 Build/现有 DeviceNames，
-     * providerKind 如实记录单 rikka 通道（Stellar 透明兼容）；dumpClues 由调用方
-     * 只传入本轮已取 dump 解析出的线索。
+     * Task B5：首页轮询轮的通用诊断上下文。device 只读 Build/现有 DeviceNames；
+     * [providerKind] 如实记录本轮实际 lease 通道（final review fix：Root 快照不再误标 shizuku）；
+     * dumpClues 由调用方只传入本轮已取 dump 解析出的线索。
      */
     private fun homeDiagnosticContext(
-        mac: String, trigger: DiagnosticTrigger, dumpClues: List<String>,
+        mac: String, trigger: DiagnosticTrigger, dumpClues: List<String>, providerKind: String,
     ) = VendorDiagnosticContext(
         mac = mac,
         trigger = trigger,
         source = DiagnosticSource.HOME,
         timestampMillis = System.currentTimeMillis(),
-        providerKind = DIAGNOSTIC_PROVIDER_KIND,
+        providerKind = providerKind,
         device = VendorDiagnosticMetadata.current(),
         dumpClues = dumpClues,
     )
@@ -1522,10 +1526,12 @@ class MainActivity : ComponentActivity() {
                             // Task B5：current 缺失轮也留证（currentNull 等 reason）并缓存同轮快照。
                             val diagContext = homeDiagnosticContext(
                                 mac, DiagnosticTrigger.CODEC_UPDATE, dumpClues = emptyList(),
+                                providerKind = lease.kind.stored,
                             )
                             VendorStackDiagnosticRecorder.shared.record(snapshot, diagContext)
                             lastDiagnosticSnapshot = snapshot
                             lastDiagnosticMac = mac
+                            lastDiagnosticProviderKind = lease.kind.stored
                             if (gen != refreshGeneration || !lease.isCurrent()) return@withService
                             homeState = homeState.copy(
                                 headsetName = null, codec = null, rate = null,
@@ -1642,6 +1648,7 @@ class MainActivity : ComponentActivity() {
                         // 24 行线索与专用 gate 仍负责原实时诊断，通用 recorder 不重复 raw current 块。
                         lastDiagnosticSnapshot = snapshot
                         lastDiagnosticMac = mac
+                        lastDiagnosticProviderKind = lease.kind.stored
                         VendorStackDiagnosticRecorder.shared.record(
                             snapshot,
                             homeDiagnosticContext(
@@ -1649,6 +1656,7 @@ class MainActivity : ComponentActivity() {
                                 trigger = if (isMusicActive) DiagnosticTrigger.PLAYING
                                     else DiagnosticTrigger.CODEC_UPDATE,
                                 dumpClues = btDump?.let { VendorDiagnostics.dumpClues(it) }.orEmpty(),
+                                providerKind = lease.kind.stored,
                             ),
                         )
                         // Task D9：refreshGeneration + lease.generation 双重代次守卫，
@@ -1793,7 +1801,7 @@ class MainActivity : ComponentActivity() {
         private const val STELLAR_PACKAGE = "roro.stellar.manager"
         /** Task D11：Root 修复入口 extra——onCreate/onNewIntent 消费后打开设置 tab 并展开 Root 区。 */
         const val EXTRA_OPEN_ROOT_SETTINGS = "com.chengzi.stayhifi.extra.OPEN_ROOT_SETTINGS"
-        /** Task B5：单一 rikka 通道（Stellar 透明兼容），诊断 providerKind 如实记录。 */
+        /** Task B5：诊断 providerKind 兜底值（无同轮快照通道记录时的旧默认；正常路径一律用采集时的 lease.kind）。 */
         private const val DIAGNOSTIC_PROVIDER_KIND = "shizuku"
         /** Task 38：自动更新检查节流间隔（24h）。 */
         private const val AUTO_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000

@@ -121,6 +121,39 @@ class ProviderCoordinator(
     private val generationCounter = AtomicLong(0)
     @Volatile private var generation: Long = 0
 
+    // ── final review fix：切换写盘的迟到完成防护（§11.3 超时/取消保留原选择） ──
+    /** 一次切换事务的写盘句柄；[confirmed] 只在 setRawSelection 正常返回后成立。 */
+    private class StoreWrite(val stored: String) {
+        @Volatile var confirmed = false
+    }
+    private val storeWriteLock = Any()
+    private var activeStoreWrite: StoreWrite? = null
+    /** 已判超时/失败/取消但底层可能迟完成的写盘值：其回读一律忽略，不得采用为当前选择。 */
+    private val staleStoreWrites = mutableSetOf<String>()
+
+    private fun beginStoreWrite(stored: String): StoreWrite {
+        val write = StoreWrite(stored)
+        synchronized(storeWriteLock) { activeStoreWrite = write }
+        return write
+    }
+
+    /** setRawSelection 正常返回才算写盘成功；同值旧 stale 记录一并清除（值已确认落盘）。 */
+    private fun confirmStoreWrite(write: StoreWrite) {
+        synchronized(storeWriteLock) {
+            write.confirmed = true
+            if (activeStoreWrite === write) activeStoreWrite = null
+            staleStoreWrites.remove(write.stored)
+        }
+    }
+
+    /** 超时/失败/取消：底层写可能仍迟完成并回读；该回读不得采用已放弃的 target。 */
+    private fun abandonStoreWrite(write: StoreWrite) {
+        synchronized(storeWriteLock) {
+            if (activeStoreWrite === write) activeStoreWrite = null
+            staleStoreWrites.add(write.stored)
+        }
+    }
+
     // ── Task D7：切换事务状态 ──
     /** 代次水位线：generation <= [staleWatermark] 的 lease 一律视为已作废（事务内先作废旧代次）。 */
     @Volatile private var staleWatermark: Long = -1L
@@ -133,6 +166,20 @@ class ProviderCoordinator(
     init {
         applicationScope.launch {
             store.rawSelection.collect { raw ->
+                // 迟到写盘防护：本事务尚未确认（commitSwitch 成功分支会直接发布状态，回读冗余）
+                // 或已放弃的写若稍后完成并回读，一律不得把选择改成该 target（§11.3 超时保留原选择）。
+                val adopt = synchronized(storeWriteLock) {
+                    val inFlight = activeStoreWrite
+                    when {
+                        raw != null && inFlight != null && raw == inFlight.stored -> inFlight.confirmed
+                        raw != null && staleStoreWrites.remove(raw) -> false
+                        else -> true
+                    }
+                }
+                if (!adopt) {
+                    log("忽略已放弃/未确认切换事务的迟到写盘回读: '$raw'，保留当前选择")
+                    return@collect
+                }
                 val kind = ProviderKind.fromStored(raw)
                 if (raw != null && raw != ProviderKind.SHIZUKU.stored &&
                     raw != ProviderKind.ROOT.stored && loggedUnknownValues.add(raw)) {
@@ -353,11 +400,17 @@ class ProviderCoordinator(
                 if (target != ProviderKind.ROOT) {
                     rootTransport?.disconnectAnchor()
                 }
+                val storeWrite = beginStoreWrite(target.stored)
                 try {
                     store.setRawSelection(target.stored)
+                    // 正常返回才算写盘成功；随后成功分支直接发布新代次与选择
+                    confirmStoreWrite(storeWrite)
                 } catch (ce: CancellationException) {
+                    // 超时/取消：底层写可能不可取消、稍后仍完成并回读——登记 stale，回读不得采用
+                    abandonStoreWrite(storeWrite)
                     throw ce
                 } catch (t: Throwable) {
+                    abandonStoreWrite(storeWrite)
                     persistFailure = t
                 }
             }

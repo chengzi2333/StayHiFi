@@ -70,6 +70,57 @@ class RootFeedbackHeaderTest {
         assertTrue(header.contains("UNVERIFIED"))
     }
 
+    // ─────────────────────────── needsForegroundRevalidation 语义（final review fix） ───────────────────────────
+
+    @Test
+    fun coldRootWithActiveRootNeedsRevalidation() {
+        val header = RootFeedbackFields.header(
+            selectedProvider = ProviderKind.ROOT,
+            activeProvider = ProviderKind.ROOT,
+            root = failureSnapshot(status = RootStatus.UNVERIFIED, granted = null),
+        )
+        assertTrue("active=root 且 transport 冷启动 UNVERIFIED（非 READY）必须表达需前台重验",
+            header.contains("needsForegroundRevalidation=true"))
+    }
+
+    @Test
+    fun nonReadyRootTransportWithActiveRootNeedsRevalidation() {
+        for (status in listOf(
+            RootStatus.DISCONNECTED, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED,
+            RootStatus.BIND_NULL, RootStatus.GRANTED_NOT_READY,
+        )) {
+            val header = RootFeedbackFields.header(
+                selectedProvider = ProviderKind.ROOT,
+                activeProvider = ProviderKind.ROOT,
+                root = failureSnapshot(status = status),
+            )
+            assertTrue("active=root 且 transport=$status 非 READY 必须表达需前台重验",
+                header.contains("needsForegroundRevalidation=true"))
+        }
+    }
+
+    @Test
+    fun readyRootTransportDoesNotNeedRevalidation() {
+        val header = RootFeedbackFields.header(
+            selectedProvider = ProviderKind.ROOT,
+            activeProvider = ProviderKind.ROOT,
+            root = failureSnapshot(status = RootStatus.READY),
+        )
+        assertTrue("active=root 且 transport READY 不需重验",
+            header.contains("needsForegroundRevalidation=false"))
+    }
+
+    @Test
+    fun activeShizukuNeverNeedsRevalidationEvenWithStaleRootStatus() {
+        val header = RootFeedbackFields.header(
+            selectedProvider = ProviderKind.ROOT,
+            activeProvider = ProviderKind.SHIZUKU,
+            root = failureSnapshot(status = RootStatus.NEEDS_FOREGROUND_REVALIDATION),
+        )
+        assertTrue("active=shizuku 时恒为 false（当前通道不依赖 Root transport）",
+            header.contains("needsForegroundRevalidation=false"))
+    }
+
     // ─────────────────────────── template 手填项 ───────────────────────────
 
     @Test

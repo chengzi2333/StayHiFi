@@ -74,6 +74,9 @@ class RootTransport(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val bindTimeoutMs: Long = DEFAULT_BIND_TIMEOUT_MS,
     private val healthTimeoutMs: Long = DEFAULT_HEALTH_TIMEOUT_MS,
+    /** RootLogEvent 的 generation/selected/active 上下文（§11.6）；生产由 StayHiFiApp 接线
+     *  ProviderCoordinator 当前值，默认空上下文（测试可注入固定值）。 */
+    private val logContext: () -> RootLogContext = { RootLogContext.EMPTY },
 ) {
 
     private val _state = MutableStateFlow(
@@ -133,6 +136,11 @@ class RootTransport(
     private val bindings = mutableMapOf<Long, BindingRecord>()
     private var nextBindingId = 0L
     private var anchorCandidate: RootCandidate? = null
+
+    /** 同一 transport 同时只允许一个 bind（§11.4.8）：并发 bindAndCheck 单飞串行，
+     *  同 candidate 的第二路在锁内看到 service 已就绪直接复用，不重复 backend.bind。
+     *  协程 Mutex：取消/异常由 withLock 保证释放。 */
+    private val bindMutex = Mutex()
 
     /**
      * 显式前台授权入口（教程/设置点击）。单飞； granted=false 直接终态 NOT_GRANTED。
@@ -273,7 +281,7 @@ class RootTransport(
      * 10 秒 bind watchdog 与 8 秒 health watchdog 都只标记自有等待结束，不冒充底层取消；
      * 迟到的连接/IPC 归还在回调里完成清理（主线程幂等 unbind）。成功后 candidate 提升为进程级 anchor。
      */
-    suspend fun bindAndCheck(candidate: RootCandidate): RootCandidate {
+    suspend fun bindAndCheck(candidate: RootCandidate): RootCandidate = bindMutex.withLock {
         candidate.service?.let { return candidate }
         ensureCandidateCurrent(candidate)
         publish(RootStatus.BINDING, reason = "bind RootCodecService")
@@ -490,15 +498,16 @@ class RootTransport(
         val source = synchronized(lock) {
             records[candidate.attemptId]?.attempt?.source
         } ?: ProviderSource.SETTINGS
+        val ctx = logContext()
         logger.log(
             RootLogEvent(
                 provider = ProviderKind.ROOT,
                 event = kind,
                 source = source,
                 attemptId = candidate.attemptId.toString(),
-                generation = 0L,
-                selected = null,
-                active = null,
+                generation = ctx.generation,
+                selected = ctx.selected,
+                active = ctx.active,
                 granted = _state.value.granted,
                 shell = _state.value.shellStatus,
                 outcome = outcome,
@@ -620,15 +629,16 @@ class RootTransport(
         timeoutMs: Long? = null,
         rootCause: Throwable? = null,
     ) {
+        val ctx = logContext()
         logger.log(
             RootLogEvent(
                 provider = ProviderKind.ROOT,
                 event = kind,
                 source = rec.attempt.source,
                 attemptId = rec.attempt.id.toString(),
-                generation = 0L,
-                selected = null,
-                active = null,
+                generation = ctx.generation,
+                selected = ctx.selected,
+                active = ctx.active,
                 granted = granted,
                 shell = shell,
                 outcome = outcome,

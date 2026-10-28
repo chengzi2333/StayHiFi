@@ -64,6 +64,7 @@ class BackgroundProviderContractTest {
     ) : ICodecService {
         val writeCalls = AtomicInteger()
         var onRead: (() -> Unit)? = null
+        var onWrite: (() -> Unit)? = null
         override fun dumpDevices(): String = "[]"
         override fun readConfig(mac: String?): String {
             onRead?.invoke()
@@ -71,6 +72,7 @@ class BackgroundProviderContractTest {
         }
         override fun writeConfig(mac: String?, configJson: String?): String {
             writeCalls.incrementAndGet()
+            onWrite?.invoke()
             return writeResult
         }
         override fun dumpBtState(): String = """{"dump":""}"""
@@ -160,8 +162,7 @@ class BackgroundProviderContractTest {
         val logLines: MutableList<String>,
     )
 
-    private fun TestScope.harness(): Harness {
-        val service = FakeCodecService()
+    private fun TestScope.harness(service: FakeCodecService = FakeCodecService()): Harness {
         val backend = FakeRootBackend(service)
         // 注入内存 sink：默认 RootDiagnosticLogger 落 LogStore（android.util.Log）在 JVM 单测未 mock
         val logLines = Collections.synchronizedList(mutableListOf<String>())
@@ -312,6 +313,51 @@ class BackgroundProviderContractTest {
         // B4 既有载体语义不变：写回 origin + 读回一致 + 成功通知
         assertEquals(1, readBack.writeCalls.get())
         assertEquals(listOf("已恢复默认参数" to "buds → ${origin.summary()}"), notifications)
+    }
+
+    // ─────────────────────── Root restore IPC 串行边界（final review fix） ───────────────────────
+
+    /**
+     * Root restore 的 writeConfig/readConfig 必须经过 ProviderLease.withService →
+     * RootTransport.withReadyAnchor（独立 IPC Mutex + 锁内代次复查，§11.3/§11.6）。
+     * 以 activeIpcCount 作边界探针：只有 withReadyAnchor 锁内执行块时计数为 1。
+     */
+    @Test
+    fun rootRestoreWriteAndReadRunInsideSerializedIpcBoundary() = runTest {
+        val origin = CodecConfig(4, 0, 32, 2, 2, 1000L, 0L, 0L, 0L)
+        val service = FakeCodecService(
+            readResult = """{"current":${origin.toJson()},"selectable":[]}""")
+        val h = harness(service)
+        advanceUntilIdle()
+        h.raw.emit("root")
+        driveToReady(h)
+
+        val ipcEvents = Collections.synchronizedList(mutableListOf<String>())
+        service.onWrite = { ipcEvents += "write activeIpc=${h.transport.activeIpcCount}" }
+        service.onRead = { ipcEvents += "read activeIpc=${h.transport.activeIpcCount}" }
+        val notifications = mutableListOf<Pair<String, String>>()
+        val worker = recordingWorker(h, LocalA2dpState.CONNECTED, mutableListOf())
+        val defaultEnv = worker.restoreEnv
+        worker.restoreEnv = ApplyWorker.RestoreEnv(
+            shellReady = { true },
+            hasPrivilege = { true },
+            // 生产默认桥接（activeRestoreLease.withService）：本测试验证的正是这条路径
+            bind = defaultEnv.bind,
+            withCarrier = defaultEnv.withCarrier,
+            unbind = defaultEnv.unbind,
+            notifyFix = { },
+            notify = { t, c -> notifications += t to c },
+            notifyResultIfEnabled = { t, c -> notifications += t to c },
+        )
+
+        assertTrue(worker.restoreDefault(MAC, "buds", origin))
+        assertEquals("Root restore 的写入与读回必须都在 Root IPC 串行边界内（同一会话、带锁内代次复查）",
+            listOf("write activeIpc=1", "read activeIpc=1"), ipcEvents.toList())
+        assertEquals("restore 结束后边界必须释放", 0, h.transport.activeIpcCount)
+        // B4 既有载体语义不变：写回 origin + 读回一致 + 成功通知
+        assertEquals(1, service.writeCalls.get())
+        assertEquals(listOf("已恢复默认参数" to "buds → ${origin.summary()}"), notifications)
+        assertEquals("READY 后 restore 复用进程级 anchor，零新增 bind", 1, h.backend.bindCalls.get())
     }
 
     // ─────────────────────── 冷 Root 后台非交互契约 ───────────────────────

@@ -8,6 +8,7 @@ import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.shell.LibsuRootBackend
 import com.chengzi.stayhifi.shell.ProviderCoordinator
+import com.chengzi.stayhifi.shell.RootLogContext
 import com.chengzi.stayhifi.shell.RootTransport
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
 import com.chengzi.stayhifi.trigger.ListenerService
@@ -61,6 +62,19 @@ class StayHiFiApp : Application() {
             backend = LibsuRootBackend(applicationContext),
             authDispatcher = Dispatchers.IO,
             mainDispatcher = Dispatchers.Main,
+            // Root 日志的 generation/selected/active 取 Coordinator 当前值（§11.6）；
+            // lambda 在日志落笔时求值，Coordinator 随后即完成赋值，无初始化环。
+            logContext = {
+                if (::providerCoordinator.isInitialized) {
+                    RootLogContext(
+                        generation = providerCoordinator.currentGeneration(),
+                        selected = providerCoordinator.selectedProvider.value,
+                        active = providerCoordinator.activeProvider.value,
+                    )
+                } else {
+                    RootLogContext.EMPTY
+                }
+            },
         )
         providerCoordinator = ProviderCoordinator(
             applicationScope = appScope,

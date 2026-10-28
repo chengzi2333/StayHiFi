@@ -116,15 +116,38 @@ class ProviderSwitchTest {
         fun create(): ShellProvider = FakeShellProvider().also { created.add(it) }
     }
 
+    /**
+     * 不可取消底层写模型（final review fix）：setRawSelection 的等待可被 20s 切换超时或
+     * 调用方取消打断，但底层落盘在独立协程继续，[commit] 放行时仍完成并回读 target——
+     * 复现「超时/取消已返回，迟写仍把 rawSelection 改成 target」的审查发现。
+     */
+    private class LateWrite(val scope: CoroutineScope) {
+        val started = CompletableDeferred<String>()
+        val commit = CompletableDeferred<Unit>()
+    }
+
     /** 可控写盘：writeGate 挂起、writeFailure 抛错、onWrite 在写盘时点观察事务状态。 */
     private class FakeStore(val raw: MutableSharedFlow<String?>) : ProviderSelectionStore {
         val writes = Collections.synchronizedList(mutableListOf<String>())
         @Volatile var writeGate: CompletableDeferred<Unit>? = null
         @Volatile var writeFailure: Throwable? = null
         @Volatile var onWrite: (() -> Unit)? = null
+        @Volatile var lateWrite: LateWrite? = null
         override val rawSelection: Flow<String?> = raw
         override suspend fun setRawSelection(value: String) {
             writeFailure?.let { throw it }
+            val lw = lateWrite
+            if (lw != null) {
+                writes.add(value)
+                lw.started.complete(value)
+                // 底层落盘在独立协程：本函数被取消后，commit 放行时仍完成并回读
+                lw.scope.launch {
+                    lw.commit.await()
+                    raw.emit(value)
+                }
+                // 挂起等待底层归还；切换超时/调用方取消会取消此等待，但底层写不受 cancel 影响
+                kotlinx.coroutines.awaitCancellation()
+            }
             writeGate?.await()
             writes.add(value)
             onWrite?.invoke()
@@ -163,6 +186,7 @@ class ProviderSwitchTest {
             applicationScope = appScope(),
             store = store,
             shizukuFactory = factory::create,
+            log = { },   // JVM 单测无 android.util.Log；与 BackgroundProviderContractTest 同口径
             rootTransport = transport,
             ioDispatcher = StandardTestDispatcher(testScheduler),
             rootLogger = logger,
@@ -546,6 +570,66 @@ class ProviderSwitchTest {
             h.coordinator.acquire(ProviderOwner("apply"), ProviderSource.APPLY)
         }
         assertFalse(h.coordinator.switching.value)
+    }
+
+    // ─────────────────────────── 迟到写盘不得采用已放弃 target（final review fix） ───────────────────────────
+
+    @Test
+    fun lateStoreWriteAfterTimeoutNeverAdoptsTarget() = runTest {
+        val h = harness()
+        advanceUntilIdle()
+        h.raw.emit("root")
+        driveToReady(h)
+
+        // 底层写盘不可取消：20s 超时先返回 SWITCH_TIMEOUT，写入稍后仍完成并回读 target
+        val lw = LateWrite(appScope())
+        h.store.lateWrite = lw
+
+        val result = h.coordinator.switchToShizuku(ProviderOwner("settings"), ProviderSource.SETTINGS)
+        assertTrue("期望超时未提交，实际 $result", result is ProviderSwitchResult.NotCommitted)
+        result as ProviderSwitchResult.NotCommitted
+        assertEquals(SwitchFailureReason.SWITCH_TIMEOUT, result.reason)
+        assertEquals(listOf("shizuku"), h.store.writes)
+        assertTrue("写盘挂起超时前旧 Root anchor 已按事务解绑", result.needsForegroundRevalidation)
+        assertEquals(ProviderKind.ROOT, h.coordinator.selectedProvider.value)
+
+        // 迟到的底层写完成并回读 target：超时已放弃的切换不得采用 target（§11.3 超时保留原选择）
+        lw.commit.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("迟到写盘回读不得把选择改成已放弃的 target",
+            ProviderKind.ROOT, h.coordinator.selectedProvider.value)
+        assertEquals(ProviderKind.ROOT, h.coordinator.activeProvider.value)
+    }
+
+    @Test
+    fun lateStoreWriteAfterCancellationNeverAdoptsTarget() = runTest {
+        val h = harness()
+        advanceUntilIdle()
+        h.raw.emit("root")
+        driveToReady(h)
+
+        val lw = LateWrite(appScope())
+        h.store.lateWrite = lw
+        val pending = async(UnconfinedTestDispatcher(testScheduler)) {
+            h.coordinator.switchToShizuku(ProviderOwner("settings"), ProviderSource.SETTINGS)
+        }
+        runCurrent()
+        assertTrue("事务必须推进到底层写盘点", lw.started.isCompleted)
+        assertTrue(h.coordinator.switching.value)
+
+        // 调用方取消（离开设置页/进程退场）：只清事务，不改选择
+        pending.cancel()
+        advanceUntilIdle()
+        assertTrue(pending.isCancelled)
+        assertFalse(h.coordinator.switching.value)
+        assertEquals(ProviderKind.ROOT, h.coordinator.selectedProvider.value)
+
+        // 不可取消的底层写稍后仍完成并回读：取消的切换同样不得采用 target
+        lw.commit.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("取消后的迟到写盘回读不得采用 target",
+            ProviderKind.ROOT, h.coordinator.selectedProvider.value)
+        assertEquals(ProviderKind.ROOT, h.coordinator.activeProvider.value)
     }
 
     // ─────────────────────────── 取消的 attempt 迟到成功不得提交 ───────────────────────────

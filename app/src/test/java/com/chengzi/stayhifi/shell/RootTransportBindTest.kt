@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -342,6 +343,63 @@ class RootTransportBindTest {
         transport.disconnectAnchor()
         advanceUntilIdle()
         assertEquals("重复 disconnect 幂等", 1, backend.unbindCalls.get())
+    }
+
+    // ─────────────────────────── 并发 bind 单飞（final review fix） ───────────────────────────
+
+    @Test
+    fun concurrentBindAndCheckOnSameCandidateBindsOnce() = runTest {
+        val backend = FakeBindBackend()
+        val (transport, _) = newTransport(backend)
+        val candidate = toCandidate(transport)
+
+        // 两路并发 bindAndCheck：同一 transport 同时只能一个 bind（§11.4.8）
+        val first = async { runCatching { transport.bindAndCheck(candidate) } }
+        val second = async { runCatching { transport.bindAndCheck(candidate) } }
+        advanceUntilIdle()
+
+        val r1 = first.await()
+        val r2 = second.await()
+        assertTrue("两路并发 bind 都必须成功返回，实际 $r1 / $r2",
+            r1.isSuccess && r2.isSuccess)
+        assertEquals("同一 candidate 并发 bind 必须单飞，不得重复 backend.bind",
+            1, backend.bindCalls.get())
+        assertEquals("单飞后健康检查只跑一次", 1,
+            (backend.service as FakeCodecService).dumpCalls.get())
+        assertEquals(RootStatus.READY, transport.state.value.status)
+        assertEquals(0, backend.unbindCalls.get())
+    }
+
+    // ─────────────────────────── 诊断日志上下文（final review fix） ───────────────────────────
+
+    @Test
+    fun authAndBindLogsCarryInjectedCoordinatorContext() = runTest {
+        val backend = FakeBindBackend()
+        val sink = RecordingSink()
+        // 生产由 StayHiFiApp 注入 Coordinator 的 generation/selected/active；此处注入固定上下文
+        val transport = RootTransport(
+            applicationScope = appScope(),
+            backend = backend,
+            authDispatcher = StandardTestDispatcher(testScheduler),
+            mainDispatcher = StandardTestDispatcher(testScheduler),
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            logger = RootDiagnosticLogger(sink),
+            logContext = { RootLogContext(7L, ProviderKind.ROOT, ProviderKind.SHIZUKU) },
+        )
+        val candidate = toCandidate(transport)   // attempt start / auth end 走 logLocked
+        val waiter = launch { runCatching { transport.bindAndCheck(candidate) } }
+        advanceUntilIdle()                        // bind/health end 走 logPhase
+        assertEquals(RootStatus.READY, transport.state.value.status)
+
+        transport.logger.flushSuppressed()
+        val lines = sink.snapshot()
+        assertTrue("应产生授权与绑定日志", lines.isNotEmpty())
+        assertTrue("D7 后日志必须带当前 Coordinator generation/selected/active，实际: $lines",
+            lines.all {
+                it.contains("generation=7") &&
+                    it.contains("selected=root") &&
+                    it.contains("active=shizuku")
+            })
     }
 
     // ─────────────────────────── 健康检查 ───────────────────────────

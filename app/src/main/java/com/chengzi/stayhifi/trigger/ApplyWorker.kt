@@ -122,6 +122,14 @@ class ApplyWorker(context: Context) {
                 ?: throw IllegalStateException("restore lease 缺失（gate 作用域外调用）")
             withContext(Dispatchers.IO) { lease.withService { it } }
         },
+        withCarrier = { block ->
+            // final review fix：写回+读回整体留在一次 lease.withService 内——Root 路径因此
+            // 落在 RootTransport.withReadyAnchor 的 IPC Mutex 串行边界与锁内代次复查里，
+            // 不再取出 service 后在锁外直接 IPC。
+            val lease = activeRestoreLease
+                ?: throw IllegalStateException("restore lease 缺失（gate 作用域外调用）")
+            lease.withService { svc -> block(svc) }
+        },
         unbind = { },
         notifyFix = { notifier.notifyFixRequired(it) },
         notify = { t, c -> notifier.notifyResult(t, c) },
@@ -501,26 +509,13 @@ class ApplyWorker(context: Context) {
                 restoreEnv.notifyFix("特权授权已被撤销")
                 return false
             }
-            val service = restoreEnv.bind()
-            val res = withContext(Dispatchers.IO) { service.writeConfig(mac, origin.toJson()) }
-            val err = parseError(res)
-            if (err != null) {
-                log("恢复默认写入失败: $err")
-                restoreEnv.notify("恢复默认参数失败", "$name: $err")
-                return false
-            }
-            // 读回验证：与拉满同一套 matches 生效语义（codecType/rate/bits/cs1）
-            val actual = readState(service, mac)?.current
-            if (actual != null && ApplyPolicy.matches(origin, actual)) {
-                log("恢复默认成功 ✓ 读回=${actual.summary()}")
-                // Task 43：后悔药生效后旧的拉满目标作废，否则轮询立刻把默认参数误报成漂移
-                VerifiedTargetStore.clear(mac)
-                restoreEnv.notifyResultIfEnabled("已恢复默认参数", "$name → ${actual.summary()}")
-                true
+            val withCarrier = restoreEnv.withCarrier
+            if (withCarrier != null) {
+                // 生产路径：写回+读回整体留在一次 lease.withService 串行边界内（§11.3 Root IPC Mutex）
+                withCarrier { service -> restoreWriteAndVerify(mac, name, origin, service) }
             } else {
-                log("恢复默认读回不一致: ${actual?.summary() ?: "读取失败"}")
-                restoreEnv.notify("恢复默认参数失败", "$name：读回与原始配置不一致")
-                false
+                // B4 遗留接缝：bind 单趟 + 原写读语义（既有 JVM 单测）
+                restoreWriteAndVerify(mac, name, origin, restoreEnv.bind())
             }
         } catch (t: Throwable) {
             log("恢复默认参数失败: $t")
@@ -528,6 +523,32 @@ class ApplyWorker(context: Context) {
             false
         } finally {
             restoreEnv.unbind()
+        }
+    }
+
+    /** 写回 origin → 读回验证 → 成功/失败通知；与原 restoreDefaultCarrier 内联块语义一致。 */
+    private suspend fun restoreWriteAndVerify(
+        mac: String, name: String, origin: CodecConfig, service: ICodecService,
+    ): Boolean {
+        val res = withContext(Dispatchers.IO) { service.writeConfig(mac, origin.toJson()) }
+        val err = parseError(res)
+        if (err != null) {
+            log("恢复默认写入失败: $err")
+            restoreEnv.notify("恢复默认参数失败", "$name: $err")
+            return false
+        }
+        // 读回验证：与拉满同一套 matches 生效语义（codecType/rate/bits/cs1）
+        val actual = readState(service, mac)?.current
+        return if (actual != null && ApplyPolicy.matches(origin, actual)) {
+            log("恢复默认成功 ✓ 读回=${actual.summary()}")
+            // Task 43：后悔药生效后旧的拉满目标作废，否则轮询立刻把默认参数误报成漂移
+            VerifiedTargetStore.clear(mac)
+            restoreEnv.notifyResultIfEnabled("已恢复默认参数", "$name → ${actual.summary()}")
+            true
+        } else {
+            log("恢复默认读回不一致: ${actual?.summary() ?: "读取失败"}")
+            restoreEnv.notify("恢复默认参数失败", "$name：读回与原始配置不一致")
+            false
         }
     }
 
@@ -653,6 +674,12 @@ class ApplyWorker(context: Context) {
         val notify: (String, String) -> Unit,
         /** 经 notifyResult 开关门控的结果通知（成功路径，与生产私有 notifyResult 等价）。 */
         val notifyResultIfEnabled: suspend (String, String) -> Unit,
+        /**
+         * final review fix：载体事务边界。非 null 时写回+读回整体在该边界内执行
+         * （生产默认=一次 lease.withService，Root 路径落在 RootTransport IPC Mutex
+         * 串行边界与锁内代次复查里）；null 时回退 [bind] 单趟（B4 遗留接缝语义）。
+         */
+        val withCarrier: (suspend (suspend (ICodecService) -> Boolean) -> Boolean)? = null,
     )
 
     companion object {
