@@ -91,6 +91,7 @@ import com.chengzi.stayhifi.ui.devices.DeviceItemUi
 import com.chengzi.stayhifi.ui.home.HomeAction
 import com.chengzi.stayhifi.ui.home.HomeScreen
 import com.chengzi.stayhifi.ui.home.HomeUiState
+import com.chengzi.stayhifi.ui.home.ManualEditorInput
 import com.chengzi.stayhifi.ui.logs.LogsAction
 import com.chengzi.stayhifi.ui.logs.LogsScreen
 import com.chengzi.stayhifi.ui.logs.LogsUiState
@@ -219,6 +220,12 @@ class MainActivity : ComponentActivity() {
     private var homeState by mutableStateOf(HomeUiState())
     private var connectedMac: String? = null
     private var connectedName: String? = null
+    /**
+     * 自定义音质会话标记（仅内存，不持久化）：mac → 手动应用成功的目标。
+     * 只用于首页「自定义」展示语义；刷新读回与该目标不一致（重连/系统改回）即失效，
+     * 任何路径都不据此跨重连重放手动配置，自动拉满默认目标不受影响。
+     */
+    private var manualSession: Pair<String, CodecConfig>? = null
 
     // ---- 底部导航 / 日志页（Task 6） ----
     private var selectedTab by mutableStateOf(0)
@@ -1334,6 +1341,45 @@ class MainActivity : ComponentActivity() {
         when (action) {
             HomeAction.ApplyNow -> onApplyNow()
             HomeAction.FixCarrier -> onFixCarrier()
+            is HomeAction.ApplyManual -> onApplyManual(action.target, adaptive = false)
+            is HomeAction.RestoreAdaptive -> onApplyManual(action.target, adaptive = true)
+        }
+    }
+
+    /**
+     * 自定义音质写入（首页手动调参）：目标由 ManualEditorSheet/ManualSelection 按当前
+     * selectable 同条目规则构造，此处只负责显式触发写入 + 读回验证（ApplyWorker.applyManual
+     * 与自动拉满同入口锁/断连复查）。成功：自定义目标记入会话标记（恢复自适应则清除——
+     * 系统自适应不是自定义）；失败：轻提示 + 日志。结束后统一刷新首页读回。
+     */
+    private fun onApplyManual(target: CodecConfig, adaptive: Boolean) {
+        val mac = connectedMac ?: return
+        val name = connectedName
+        homeState = homeState.copy(applying = true)
+        lifecycleScope.launch {
+            try {
+                val ok = ApplyWorker(this@MainActivity).applyManual(mac, name, target)
+                if (ok) {
+                    manualSession = if (adaptive) null else (mac to target)
+                    LogStore.log(
+                        if (adaptive) "已恢复系统自适应: ${name ?: mac}"
+                        else "自定义音质已应用: ${name ?: mac} → ${target.summary()}",
+                    )
+                } else {
+                    LogStore.log("自定义音质应用失败: ${name ?: mac} → ${target.summary()}")
+                    Toast.makeText(
+                        this@MainActivity, "应用失败，详见日志页", Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            } catch (t: Throwable) {
+                LogStore.log("自定义音质应用失败: $t")
+                Toast.makeText(
+                    this@MainActivity, "应用失败，详见日志页", Toast.LENGTH_SHORT,
+                ).show()
+            } finally {
+                homeState = homeState.copy(applying = false)
+                refreshHome()
+            }
         }
     }
 
@@ -1409,6 +1455,8 @@ class MainActivity : ComponentActivity() {
                         realtimeDisplay = RealtimeDisplay.NO_DATA,
                         fullBars = false,
                         targetStatus = null,
+                        manualActive = false,
+                        manualEditor = null,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1454,6 +1502,7 @@ class MainActivity : ComponentActivity() {
                                 bits = null, quality = null,
                                 realtimeKbps = null, realtimeQualityMode = null,
                                 realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+                                manualActive = false, manualEditor = null,
                             )
                             connectedMac = null
                             connectedName = null
@@ -1467,6 +1516,7 @@ class MainActivity : ComponentActivity() {
                                 bits = null, quality = null,
                                 realtimeKbps = null, realtimeQualityMode = null,
                                 realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+                                manualActive = false, manualEditor = null,
                             )
                             connectedMac = null
                             connectedName = null
@@ -1485,6 +1535,7 @@ class MainActivity : ComponentActivity() {
                                 bits = null, quality = null,
                                 realtimeKbps = null, realtimeQualityMode = null,
                                 realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+                                manualActive = false, manualEditor = null,
                             )
                             connectedMac = null
                             connectedName = null
@@ -1513,6 +1564,7 @@ class MainActivity : ComponentActivity() {
                                 bits = null, quality = null,
                                 realtimeKbps = null, realtimeQualityMode = null,
                                 realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+                                manualActive = false, manualEditor = null,
                             )
                             connectedMac = null
                             connectedName = null
@@ -1637,6 +1689,12 @@ class MainActivity : ComponentActivity() {
                         // Task D9：refreshGeneration + lease.generation 双重代次守卫，
                         // 旧轮次/旧通道的迟到返回一律不得写新 UI
                         if (gen != refreshGeneration || !lease.isCurrent()) return@withService
+                        // 自定义音质会话：读回与手动目标一致才保持「自定义」展示；
+                        // 不一致（重连/系统改回/重新拉满）即失效，绝不跨重连重放。
+                        val manual = manualSession
+                        val manualActive = manual != null && manual.first == mac &&
+                            ApplyPolicy.matches(manual.second, current)
+                        if (manual != null && !manualActive) manualSession = null
                         homeState = homeState.copy(
                             headsetName = name,
                             // 仅泛称身份可由唯一无歧义段补精确版本；精确身份不被旧段名降级。
@@ -1649,6 +1707,8 @@ class MainActivity : ComponentActivity() {
                             realtimeDisplay = realtime.display,
                             fullBars = fullBars,
                             targetStatus = targetAssessment.status,
+                            manualActive = manualActive,
+                            manualEditor = ManualEditorInput(current, selectable),
                         )
                         connectedMac = mac
                         connectedName = name

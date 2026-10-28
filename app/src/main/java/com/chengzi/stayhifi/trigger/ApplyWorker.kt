@@ -8,9 +8,11 @@ import com.chengzi.stayhifi.LogStore
 import com.chengzi.stayhifi.StayHiFiApp
 import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecFamily
 import com.chengzi.stayhifi.codec.CodecIdentity
 import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
 import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecIdentitySource
 import com.chengzi.stayhifi.codec.CodecOperationLog
 import com.chengzi.stayhifi.codec.CodecPresentation
 import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
@@ -309,6 +311,84 @@ class ApplyWorker(context: Context) {
         }
         // Task D8：lease 由 applyGate finally close（Shizuku 解绑本 owner provider；
         // Root anchor 进程级、不属于任何 lease，不在此解绑）。
+    }
+
+    /**
+     * 首页「自定义音质」写入口径：与自动拉满同走 [connectionGuard] 入口锁 +
+     * 锁后断连复查 + [applyGate] lease（Root 路径落在 RootTransport IPC Mutex 内）。
+     * 目标由调用方按 [com.chengzi.stayhifi.codec.ManualSelection] 同条目证明规则构造，
+     * 本方法原样透传不改写用户选择；不写档案、不改 autoApply、不触碰自动拉满
+     * 默认目标，手动配置也不持久化（不跨重连重放）。
+     *
+     * 读回验证沿用 [writeVerified] 语义（codecType/rate/bits 一致为准，cs1 被栈
+     * 规范化只告警）。成功目标记入 [VerifiedTargetStore]——它同样是已验证生效
+     * 目标，否则 30s 轮询会把用户主动降档误报成「系统改回参数」；失败不记。
+     * 冷 Root/通道不可用非交互跳过：只记日志返回 false（前台 UI 给反馈）。
+     */
+    suspend fun applyManual(mac: String, name: String?, target: CodecConfig): Boolean {
+        log("手动应用自定义音质: ${name ?: "?"} ($mac) → ${target.summary()}")
+        var ok = false
+        connectionGuard.run(mac) {
+            ok = manualWithLease(mac, name, target)
+        }
+        return ok
+    }
+
+    /** 与 [runWithLease] 同一入口契约：锁后才 acquire，lease finally close，冷 Root 非交互跳过。 */
+    private suspend fun manualWithLease(mac: String, name: String?, target: CodecConfig): Boolean {
+        val coordinator = requireCoordinator() ?: run {
+            log("ProviderCoordinator 不可用，跳过手动应用")
+            return false
+        }
+        return try {
+            var applied = false
+            applyGate.withLease(
+                coordinator, ProviderOwner("apply-manual"), ProviderSource.APPLY,
+            ) { lease ->
+                applied = manualLocked(mac, name, target, lease)
+            }
+            applied
+        } catch (e: ProviderAccessException) {
+            log("特权通道不可用（${e.reason}），手动应用跳过，需前台确认通道状态")
+            false
+        }
+    }
+
+    private suspend fun manualLocked(
+        mac: String, name: String?, target: CodecConfig, lease: ProviderLease,
+    ): Boolean {
+        return try {
+            if (!waitForShell(lease)) {
+                log("Shizuku 未运行，手动应用跳过")
+                return false
+            }
+            if (!hasPrivilege(lease)) {
+                log("特权授权已被撤销，手动应用跳过")
+                return false
+            }
+            // 写前读一次 current：既作 origin 回填（后悔药数据源）又供日志身份；
+            // 读失败只跳过回填/退回旧摘要，不阻断用户显式发起的写入。
+            val before = readState(lease, mac)
+            before?.current?.let { recordOriginConfig(mac, it) }
+            val identity = before?.presentation?.identity
+                ?: CodecIdentity(
+                    nativeType = target.codecType,
+                    family = CodecFamily.UNKNOWN,
+                    displayName = Masks.codecName(target.codecType),
+                    source = CodecIdentitySource.UNKNOWN,
+                )
+            if (writeVerified(lease, mac, target, identity)) {
+                log("手动应用成功 ✓ ${summary(target, identity)}")
+                VerifiedTargetStore.record(mac, target)
+                true
+            } else {
+                log("手动应用失败: 读回与目标不一致 ${summary(target, identity)}")
+                false
+            }
+        } catch (t: Throwable) {
+            log("手动应用失败: $t")
+            false
+        }
     }
 
     /** 统一路径：三态目标裁决 + 候选执行器；不完整 current 在任何写入副作用前结束。 */

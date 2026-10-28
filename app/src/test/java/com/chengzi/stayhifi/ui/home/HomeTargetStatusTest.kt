@@ -79,6 +79,52 @@ class HomeTargetStatusTest {
     }
 
     @Test
+    fun manualActiveShowsCustomAndNeverMasqueradesFullBars() {
+        // 手动降档生效中：不冒充满血/本机最高，只显示「自定义」
+        assertEquals(
+            "自定义参数生效中",
+            HomeTargetStatus.statusLine(
+                connected = true,
+                status = TargetAssessment.Status.COMPLETE,
+                fullBars = false,
+                manualActive = true,
+            ),
+        )
+        assertEquals(
+            "自定义",
+            HomeTargetStatus.badgeLabel(
+                TargetAssessment.Status.COMPLETE, fullBars = false, manualActive = true,
+            ),
+        )
+        // 即使读回恰好等于本机最高，自定义会话仍只显示自定义（不抢占满血语义）
+        assertEquals(
+            "自定义",
+            HomeTargetStatus.badgeLabel(
+                TargetAssessment.Status.COMPLETE, fullBars = true, manualActive = true,
+            ),
+        )
+        assertEquals(
+            "自定义参数生效中",
+            HomeTargetStatus.statusLine(
+                connected = true,
+                status = TargetAssessment.Status.COMPLETE,
+                fullBars = true,
+                manualActive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun manualActiveDoesNotOverrideDisconnected() {
+        assertEquals(
+            "等待耳机连接",
+            HomeTargetStatus.statusLine(
+                connected = false, status = null, fullBars = false, manualActive = true,
+            ),
+        )
+    }
+
+    @Test
     fun missingAssessmentCannotShowFullBars() {
         assertEquals(
             "未拉满 · 点击重试",

@@ -25,15 +25,21 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.RealtimeDisplay
 import com.chengzi.stayhifi.codec.RealtimeDisplayFormatter
 import com.chengzi.stayhifi.codec.RealtimeState
@@ -73,6 +79,13 @@ data class HomeUiState(
     val realtimeDisplay: RealtimeDisplay = RealtimeDisplay.NO_DATA,
     /** 是否已达本机最高音质输出；仅 COMPLETE 且读回匹配时为 true。 */
     val fullBars: Boolean = false,
+    /**
+     * 自定义音质会话生效中（手动应用的目标与当前读回一致）。
+     * 为 true 时状态行/徽标只显示「自定义」，绝不冒充满血/本机最高。
+     */
+    val manualActive: Boolean = false,
+    /** 手动调参面板数据面；null（未连接/读不到）时「自定义音质」入口禁用。 */
+    val manualEditor: ManualEditorInput? = null,
     /** 当前目标能力完整性；null 表示尚无快照或沿用旧展示状态。 */
     val targetStatus: TargetAssessment.Status? = null,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
@@ -86,6 +99,10 @@ sealed interface HomeAction {
     data object ApplyNow : HomeAction
     /** 点击红色警示横幅去修复载体。 */
     data object FixCarrier : HomeAction
+    /** 自定义音质：应用手动组合（目标已由 ManualSelection 同条目规则构造）。 */
+    data class ApplyManual(val target: CodecConfig) : HomeAction
+    /** 自定义音质：恢复系统自适应（通配目标交回协议栈自选）。 */
+    data class RestoreAdaptive(val target: CodecConfig) : HomeAction
 }
 
 /**
@@ -98,6 +115,11 @@ fun HomeScreen(
     onAction: (HomeAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 「自定义音质」弹层可见性为纯 UI 态；断连/读不到（manualEditor 置空）时自动收起。
+    var editorVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(state.manualEditor == null) {
+        if (state.manualEditor == null) editorVisible = false
+    }
     Scaffold(modifier = modifier) { innerPadding ->
         Column(
             modifier = Modifier
@@ -153,7 +175,7 @@ fun HomeScreen(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                         Text(
-                            text = "拉满中…",
+                            text = "应用中…",
                             style = MaterialTheme.typography.titleMedium,
                         )
                     }
@@ -165,7 +187,34 @@ fun HomeScreen(
                     )
                 }
             }
+
+            // 「自定义音质」次级入口（UX 拍板）：主按钮下方居中一行，不与主按钮并列；
+            // 仅在已连接且读到能力快照时可用。
+            TextButton(
+                onClick = { editorVisible = true },
+                enabled = state.manualEditor != null && !state.applying,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            ) {
+                Text("自定义音质")
+            }
         }
+    }
+
+    val editorInput = state.manualEditor
+    if (editorVisible && editorInput != null) {
+        ManualEditorSheet(
+            input = editorInput,
+            applying = state.applying,
+            onApply = {
+                editorVisible = false
+                onAction(HomeAction.ApplyManual(it))
+            },
+            onRestoreAdaptive = {
+                editorVisible = false
+                onAction(HomeAction.RestoreAdaptive(it))
+            },
+            onDismiss = { editorVisible = false },
+        )
     }
 }
 
@@ -227,7 +276,11 @@ private fun StatusCard(state: HomeUiState) {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
                 )
-                StayHiFiBadge(status = state.targetStatus, fullBars = state.fullBars)
+                StayHiFiBadge(
+                    status = state.targetStatus,
+                    fullBars = state.fullBars,
+                    manualActive = state.manualActive,
+                )
             }
             // 机型行（Task 28 + Task C4）：面客机型名 + Android 版。
             // collect StateFlow：后台 preload 完成后机型行自动更新，同步路径不触发资产 IO。
@@ -265,6 +318,7 @@ private fun StatusLine(state: HomeUiState) {
             connected = state.headsetName != null,
             status = state.targetStatus,
             fullBars = state.fullBars,
+            manualActive = state.manualActive,
         ),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -362,8 +416,12 @@ private fun DetailCell(label: String, value: String?, modifier: Modifier = Modif
 }
 
 @Composable
-private fun StayHiFiBadge(status: TargetAssessment.Status?, fullBars: Boolean) {
-    val container = if (fullBars) {
+private fun StayHiFiBadge(
+    status: TargetAssessment.Status?,
+    fullBars: Boolean,
+    manualActive: Boolean = false,
+) {
+    val container = if (fullBars && !manualActive) {
         MaterialTheme.colorScheme.primary
     } else {
         MaterialTheme.colorScheme.surfaceVariant
@@ -388,7 +446,7 @@ private fun StayHiFiBadge(status: TargetAssessment.Status?, fullBars: Boolean) {
                 .background(content),
         )
         Text(
-            text = HomeTargetStatus.badgeLabel(status, fullBars),
+            text = HomeTargetStatus.badgeLabel(status, fullBars, manualActive),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Bold,
             color = content,
