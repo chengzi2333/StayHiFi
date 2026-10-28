@@ -1,16 +1,24 @@
 package com.chengzi.stayhifi.shell
 
+import com.chengzi.stayhifi.ICodecService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 
 /** 特权通道的使用方身份（owner+generation lease 语义由 Task D6 补全）。 */
 data class ProviderOwner(val id: String)
@@ -20,13 +28,16 @@ data class RootAttempt(val id: Long, val owner: ProviderOwner, val source: Provi
 
 /**
  * 未提交的 Root candidate：root shell 已验证（isRoot=true），但尚未 bind/健康检查/提交。
- * candidate 存在期间 activeProvider 保持原值（§11.3）；bind/健康检查由 Task D5 扩展。
+ * candidate 存在期间 activeProvider 保持原值（§11.3）；bind/健康检查见 [RootTransport.bindAndCheck]。
  */
 class RootCandidate internal constructor(
     val attemptId: Long,
     val owner: ProviderOwner,
     val observation: RootShellObservation,
-)
+) {
+    internal var binding: RootBinding? = null
+    internal var service: ICodecService? = null
+}
 
 /** 授权/绑定阶段失败：status 取可观察终态（事实命名，§11.4.3），不含"用户拒绝/没有 su"等猜测语义。 */
 class RootAccessException(
@@ -56,6 +67,11 @@ class RootTransport(
     internal val logger: RootDiagnosticLogger = RootDiagnosticLogger(),
     private val authTimeoutMs: Long = DEFAULT_AUTH_TIMEOUT_MS,
     private val clock: () -> Long = { System.nanoTime() / 1_000_000L },
+    /** RootService.bind/unbind 的调用线程（§11.4.7）；未注入时退化到 authDispatcher（仅测试路径）。 */
+    mainDispatcher: CoroutineDispatcher? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val bindTimeoutMs: Long = DEFAULT_BIND_TIMEOUT_MS,
+    private val healthTimeoutMs: Long = DEFAULT_HEALTH_TIMEOUT_MS,
 ) {
 
     private val _state = MutableStateFlow(
@@ -94,6 +110,27 @@ class RootTransport(
     private var current: AttemptRecord? = null
     private var nextAttemptId = 0L
     private var physicalJob: Job? = null
+
+    private val mainOrAuth: CoroutineDispatcher = mainDispatcher ?: authDispatcher
+
+    // ── Task D5：bind/anchor 注册表（独立锁，不与授权 attempt 锁混用） ──
+    private class BindingRecord(
+        val id: Long,
+        val connected: CompletableDeferred<ICodecService?>,
+        val candidate: RootCandidate,
+    ) {
+        @Volatile var binding: RootBinding? = null
+        var expired = false            // bind watchdog 过期：迟到连接必须主线程立即 unbind
+        var cleanedUp = false          // unbind 幂等
+        var remoteDisconnected = false
+        var localDisconnect = false    // 主动解绑标记：区别于远端断开（§11.4.8）
+        var isAnchor = false           // READY 后提升为进程级 anchor
+    }
+
+    private val bindLock = Any()
+    private val bindings = mutableMapOf<Long, BindingRecord>()
+    private var nextBindingId = 0L
+    private var anchorCandidate: RootCandidate? = null
 
     /**
      * 显式前台授权入口（教程/设置点击）。单飞； granted=false 直接终态 NOT_GRANTED。
@@ -173,6 +210,258 @@ class RootTransport(
             errorClass = RootErrorClass.NONE,
             outcome = "invalidated",
             reason = "attempt invalidated（离页/改选/再次发起）",
+        )
+    }
+
+    // ─────────────────────────── Task D5：bind / 健康检查 / anchor ───────────────────────────
+
+    /** READY anchor 的当前 IPC 接口；仅当前进程 READY 时非空（供 RootShellProvider/lease 只读复用）。 */
+    internal fun readyService(): ICodecService? =
+        if (_state.value.status == RootStatus.READY) anchorCandidate?.service else null
+
+    /**
+     * 绑定 RootCodecService 并做 dumpDevices 健康检查（设计 §11.4.7-9）。
+     * READY 的最低条件三者齐：root shell（授权阶段已验证）+ 非空 binder + dumpDevices 无 error。
+     * 10 秒 bind watchdog 与 8 秒 health watchdog 都只标记自有等待结束，不冒充底层取消；
+     * 迟到的连接/IPC 归还在回调里完成清理（主线程幂等 unbind）。成功后 candidate 提升为进程级 anchor。
+     */
+    suspend fun bindAndCheck(candidate: RootCandidate): RootCandidate {
+        candidate.service?.let { return candidate }
+        ensureCandidateCurrent(candidate)
+        publish(RootStatus.BINDING, reason = "bind RootCodecService")
+
+        val connected = CompletableDeferred<ICodecService?>()
+        val record = synchronized(bindLock) {
+            BindingRecord(++nextBindingId, connected, candidate).also { bindings[it.id] = it }
+        }
+        val callbacks = object : RootBindCallbacks {
+            override fun onConnected(service: ICodecService?) = handleConnected(record, service)
+            override fun onDisconnected() = handleRemoteDisconnected(record)
+        }
+        val bindStartedMs = clock()
+        record.binding = try {
+            withContext(mainOrAuth) { backend.bind(callbacks) }
+        } catch (t: Throwable) {
+            synchronized(bindLock) { bindings.remove(record.id) }
+            publish(RootStatus.BIND_FAILED, reason = t.message ?: "")
+            logPhase(RootLogEventKind.ROOT_BIND_END, "bind_failed", candidate,
+                errorClass = RootErrorClass.BIND_FAILED,
+                durationMs = clock() - bindStartedMs, rootCause = t)
+            throw RootAccessException(RootStatus.BIND_FAILED, cause = t)
+        }
+
+        val service = withTimeoutOrNull(bindTimeoutMs) { connected.await() }
+        if (!connected.isCompleted) {
+            // bind watchdog：只标记过期，底层 pending bind 继续；迟到连接由回调在主线程 unbind（§11.4.8）
+            synchronized(bindLock) { record.expired = true }
+            publish(RootStatus.BIND_TIMEOUT, reason = "bind 等待超过 ${bindTimeoutMs}ms")
+            logPhase(RootLogEventKind.ROOT_BIND_END, "bind_timeout", candidate,
+                errorClass = RootErrorClass.BIND_TIMEOUT, timeoutMs = bindTimeoutMs)
+            throw RootAccessException(RootStatus.BIND_TIMEOUT,
+                "bind 等待超过 ${bindTimeoutMs}ms（底层 bind 可能仍在进行）")
+        }
+        if (service == null) {
+            publish(RootStatus.BIND_NULL, reason = "onServiceConnected binder=null")
+            logPhase(RootLogEventKind.ROOT_BIND_END, "bind_null", candidate,
+                errorClass = RootErrorClass.BIND_NULL, bindCallback = "connected_null")
+            cleanupBinding(record)
+            throw RootAccessException(RootStatus.BIND_NULL, "onServiceConnected binder 为 null")
+        }
+
+        // 健康检查在 IO；watchdog 只标记等待结束，实际 IPC 归还后才完成清理
+        val healthDeferred = authScope.async(ioDispatcher) {
+            try {
+                RootHealthChecker.checkDumpDevices(service.dumpDevices())
+            } catch (t: Throwable) {
+                RootHealthResult(RootHealthOutcome.MALFORMED,
+                    detail = t.message?.take(120) ?: "dumpDevices 异常")
+            }
+        }
+        val healthStartedMs = clock()
+        var health = withTimeoutOrNull(healthTimeoutMs) { healthDeferred.await() }
+        if (health == null) {
+            publish(RootStatus.GRANTED_NOT_READY, reason = "health 等待超过 ${healthTimeoutMs}ms")
+            logPhase(RootLogEventKind.ROOT_HEALTH_END, "health_timeout", candidate,
+                errorClass = RootErrorClass.HEALTH_FAILURE, healthOp = "dumpDevices",
+                healthResult = "timeout", timeoutMs = healthTimeoutMs,
+                durationMs = clock() - healthStartedMs)
+            // 非取消等待：IPC 实际归还后才清理 connection
+            try {
+                healthDeferred.await()
+            } catch (t: Throwable) {
+                // 已取消/失败不影响清理路径
+            }
+            cleanupBinding(record)
+            throw RootAccessException(RootStatus.GRANTED_NOT_READY,
+                "dumpDevices 健康检查等待超过 ${healthTimeoutMs}ms")
+        }
+        val result = health!!
+        if (!result.isReady) {
+            publish(RootStatus.GRANTED_NOT_READY, reason = "health ${result.outcome}: ${result.detail}")
+            logPhase(RootLogEventKind.ROOT_HEALTH_END, "health_failed", candidate,
+                errorClass = RootErrorClass.HEALTH_FAILURE, healthOp = "dumpDevices",
+                healthResult = "${result.outcome}: ${result.detail}".take(160),
+                durationMs = clock() - healthStartedMs)
+            cleanupBinding(record)
+            throw RootAccessException(RootStatus.GRANTED_NOT_READY,
+                "dumpDevices 健康检查未通过: ${result.outcome}")
+        }
+
+        candidate.binding = record.binding
+        candidate.service = service
+        synchronized(bindLock) { record.isAnchor = true }
+        anchorCandidate = candidate
+        publish(RootStatus.READY, reason = "ready")
+        logPhase(RootLogEventKind.ROOT_BIND_END, "ready", candidate,
+            bindCallback = "connected", durationMs = clock() - bindStartedMs)
+        logPhase(RootLogEventKind.ROOT_HEALTH_END, "health_ok", candidate,
+            healthOp = "dumpDevices", healthResult = "ok devices=${result.deviceCount}",
+            durationMs = clock() - healthStartedMs)
+        return candidate
+    }
+
+    /** 失败/取消时清理未提交 candidate（§11.3）；已提升为 anchor 的不在此释放（用 [disconnectAnchor]）。 */
+    suspend fun releaseCandidate(candidate: RootCandidate) {
+        val owned = synchronized(bindLock) {
+            bindings.values.filter { it.candidate === candidate && !it.isAnchor }
+        }
+        owned.forEach { cleanupBinding(it) }
+        candidate.service = null
+        candidate.binding = null
+        invalidateAttempt(candidate.attemptId)
+    }
+
+    /**
+     * 显式断开进程级 anchor（手动切换/显式断开路径；§11.3 Activity 销毁不得走这里）。
+     * 主线程幂等 unbind，重复调用只执行一次。
+     */
+    suspend fun disconnectAnchor() {
+        val anchor = synchronized(bindLock) { bindings.values.firstOrNull { it.isAnchor } }
+        anchorCandidate = null
+        if (anchor != null) {
+            synchronized(bindLock) { anchor.localDisconnect = true }
+            cleanupBinding(anchor)
+            publish(RootStatus.DISCONNECTED, reason = "主动断开 anchor")
+            logPhase(RootLogEventKind.ROOT_BIND_END, "disconnected", anchor.candidate,
+                errorClass = RootErrorClass.DISCONNECTED, bindCallback = "local_disconnect")
+        } else if (_state.value.status == RootStatus.READY) {
+            publish(RootStatus.DISCONNECTED, reason = "主动断开 anchor")
+        }
+    }
+
+    private fun ensureCandidateCurrent(candidate: RootCandidate) {
+        synchronized(lock) {
+            val rec = records[candidate.attemptId]
+            if (rec == null || rec.expired || current !== rec) {
+                throw RootAccessException(RootStatus.UNVERIFIED,
+                    "candidate attempt ${candidate.attemptId} 已失效")
+            }
+        }
+    }
+
+    private fun handleConnected(record: BindingRecord, service: ICodecService?) {
+        val late = synchronized(bindLock) {
+            if (!bindings.containsKey(record.id)) return   // bind 抛异常路径已移除
+            if (record.expired) {
+                record.cleanedUp = true
+                bindings.remove(record.id)
+                true
+            } else {
+                record.connected.complete(service)
+                false
+            }
+        }
+        if (late) {
+            // 迟到连接：不得 READY，必须在主线程立即 unbind（§11.4.8）；清理幂等
+            logPhase(RootLogEventKind.ROOT_BIND_END, "late_connect_unbound", record.candidate,
+                bindCallback = "late_connected")
+            record.binding?.let { unbindOnMain(it) }
+        }
+    }
+
+    private fun handleRemoteDisconnected(record: BindingRecord) {
+        val wasAnchor: Boolean
+        synchronized(bindLock) {
+            // 主动解绑引发的回调与重复回调都只处理一次
+            if (record.remoteDisconnected || record.localDisconnect || record.cleanedUp) return
+            record.remoteDisconnected = true
+            wasAnchor = record.isAnchor
+        }
+        if (record.expired) return   // bind 已超时的迟到断开：只去重，不再记录/改状态
+        if (wasAnchor) {
+            anchorCandidate = null
+            publish(RootStatus.DISCONNECTED, reason = "远端服务断开")
+            logPhase(RootLogEventKind.ROOT_BIND_END, "disconnected", record.candidate,
+                errorClass = RootErrorClass.DISCONNECTED, bindCallback = "remote_disconnect")
+        } else {
+            publish(RootStatus.DISCONNECTED, reason = "bind 期间远端断开")
+            logPhase(RootLogEventKind.ROOT_BIND_END, "disconnected", record.candidate,
+                errorClass = RootErrorClass.DISCONNECTED, bindCallback = "remote_disconnect")
+            record.connected.completeExceptionally(
+                RootAccessException(RootStatus.DISCONNECTED, "远端服务在 bind 期间断开"))
+        }
+    }
+
+    /** 幂等解绑：同一 binding 只执行一次；unbind 调用经注入 mainDispatcher（§11.4.7）。 */
+    private fun cleanupBinding(record: BindingRecord) {
+        val binding = synchronized(bindLock) {
+            if (record.cleanedUp) return
+            record.cleanedUp = true
+            bindings.remove(record.id)
+            record.binding
+        } ?: return
+        unbindOnMain(binding)
+    }
+
+    private fun unbindOnMain(binding: RootBinding) {
+        authScope.launch(mainOrAuth) { backend.unbind(binding) }
+    }
+
+    private fun publish(
+        status: RootStatus,
+        reason: String,
+        granted: Boolean? = _state.value.granted,
+        shell: RootShellStatus = _state.value.shellStatus,
+    ) {
+        _state.value = RootSnapshot(status = status, granted = granted, shellStatus = shell,
+            observedReason = reason)
+    }
+
+    private fun logPhase(
+        kind: RootLogEventKind,
+        outcome: String,
+        candidate: RootCandidate,
+        errorClass: RootErrorClass = RootErrorClass.NONE,
+        durationMs: Long? = null,
+        timeoutMs: Long? = null,
+        bindCallback: String? = null,
+        healthOp: String? = null,
+        healthResult: String? = null,
+        rootCause: Throwable? = null,
+    ) {
+        val source = synchronized(lock) {
+            records[candidate.attemptId]?.attempt?.source
+        } ?: ProviderSource.SETTINGS
+        logger.log(
+            RootLogEvent(
+                provider = ProviderKind.ROOT,
+                event = kind,
+                source = source,
+                attemptId = candidate.attemptId.toString(),
+                generation = 0L,
+                selected = null,
+                active = null,
+                granted = _state.value.granted,
+                shell = _state.value.shellStatus,
+                outcome = outcome,
+                durationMs = durationMs,
+                timeoutMs = timeoutMs,
+                bindCallback = bindCallback,
+                healthOp = healthOp,
+                healthResult = healthResult,
+                errorClass = errorClass,
+                rootCause = rootCause,
+            )
         )
     }
 
@@ -305,5 +594,47 @@ class RootTransport(
 
     companion object {
         const val DEFAULT_AUTH_TIMEOUT_MS = 30_000L
+        const val DEFAULT_BIND_TIMEOUT_MS = 10_000L
+        const val DEFAULT_HEALTH_TIMEOUT_MS = 8_000L
+    }
+}
+
+/** dumpDevices 健康检查结论（设计 §11.4.9）。 */
+enum class RootHealthOutcome { OK, ERROR_REPORTED, MALFORMED }
+
+data class RootHealthResult(
+    val outcome: RootHealthOutcome,
+    val deviceCount: Int = 0,
+    val detail: String = "",
+) {
+    val isReady: Boolean get() = outcome == RootHealthOutcome.OK
+}
+
+/**
+ * Task D5：dumpDevices JSON 健康判定。合法设备数组（含空数组）健康；
+ * {"error":...}、畸形 JSON、非数组形状均不 READY（§11.4.9）。
+ */
+object RootHealthChecker {
+
+    private val parser = kotlinx.serialization.json.Json
+
+    fun checkDumpDevices(raw: String): RootHealthResult {
+        val element = try {
+            parser.parseToJsonElement(raw)
+        } catch (t: Throwable) {
+            return RootHealthResult(RootHealthOutcome.MALFORMED,
+                detail = t.message?.take(120) ?: "parse error")
+        }
+        return when {
+            element is JsonArray ->
+                RootHealthResult(RootHealthOutcome.OK, deviceCount = element.size)
+            element is JsonObject && element["error"] != null -> {
+                val detail = (element["error"] as? JsonPrimitive)?.let {
+                    runCatching { it.content }.getOrNull()
+                } ?: element["error"].toString()
+                RootHealthResult(RootHealthOutcome.ERROR_REPORTED, detail = detail.take(120))
+            }
+            else -> RootHealthResult(RootHealthOutcome.MALFORMED, detail = "unexpected json shape")
+        }
     }
 }

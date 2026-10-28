@@ -20,6 +20,30 @@ interface RootBackend {
      * 必须再验证 [RootShellObservation.isRoot]。
      */
     fun openShell(): RootShellObservation
+
+    /**
+     * 绑定 RootCodecService（Task D5）：实现必须用显式 Intent + `RootService.bind`，
+     * 且只在主线程调用（调用线程由 RootTransport 注入的 mainDispatcher 保证，§11.4.7）。
+     * 返回句柄即表示 bind 请求已发出；连接结果经 [callbacks] 异步回调，回调线程为主线程。
+     * 不使用 daemon mode，不调用 `RootService.stop`（§11.1/§11.4.7）。
+     */
+    fun bind(callbacks: RootBindCallbacks): RootBinding
+
+    /** 幂等解绑 [binding]；调用线程同样由 RootTransport 的 mainDispatcher 保证。 */
+    fun unbind(binding: RootBinding)
+}
+
+/** libsu ServiceConnection 回调的传输层抽象（binder 为 null 时 [RootBindCallbacks.onConnected] 传 null）。 */
+interface RootBindCallbacks {
+    fun onConnected(service: com.chengzi.stayhifi.ICodecService?)
+
+    /** 远端死亡/断开（区别于主动 unbind，§11.4.8）。 */
+    fun onDisconnected()
+}
+
+/** 一次 bind 的句柄；[RootBackend.unbind] 按句柄幂等解绑。 */
+interface RootBinding {
+    val id: Long
 }
 
 /** getShell 返回后的可观察事实。 */

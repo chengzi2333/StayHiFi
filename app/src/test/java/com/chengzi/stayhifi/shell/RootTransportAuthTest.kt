@@ -70,6 +70,17 @@ class RootTransportAuthTest {
             openShellReturned = true
             return shellResult
         }
+
+        // Task D5 接口补齐：授权阶段绝不 bind/unbind
+        val bindCalls = AtomicInteger()
+        val unbindCalls = AtomicInteger()
+        override fun bind(callbacks: RootBindCallbacks): RootBinding {
+            bindCalls.incrementAndGet()
+            throw IllegalStateException("授权阶段测试不允许 bind")
+        }
+        override fun unbind(binding: RootBinding) {
+            unbindCalls.incrementAndGet()
+        }
     }
 
     private fun TestScope.newTransport(
