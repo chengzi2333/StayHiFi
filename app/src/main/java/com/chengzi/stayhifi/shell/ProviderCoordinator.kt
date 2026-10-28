@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -121,36 +122,85 @@ class ProviderCoordinator(
     private val generationCounter = AtomicLong(0)
     @Volatile private var generation: Long = 0
 
-    // ── final review fix：切换写盘的迟到完成防护（§11.3 超时/取消保留原选择） ──
-    /** 一次切换事务的写盘句柄；[confirmed] 只在 setRawSelection 正常返回后成立。 */
-    private class StoreWrite(val stored: String) {
-        @Volatile var confirmed = false
+    // ── final review fix：切换写盘的迟到完成防护与补偿写（§11.3 超时/取消保留原选择） ──
+    /** 一次切换/补偿写盘；[version] 单调递增（写槽认领顺序），[submitted]=已真正把写交给 store。 */
+    private class StoreWrite(val stored: String, val version: Long) {
+        @Volatile var submitted = false
     }
     private val storeWriteLock = Any()
-    private var activeStoreWrite: StoreWrite? = null
-    /** 已判超时/失败/取消但底层可能迟完成的写盘值：其回读一律忽略，不得采用为当前选择。 */
+    /** 未完成（未确认/未完成补偿）的写：其回读一律不采用——成功由 commitSwitch 直接发布状态。 */
+    private val pendingStoreWrites = mutableListOf<StoreWrite>()
+    /** 已放弃/已完成补偿的写盘值：其（迟到）回读一律忽略，不得采用为当前选择。 */
     private val staleStoreWrites = mutableSetOf<String>()
+    private var storeWriteVersion = 0L
+    /** 全部 store 写（事务+补偿）串行：与 DataStore 串行 edit 对齐，保证提交顺序=落盘顺序。 */
+    private val storeWriteMutex = Mutex()
+    /** 补偿写的独立宿主（非后台轮询）：与调用方/切换事务解耦，取消事务不取消补偿。 */
+    private val appScope: CoroutineScope = applicationScope
 
-    private fun beginStoreWrite(stored: String): StoreWrite {
-        val write = StoreWrite(stored)
-        synchronized(storeWriteLock) { activeStoreWrite = write }
+    private fun beginStoreWriteLocked(stored: String): StoreWrite {
+        val write = StoreWrite(stored, version = ++storeWriteVersion)
+        pendingStoreWrites.add(write)
         return write
     }
+
+    private fun beginStoreWrite(stored: String): StoreWrite =
+        synchronized(storeWriteLock) { beginStoreWriteLocked(stored) }
 
     /** setRawSelection 正常返回才算写盘成功；同值旧 stale 记录一并清除（值已确认落盘）。 */
     private fun confirmStoreWrite(write: StoreWrite) {
         synchronized(storeWriteLock) {
-            write.confirmed = true
-            if (activeStoreWrite === write) activeStoreWrite = null
+            pendingStoreWrites.remove(write)
             staleStoreWrites.remove(write.stored)
         }
     }
 
-    /** 超时/失败/取消：底层写可能仍迟完成并回读；该回读不得采用已放弃的 target。 */
-    private fun abandonStoreWrite(write: StoreWrite) {
+    /** 超时/失败/取消：底层写可能仍迟完成并回读；该回读不得采用已放弃的 target。
+     *  返回是否已真正把写交给 store（未提交则不存在迟写，无需补偿）。 */
+    private fun abandonStoreWrite(write: StoreWrite): Boolean {
         synchronized(storeWriteLock) {
-            if (activeStoreWrite === write) activeStoreWrite = null
+            pendingStoreWrites.remove(write)
             staleStoreWrites.add(write.stored)
+        }
+        return write.submitted
+    }
+
+    /** 补偿写结束（成败同口径）：其值是调度时的原选择，回读一律按过期忽略；
+     *  其后若有同值合法新写，confirm 会先行移除该 stale 记录。 */
+    private fun completeCompensationWrite(write: StoreWrite) {
+        synchronized(storeWriteLock) {
+            pendingStoreWrites.remove(write)
+            staleStoreWrites.add(write.stored)
+        }
+    }
+
+    /**
+     * 切换写盘超时/取消后的补偿：把放弃事务时的原选择重新排队写盘（独立 application scope，
+     * 一次性任务，非后台轮询）。DataStore 串行 edit 使补偿排在迟写之后；经 [storeWriteMutex]
+     * 与单调版本检查防覆盖更新的合法切换——认领写槽时已有更大 version 的切换写则补偿过时跳过，
+     * 新写最终获胜。失败如实记录日志，不吞异常。
+     */
+    private fun schedulePreviousSelectionRewrite(abandoned: StoreWrite) {
+        val previous = _selectedProvider.value ?: return
+        val barrier = abandoned.version
+        appScope.launch {
+            storeWriteMutex.withLock {
+                val write = synchronized(storeWriteLock) {
+                    if (storeWriteVersion > barrier) null else beginStoreWriteLocked(previous.stored)
+                }
+                if (write == null) {
+                    log("切换补偿写盘跳过：已有更新的切换写（barrier=$barrier），新写最终获胜")
+                    return@withLock
+                }
+                log("切换写盘超时/取消：补偿写回原选择 ${previous.stored}（barrier=$barrier）")
+                try {
+                    store.setRawSelection(previous.stored)
+                } catch (t: Throwable) {
+                    // 补偿失败如实记录；遗留迟写回读由 stale 集合继续在本进程忽略
+                    log("切换补偿写盘失败: ${t.javaClass.simpleName}: ${t.message?.take(120)}")
+                }
+                completeCompensationWrite(write)
+            }
         }
     }
 
@@ -169,9 +219,8 @@ class ProviderCoordinator(
                 // 迟到写盘防护：本事务尚未确认（commitSwitch 成功分支会直接发布状态，回读冗余）
                 // 或已放弃的写若稍后完成并回读，一律不得把选择改成该 target（§11.3 超时保留原选择）。
                 val adopt = synchronized(storeWriteLock) {
-                    val inFlight = activeStoreWrite
                     when {
-                        raw != null && inFlight != null && raw == inFlight.stored -> inFlight.confirmed
+                        raw != null && pendingStoreWrites.any { it.stored == raw } -> false
                         raw != null && staleStoreWrites.remove(raw) -> false
                         else -> true
                     }
@@ -402,14 +451,20 @@ class ProviderCoordinator(
                 }
                 val storeWrite = beginStoreWrite(target.stored)
                 try {
-                    store.setRawSelection(target.stored)
+                    storeWriteMutex.withLock {
+                        storeWrite.submitted = true
+                        store.setRawSelection(target.stored)
+                    }
                     // 正常返回才算写盘成功；随后成功分支直接发布新代次与选择
                     confirmStoreWrite(storeWrite)
                 } catch (ce: CancellationException) {
-                    // 超时/取消：底层写可能不可取消、稍后仍完成并回读——登记 stale，回读不得采用
-                    abandonStoreWrite(storeWrite)
+                    // 超时/取消：底层写可能不可取消、稍后仍完成——已提交的写排队补偿写回原选择
+                    if (abandonStoreWrite(storeWrite)) {
+                        schedulePreviousSelectionRewrite(storeWrite)
+                    }
                     throw ce
                 } catch (t: Throwable) {
+                    // 同步写失败不存在迟写：不补偿
                     abandonStoreWrite(storeWrite)
                     persistFailure = t
                 }

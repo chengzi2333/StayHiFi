@@ -126,13 +126,18 @@ class ProviderSwitchTest {
         val commit = CompletableDeferred<Unit>()
     }
 
-    /** 可控写盘：writeGate 挂起、writeFailure 抛错、onWrite 在写盘时点观察事务状态。 */
+    /** 可控写盘：writeGate 挂起、writeFailure 抛错、onWrite 在写盘时点观察事务状态。
+     *  [persisted] 模拟落盘后的持久值（下次进程启动会恢复它）；
+     *  [diskMutex] 模拟 DataStore 串行 edit actor——按 edit 提交顺序落盘（迟写先提交先落盘，
+     *  补偿写后提交排在其后）。 */
     private class FakeStore(val raw: MutableSharedFlow<String?>) : ProviderSelectionStore {
         val writes = Collections.synchronizedList(mutableListOf<String>())
+        @Volatile var persisted: String? = null
         @Volatile var writeGate: CompletableDeferred<Unit>? = null
         @Volatile var writeFailure: Throwable? = null
         @Volatile var onWrite: (() -> Unit)? = null
         @Volatile var lateWrite: LateWrite? = null
+        val diskMutex = Mutex()
         override val rawSelection: Flow<String?> = raw
         override suspend fun setRawSelection(value: String) {
             writeFailure?.let { throw it }
@@ -140,17 +145,24 @@ class ProviderSwitchTest {
             if (lw != null) {
                 writes.add(value)
                 lw.started.complete(value)
-                // 底层落盘在独立协程：本函数被取消后，commit 放行时仍完成并回读
+                // 底层落盘在独立协程但按提交顺序占用串行 actor：本函数被取消后，
+                // commit 放行时仍完成并回读；排在其后提交的补偿写必须等它落盘
                 lw.scope.launch {
-                    lw.commit.await()
-                    raw.emit(value)
+                    diskMutex.withLock {
+                        lw.commit.await()
+                        persisted = value   // 迟写最终落盘
+                        raw.emit(value)
+                    }
                 }
                 // 挂起等待底层归还；切换超时/调用方取消会取消此等待，但底层写不受 cancel 影响
                 kotlinx.coroutines.awaitCancellation()
             }
-            writeGate?.await()
-            writes.add(value)
-            onWrite?.invoke()
+            diskMutex.withLock {
+                writeGate?.await()
+                writes.add(value)
+                persisted = value
+                onWrite?.invoke()
+            }
         }
     }
 
@@ -164,6 +176,7 @@ class ProviderSwitchTest {
         val raw: MutableSharedFlow<String?>,
         val store: FakeStore,
         val applyLock: Mutex,
+        val coordLogs: MutableList<String>,
     )
 
     private fun TestScope.harness(granted: Boolean? = true): Harness {
@@ -182,17 +195,19 @@ class ProviderSwitchTest {
         val raw = MutableSharedFlow<String?>(extraBufferCapacity = 4)
         val store = FakeStore(raw)
         val applyLock = Mutex()
+        val coordLogs = Collections.synchronizedList(mutableListOf<String>())
         val coordinator = ProviderCoordinator(
             applicationScope = appScope(),
             store = store,
             shizukuFactory = factory::create,
-            log = { },   // JVM 单测无 android.util.Log；与 BackgroundProviderContractTest 同口径
+            log = { coordLogs += it },   // JVM 单测无 android.util.Log；记录以便断言补偿写行为
             rootTransport = transport,
             ioDispatcher = StandardTestDispatcher(testScheduler),
             rootLogger = logger,
             applyLock = applyLock,
         )
-        return Harness(transport, backend, coordinator, factory, logger, sink, raw, store, applyLock)
+        return Harness(transport, backend, coordinator, factory, logger, sink, raw, store, applyLock,
+            coordLogs)
     }
 
     private fun TestScope.driveToReady(h: Harness) {
@@ -594,11 +609,17 @@ class ProviderSwitchTest {
         assertEquals(ProviderKind.ROOT, h.coordinator.selectedProvider.value)
 
         // 迟到的底层写完成并回读 target：超时已放弃的切换不得采用 target（§11.3 超时保留原选择）
+        h.store.lateWrite = null   // 迟写放行后，补偿写走正常路径
         lw.commit.complete(Unit)
         advanceUntilIdle()
         assertEquals("迟到写盘回读不得把选择改成已放弃的 target",
             ProviderKind.ROOT, h.coordinator.selectedProvider.value)
         assertEquals(ProviderKind.ROOT, h.coordinator.activeProvider.value)
+        // 跨进程闭环：补偿写把原选择重新排队落盘（DataStore 串行 edit 排在迟写之后），
+        // 下次进程启动恢复的仍是 previous
+        assertEquals("补偿写必须在迟写后把原选择重新落盘",
+            listOf("shizuku", "root"), h.store.writes)
+        assertEquals("最终持久 raw 仍为 previous", "root", h.store.persisted)
     }
 
     @Test
@@ -625,11 +646,54 @@ class ProviderSwitchTest {
         assertEquals(ProviderKind.ROOT, h.coordinator.selectedProvider.value)
 
         // 不可取消的底层写稍后仍完成并回读：取消的切换同样不得采用 target
+        h.store.lateWrite = null   // 迟写放行后，补偿写走正常路径
         lw.commit.complete(Unit)
         advanceUntilIdle()
         assertEquals("取消后的迟到写盘回读不得采用 target",
             ProviderKind.ROOT, h.coordinator.selectedProvider.value)
         assertEquals(ProviderKind.ROOT, h.coordinator.activeProvider.value)
+        // 取消路径同样补偿写回原选择，跨进程闭环
+        assertEquals("取消后补偿写必须把原选择重新落盘",
+            listOf("shizuku", "root"), h.store.writes)
+        assertEquals("root", h.store.persisted)
+    }
+
+    @Test
+    fun newerSwitchWinsOverStaleCompensationWrite() = runTest {
+        val h = harness()
+        advanceUntilIdle()
+        h.raw.emit("root")
+        driveToReady(h)
+
+        // 第一次切换：写盘挂起超时（writeGate 永不归还）→ 原选择 root 保留，补偿写排队
+        // （尚未认领写槽）；补偿与迟写回读的落盘交互由 lateStoreWriteAfterTimeout 覆盖
+        h.store.writeGate = CompletableDeferred()
+        val first = h.coordinator.switchToShizuku(ProviderOwner("settings"), ProviderSource.SETTINGS)
+        assertTrue(first is ProviderSwitchResult.NotCommitted)
+        assertEquals(SwitchFailureReason.SWITCH_TIMEOUT,
+            (first as ProviderSwitchResult.NotCommitted).reason)
+        assertEquals(ProviderKind.ROOT, h.coordinator.selectedProvider.value)
+
+        // 更新的合法切换随即发起（写版本已递增），并停在自己的写盘点
+        val gate = CompletableDeferred<Unit>()
+        h.store.writeGate = gate
+        val second = async(UnconfinedTestDispatcher(testScheduler)) {
+            h.coordinator.switchToShizuku(ProviderOwner("settings"), ProviderSource.SETTINGS)
+        }
+        assertFalse(second.isCompleted)
+        assertTrue("新事务必须已发起", h.coordinator.switching.value)
+
+        // 补偿写被写互斥挡在新事务之后；新写先完成后，补偿认领时才做版本检查 → 过时跳过
+        runCurrent()
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(second.isCompleted)
+        assertTrue(second.getCompleted() is ProviderSwitchResult.Committed)
+        assertTrue("旧补偿必须因版本过时而跳过", h.coordLogs.any { it.contains("补偿写盘跳过") })
+        assertEquals("过时补偿不得写盘，新写最终获胜", listOf("shizuku"), h.store.writes)
+        assertEquals("最终持久值为新选择", "shizuku", h.store.persisted)
+        assertEquals(ProviderKind.SHIZUKU, h.coordinator.selectedProvider.value)
+        assertEquals(ProviderKind.SHIZUKU, h.coordinator.activeProvider.value)
     }
 
     // ─────────────────────────── 取消的 attempt 迟到成功不得提交 ───────────────────────────
