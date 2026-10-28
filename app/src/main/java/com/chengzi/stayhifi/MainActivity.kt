@@ -66,7 +66,9 @@ import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.QsTileService
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
 import com.chengzi.stayhifi.trigger.ApplyPolicy
+import com.chengzi.stayhifi.trigger.ApplyTriggers
 import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.TriggerSource
 import com.chengzi.stayhifi.trigger.TargetAssessment
 import com.chengzi.stayhifi.trigger.HeadsetEvents
 import com.chengzi.stayhifi.trigger.ListenerService
@@ -1237,7 +1239,10 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 // 对抗审查 I2：手动入口传 force=true，不被 autoApply=false 静默拦截
-                ApplyWorker(this@MainActivity).run(mac, name, force = true)
+                ApplyTriggers.run(
+                    this@MainActivity, mac, name,
+                    force = true, source = TriggerSource.MANUAL,
+                )
             } catch (t: Throwable) {
                 LogStore.log("立即满血失败: $t")
             } finally {

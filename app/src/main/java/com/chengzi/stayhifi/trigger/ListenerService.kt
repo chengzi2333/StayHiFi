@@ -71,10 +71,13 @@ class ListenerService : Service() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 BluetoothDevice.ACTION_ACL_CONNECTED -> onConnected(intent)
-                BluetoothDevice.ACTION_ACL_DISCONNECTED -> scope.launch {
-                    LogStore.log("ACL_DISCONNECTED，刷新常驻通知")
-                    HeadsetEvents.bump()
-                    refreshNotification()
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+                    disconnectedMac(intent, "ACL_DISCONNECTED")?.let(ApplyTriggers::onDisconnected)
+                    scope.launch {
+                        LogStore.log("ACL_DISCONNECTED，刷新常驻通知")
+                        HeadsetEvents.bump()
+                        refreshNotification()
+                    }
                 }
                 // Task 31：OriginOS 未投递 ACL_DISCONNECTED（真机广播史取证），
                 // A2DP profile 的 CONNECTION_STATE_CHANGED 是系统蓝牙进程发出的独立信号，
@@ -82,6 +85,9 @@ class ListenerService : Service() {
                 BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
                     val state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1)
                     if (state == BluetoothProfile.STATE_DISCONNECTED) {
+                        disconnectedMac(
+                            intent, "A2DP_CONNECTION_STATE_CHANGED=DISCONNECTED",
+                        )?.let(ApplyTriggers::onDisconnected)
                         scope.launch {
                             LogStore.log("A2DP_CONNECTION_STATE_CHANGED=DISCONNECTED，刷新常驻通知")
                             HeadsetEvents.bump()
@@ -184,6 +190,24 @@ class ListenerService : Service() {
 
     // ================= ACL_CONNECTED =================
 
+    /** 仅在系统广播可安全提供地址时清断该 MAC 的触发窗口；权限失败不伪造地址。 */
+    private fun disconnectedMac(intent: Intent, signal: String): String? {
+        val device: BluetoothDevice? = try {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        } catch (se: SecurityException) {
+            LogStore.log("ListenerService $signal 读取 EXTRA_DEVICE 需要 BLUETOOTH_CONNECT: $se")
+            null
+        }
+        if (device == null) return null
+        return try {
+            device.address
+        } catch (se: SecurityException) {
+            LogStore.log("ListenerService $signal 读取设备地址需要 BLUETOOTH_CONNECT: $se")
+            null
+        }
+    }
+
     private fun onConnected(intent: Intent) {
         val device: BluetoothDevice? = try {
             @Suppress("DEPRECATION")
@@ -209,7 +233,10 @@ class ListenerService : Service() {
             HeadsetEvents.bump()
             refreshNotification()
             try {
-                ApplyWorker(this@ListenerService).run(mac, name)
+                ApplyTriggers.run(
+                    this@ListenerService, mac, name,
+                    force = false, source = TriggerSource.LISTENER_SERVICE,
+                )
             } catch (t: Throwable) {
                 LogStore.log("ListenerService 触发 ApplyWorker 未捕获异常: $t")
             }
@@ -261,9 +288,12 @@ class ListenerService : Service() {
                 val obj = devices.getJSONObject(i)
                 val mac = obj.getString("mac")
                 val name = obj.getString("name")
-                LogStore.log("启动补触发：发现已连接设备 $name ($mac)，补跑 ApplyWorker")
+                LogStore.log("启动补触发：发现已连接设备 $name ($mac)，提交统一触发入口")
                 try {
-                    ApplyWorker(this).run(mac, name)
+                    ApplyTriggers.run(
+                        this@ListenerService, mac, name,
+                        force = false, source = TriggerSource.STARTUP,
+                    )
                 } catch (t: Throwable) {
                     LogStore.log("启动补触发 ApplyWorker 未捕获异常: $t")
                 }

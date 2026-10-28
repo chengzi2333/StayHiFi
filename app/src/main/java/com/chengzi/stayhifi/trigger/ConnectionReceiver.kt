@@ -60,7 +60,10 @@ class ConnectionReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                ApplyWorker(context).run(mac, name)
+                ApplyTriggers.run(
+                    context, mac, name,
+                    force = false, source = TriggerSource.CONNECTION_RECEIVER,
+                )
             } catch (t: Throwable) {
                 LogStore.log("ApplyWorker 未捕获异常: $t")
             } finally {

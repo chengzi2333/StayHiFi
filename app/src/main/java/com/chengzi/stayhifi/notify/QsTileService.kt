@@ -10,7 +10,8 @@ import com.chengzi.stayhifi.LogStore
 import com.chengzi.stayhifi.MainActivity
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
-import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.ApplyTriggers
+import com.chengzi.stayhifi.trigger.TriggerSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,7 +20,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 
 /**
- * 快捷设置磁贴（Task 6）：点击 → 有连接设备则立即 [ApplyWorker] 拉满，无则打开 App。
+ * 快捷设置磁贴（Task 6）：点击 → 有连接设备则经 [ApplyTriggers] 立即拉满，无则打开 App。
  * 磁贴可用态受 qsTile 开关控制（关 = TILE_STATE_UNAVAILABLE）；
  * 副标题显示自动拉满总开关状态。
  */
@@ -50,7 +51,10 @@ class QsTileService : TileService() {
                     val name = arr.getJSONObject(0).getString("name")
                     LogStore.log("QS 磁贴触发拉满: $name ($mac)")
                     // 对抗审查 I2：手动入口传 force=true，不被 autoApply=false 静默拦截
-                    ApplyWorker(this@QsTileService).run(mac, name, force = true)
+                    ApplyTriggers.run(
+                        this@QsTileService, mac, name,
+                        force = true, source = TriggerSource.QS,
+                    )
                 } finally {
                     provider.unbind()
                 }
