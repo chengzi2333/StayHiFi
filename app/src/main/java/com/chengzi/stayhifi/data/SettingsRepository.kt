@@ -6,7 +6,9 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.chengzi.stayhifi.shell.ProviderSelectionStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -23,7 +25,7 @@ private val Context.settingsDataStore by preferencesDataStore(
  * 全局设置（DataStore Preferences，设计 §4.6）。
  * 全部默认 false；autoEnabled 在 Onboarding 完成时置 true。
  */
-class SettingsRepository(private val context: Context) {
+class SettingsRepository(private val context: Context) : ProviderSelectionStore {
 
     private object K {
         val AUTO_ENABLED = booleanPreferencesKey("autoEnabled")
@@ -33,6 +35,8 @@ class SettingsRepository(private val context: Context) {
         val ONBOARDED = booleanPreferencesKey("onboarded")
         // Task 38：上次更新检查时间戳（24h 节流，毫秒）
         val LAST_UPDATE_CHECK = longPreferencesKey("lastUpdateCheckMillis")
+        // Task D2：特权通道选择（只存字符串 shizuku/root，不存 enum ordinal，设计 §11.3）
+        val PROVIDER = stringPreferencesKey("provider")
     }
 
     val autoEnabled: Flow<Boolean> = context.settingsDataStore.data
@@ -48,6 +52,14 @@ class SettingsRepository(private val context: Context) {
     /** Task 38：上次更新检查时间戳（0 = 从未检查）。 */
     val lastUpdateCheckMillis: Flow<Long> = context.settingsDataStore.data
         .map { it[K.LAST_UPDATE_CHECK] ?: 0L }
+
+    // Task D2：特权通道选择存储面（ProviderSelectionStore，设计 §11.3）
+    override val rawSelection: Flow<String?> = context.settingsDataStore.data
+        .map { it[K.PROVIDER] }
+
+    override suspend fun setRawSelection(value: String) {
+        context.settingsDataStore.edit { it[K.PROVIDER] = value }
+    }
 
     suspend fun isAutoEnabled(): Boolean = autoEnabled.first()
     suspend fun isNotifyResult(): Boolean = notifyResult.first()
