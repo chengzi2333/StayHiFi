@@ -1,5 +1,6 @@
 package com.chengzi.stayhifi.shell
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
@@ -9,9 +10,12 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -25,9 +29,14 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 
 /**
- * 本类运行在 Shizuku 拉起的独立进程（:codec）中，身份是 adb shell (uid 2000)，
- * 天然持有 BLUETOOTH_PRIVILEGED，因此可以调用隐藏 API：
+ * 本类运行在特权进程（独立进程 :codec）中，由两种载体拉起，身份可诊断：
+ *   - Shizuku/Stellar：adb shell（uid 2000）；
+ *   - Root（实验）：libsu RootService，uid 由 Root 管理器决定。
+ * 特权身份天然持有（或应持有）BLUETOOTH_PRIVILEGED，因此可以调用隐藏 API：
  *   BluetoothA2dp.getCodecStatus() / setCodecConfigPreference()
+ *
+ * Task D1：不再假设 uid 0 必然等价于 shell 的蓝牙权限（部分 ROM/SELinux 下不成立）；
+ * 服务侧首条 read/write 诊断记录实际 Process.myUid()，read/write/dump 需分别外部验证。
  *
  * PoC 原则：全部走反射，不依赖任何隐藏类的编译期符号。
  * 逻辑与 PoC CodecService.java 一一对应（git e5973cb）。
@@ -38,6 +47,17 @@ class CodecService : ICodecService.Stub() {
     private var mThread: HandlerThread                 // A2DP 代理回调需要 Looper
     @Volatile private var mA2dp: BluetoothA2dp? = null
     @Volatile private var mAdapter: BluetoothAdapter? = null
+
+    // Task D1：首条 read/write 诊断只记一次实际 serviceUid
+    private val serviceUidLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    // Task 3：supported types 目录缓存（限频/失效见 SupportedTypesCatalogCache）。
+    // TTL 用 elapsedRealtime（单调），不依赖墙钟；loader 在缓存锁外执行。
+    private val supportedTypesCache = SupportedTypesCatalogCache { SystemClock.elapsedRealtime() }
+
+    // Task 3：adapter ON/OFF 跳变门控——仅跳变时失效目录缓存（连续 OFF 不重复失效，
+    // 保住 NULL/EMPTY/ERROR 的 10s 限频；OFF→ON 后首次读取仍重新加载）
+    private val catalogAdapterGate = AdapterStateInvalidator(supportedTypesCache)
 
     init {
         disableHiddenApiChecks()
@@ -59,6 +79,8 @@ class CodecService : ICodecService.Stub() {
 
     // ─────────────────────────── IPC 接口 ───────────────────────────
 
+    // Privileged shell/root process; outer IPC calls already catch permission and binder errors.
+    @SuppressLint("MissingPermission")
     override fun dumpDevices(): String = try {
         val a2dp = getA2dp()
         buildJsonArray {
@@ -74,31 +96,35 @@ class CodecService : ICodecService.Stub() {
     }
 
     override fun readConfig(mac: String?): String = try {
+        logServiceUidOnce("readConfig")
         val a2dp = getA2dp()
         val dev = findDevice(a2dp, mac)
         if (dev == null) {
             error("找不到目标设备 $mac")
         } else {
-            val status = a2dp.javaClass
-                .getMethod("getCodecStatus", BluetoothDevice::class.java)
-                .invoke(a2dp, dev)
-            val cfg = status.javaClass.getMethod("getCodecConfig").invoke(status)
-            val selectable = status.javaClass
-                .getMethod("getCodecsSelectableCapabilities")
-                .invoke(status) as List<*>
-            Log.i(TAG, "readConfig ${safeName(dev)}: ${configFromReflected(cfg!!).summary()}")
-            buildJsonObject {
-                put("current", configFromReflected(cfg).toJsonElement())
-                putJsonArray("selectable") {
-                    for (cap in selectable) add(configFromReflected(cap!!).toJsonElement())
-                }
-            }.toString()
+            // Task 2：分阶段反射读取；codecStatus/current 为 null 或反射异常时
+            // 仍返回含 current:null、各阶段状态与 errors 的 snapshot，绝不用 !! 崩掉。
+            val status = CodecReflectionReader.codecStatus(a2dp, dev)
+            // Task 3：supported 目录走缓存；loader 在缓存锁外执行，并发只发一次 binder
+            applyCatalogInvalidationPolicy()
+            val supported = supportedTypesCache.get { CodecReflectionReader.supportedTypes(a2dp) }
+            val snapshot = CodecReflectionReader.readSnapshot(
+                status = status, a2dp = a2dp, supportedTypes = supported,
+                serviceUid = Process.myUid(),
+                bluetoothState = bluetoothState(),
+                a2dpProxyState = a2dpProxyState(),
+            )
+            snapshot.current?.let {
+                Log.i(TAG, "readConfig ${safeName(dev)}: ${it.summary()}")
+            }
+            CodecStateSnapshotJson.encode(snapshot)
         }
     } catch (t: Throwable) {
         errorJson("readConfig", t)
     }
 
     override fun writeConfig(mac: String?, configJson: String?): String = try {
+        logServiceUidOnce("writeConfig")
         val target = CodecConfig.fromJson(configJson ?: "")
         val a2dp = getA2dp()
         val dev = findDevice(a2dp, mac)
@@ -151,6 +177,8 @@ class CodecService : ICodecService.Stub() {
 
     override fun destroy() {
         Log.i(TAG, "destroy")
+        // Task 3：服务销毁时缓存目录一并失效（纯内存操作，无 binder IO）
+        supportedTypesCache.invalidate()
     }
 
     // Task 43：传输层实况读取——dumpsys bluetooth_manager 的 "A2DP <codec> State:" 段
@@ -202,6 +230,17 @@ class CodecService : ICodecService.Stub() {
     }
 
     // ─────────────────────────── 内部实现（PoC 一一对应） ───────────────────────────
+
+    /**
+     * Task D1：服务侧首条 read/write 诊断记录实际 [Process.myUid()]。
+     * 可诊断身份：不假设 uid 0 拥有 shell 等价蓝牙权限（部分 ROM/SELinux 不成立），
+     * read/write/dump 的可用性需分别外部验证（设计 §11.1）。
+     */
+    private fun logServiceUidOnce(op: String) {
+        if (serviceUidLogged.compareAndSet(false, true)) {
+            Log.i(TAG, "first privileged op=$op serviceUid=${Process.myUid()}")
+        }
+    }
 
     private fun getA2dp(): BluetoothA2dp {
         mA2dp?.let { return it }
@@ -255,11 +294,15 @@ class CodecService : ICodecService.Stub() {
                     object : BluetoothProfile.ServiceListener {
                         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                             mA2dp = proxy as BluetoothA2dp
+                            // Task 3：A2DP 代理重建 → 目录缓存失效，下一次读取重新加载
+                            supportedTypesCache.invalidate()
                             latch.countDown()
                         }
 
                         override fun onServiceDisconnected(profile: Int) {
                             mA2dp = null
+                            // Task 3：A2DP 断开 → 目录缓存失效（纯内存操作，无 binder IO）
+                            supportedTypesCache.invalidate()
                         }
                     },
                     BluetoothProfile.A2DP)
@@ -354,6 +397,8 @@ class CodecService : ICodecService.Stub() {
         }
     }
 
+    // Privileged shell/root process; outer IPC calls already catch permission and binder errors.
+    @SuppressLint("MissingPermission")
     private fun findDevice(a2dp: BluetoothA2dp, mac: String?): BluetoothDevice? {
         val devices = a2dp.connectedDevices
         if (mac == null || mac.trim().isEmpty()) {
@@ -370,7 +415,8 @@ class CodecService : ICodecService.Stub() {
             .getMethod("getCodecStatus", BluetoothDevice::class.java)
             .invoke(a2dp, dev)
         val cfg = status.javaClass.getMethod("getCodecConfig").invoke(status)
-        return configFromReflected(cfg!!)
+        // 写读回路径行为不变：Task 2 仅把 9 字段转换移入 reader 复用
+        return CodecReflectionReader.configFromReflected(cfg!!)
     }
 
     /** 构造 BluetoothCodecConfig：Android 13+ 用 Builder，更老的走 9 参构造 */
@@ -411,28 +457,36 @@ class CodecService : ICodecService.Stub() {
         return ctor.newInstance(codecType, priority, sampleRate, bits, channel, cs1, cs2, cs3, cs4)
     }
 
-    // ── 反射读字段 ──
-
-    private fun getInt(cfg: Any, getter: String): Int =
-        cfg.javaClass.getMethod(getter).invoke(cfg) as Int
-
-    private fun getLong(cfg: Any, getter: String): Long =
-        cfg.javaClass.getMethod(getter).invoke(cfg) as Long
-
-    private fun configFromReflected(cfg: Any): CodecConfig = CodecConfig(
-        codecType = getInt(cfg, "getCodecType"),
-        priority = getInt(cfg, "getCodecPriority"),
-        sampleRate = getInt(cfg, "getSampleRate"),
-        bitsPerSample = getInt(cfg, "getBitsPerSample"),
-        channelMode = getInt(cfg, "getChannelMode"),
-        cs1 = getLong(cfg, "getCodecSpecific1"),
-        cs2 = getLong(cfg, "getCodecSpecific2"),
-        cs3 = getLong(cfg, "getCodecSpecific3"),
-        cs4 = getLong(cfg, "getCodecSpecific4"),
-    )
+    // ── 反射读字段：9 字段转换已移入 CodecReflectionReader（Task 2），此处保留 JSON 辅助 ──
 
     private fun CodecConfig.toJsonElement(): JsonElement = Json.parseToJsonElement(toJson())
 
+    /**
+     * Task 3 缓存失效策略（fix：跳变门控）：adapter ON/OFF 跳变时目录缓存失效；
+     * 连续 OFF 期间不重复失效，OFF 期读取走正常 TTL 限频。
+     * 纯内存操作（读 mAdapter 字段 + 缓存锁），无 binder IO。
+     */
+    private fun applyCatalogInvalidationPolicy() {
+        catalogAdapterGate.onAdapterState(bluetoothState() == "ON")
+    }
+
+    /** 蓝牙开关状态的安全读取；adapter 缺失或读取异常均为 UNKNOWN */
+    private fun bluetoothState(): String = try {
+        when (mAdapter?.isEnabled) {
+            true -> "ON"
+            false -> "OFF"
+            null -> "UNKNOWN"
+        }
+    } catch (t: Throwable) {
+        "UNKNOWN"
+    }
+
+    /** A2DP 代理连接状态；getA2dp() 成功后必为 CONNECTED */
+    private fun a2dpProxyState(): String =
+        if (mA2dp != null) "CONNECTED" else "DISCONNECTED"
+
+    // Privileged shell/root process; outer IPC calls already catch permission and binder errors.
+    @SuppressLint("MissingPermission")
     private fun safeName(d: BluetoothDevice): String = try {
         d.name ?: "?"
     } catch (t: Throwable) {

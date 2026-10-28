@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Task D1：libsu 只发在 JitPack（设计 §11.5 固定 6.0.0，不引入 nio/io）
+        maven { url 'https://jitpack.io' }
     }
 }
 rootProject.name = 'stayhifi'

@@ -25,6 +25,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -34,17 +35,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.shell.ProviderKind
+import com.chengzi.stayhifi.shell.RootShellStatus
+import com.chengzi.stayhifi.shell.RootSnapshot
+import com.chengzi.stayhifi.shell.RootStatus
+import com.chengzi.stayhifi.ui.common.RootStatusCard
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private const val PAGE_COUNT = 5
-
-/** 参数来源选择。 */
-enum class SourceMode(val title: String, val description: String) {
-    AUTO_FULL("自动拉满（推荐）", "连上耳机就把本机当前能谈出的最高音质参数写上去并验证，全程无感。"),
-    RECORD_WIZARD("录制向导", "诊断工具：抓一次当前参数存作本机记录，不参与拉满决策。"),
-}
+// UX 收敛：「参数来源」页撤出主路径（诊断工具不与自动拉满并列），引导 5→4 页；
+// 记录当前参数的入口移到设备页（空态按钮 + 设备卡「重新记录」）。
+private const val PAGE_COUNT = 4
 
 /** 特权载体类型。 */
 enum class CarrierKind(val displayName: String) {
@@ -66,12 +68,40 @@ data class CarrierUiState(
 data class OnboardingUiState(
     val shizuku: CarrierUiState = CarrierUiState(CarrierKind.SHIZUKU),
     val stellar: CarrierUiState = CarrierUiState(CarrierKind.STELLAR),
+    /** Task D10：教程内的通道选择（纯 UI 态，默认 Shizuku/Stellar 组）。仅选择/查看不写 DataStore；
+     *  Root 只有「请求 Root 授权」验证+提交成功后才经 Coordinator 持久化（§11.2/§11.3）。 */
+    val providerChoice: ProviderKind = ProviderKind.SHIZUKU,
+    /** Coordinator 持久选择 / 生效通道（首读前为 null）；Root 门槛要求二者均为 ROOT。 */
+    val selectedProvider: ProviderKind? = null,
+    val activeProvider: ProviderKind? = null,
+    /** Root 可观察快照（Root 状态卡数据源，初值与 RootTransport 冷启动一致）。 */
+    val root: RootSnapshot = RootSnapshot(
+        status = RootStatus.UNVERIFIED,
+        granted = null,
+        shellStatus = RootShellStatus.UNKNOWN,
+        observedReason = "cold start",
+    ),
+    /** Root 前台授权/切换事务进行中：禁用重复点击（§11.3 单飞/有界切换）。 */
+    val providerOperationInFlight: Boolean = false,
     val headsetConnected: Boolean = false,
     val headsetName: String? = null,
-    val sourceMode: SourceMode = SourceMode.AUTO_FULL,
     val autostartEnabled: Boolean = false,
     val batteryWhitelistEnabled: Boolean = false,
 )
+
+/**
+ * Task D10：载体页「下一步」门槛（设计 §11.2）。
+ *  - Shizuku/Stellar 组沿用「任一载体三灯就绪」；
+ *  - Root 组只有 持久选择=生效通道=ROOT 且 RootSnapshot=READY 才放行——
+ *    Shizuku ready 不放行；candidate 健康（transport READY）但尚未 commit 也不放行。
+ */
+fun carrierPageReady(state: OnboardingUiState): Boolean = when (state.providerChoice) {
+    ProviderKind.SHIZUKU -> state.shizuku.ready || state.stellar.ready
+    ProviderKind.ROOT ->
+        state.selectedProvider == ProviderKind.ROOT &&
+            state.activeProvider == ProviderKind.ROOT &&
+            state.root.status == RootStatus.READY
+}
 
 /** 引导页全部动作上抛，本层无逻辑。 */
 sealed interface OnboardingAction {
@@ -83,20 +113,26 @@ sealed interface OnboardingAction {
     data class OpenCarrierGuide(val kind: CarrierKind) : OnboardingAction
     data class RequestCarrierPermission(val kind: CarrierKind) : OnboardingAction
 
+    /** Task D10：教程内切换通道选择（纯 UI 态，不写 DataStore；改选同时作废进行中 attempt）。 */
+    data class SelectProvider(val kind: ProviderKind) : OnboardingAction
+    /** Task D10：Root 卡唯一授权入口——显式点击才触发前台验证+提交（§11.2/§11.4.6）。 */
+    data object RequestRootAuthorization : OnboardingAction
+    /** Task D10：离页/改选时作废进行中的前台 Root attempt，迟到成功不得提交（§11.4.6）。 */
+    data object CancelRootAuthorization : OnboardingAction
+
     data object RefreshConnection : OnboardingAction
 
-    data class SelectSource(val mode: SourceMode) : OnboardingAction
+    /** v1.2.2：连接页「排障日志」次级入口——直接复用运行日志页，不要求完成引导。 */
+    data object OpenLogs : OnboardingAction
 
     data object OpenAutostartSettings : OnboardingAction
     data object OpenBatteryWhitelist : OnboardingAction
     /** 第三道闸：后台高耗电（+ 卡片锁定在文案里引导，系统无 API 可查/可跳）。 */
     data object OpenBackgroundPower : OnboardingAction
-
-    data object OpenRecordWizard : OnboardingAction
 }
 
 /**
- * 五页首次引导：欢迎 → 载体检测 → 连接耳机 → 参数来源 → 保活设置。
+ * 四页首次引导：欢迎 → 特权方式 → 连接耳机 → 保活设置。
  * 状态全部上抛，页面自身无状态、无业务逻辑。
  */
 @Composable
@@ -136,16 +172,16 @@ fun OnboardingScreen(
                     0 -> WelcomePage()
                     1 -> CarrierPage(state, onAction)
                     2 -> ConnectPage(state, onAction)
-                    3 -> SourcePage(state, onAction)
-                    4 -> BatteryPage(state, onAction)
+                    3 -> BatteryPage(state, onAction)
                 }
             }
 
             val isLastPage = pagerState.currentPage == PAGE_COUNT - 1
-            // 硬门槛：第 1 页要求至少一个特权载体就绪，第 2 页要求耳机已连接；
+            // 硬门槛：第 1 页按当前所选通道判定（Task D10，§11.2：Shizuku 组任一载体就绪；
+            // Root 组需 selected=active=ROOT 且快照 READY），第 2 页要求耳机已连接；
             // 未达标时「下一步」置灰，但保留「稍后再说」逃生口，避免用户被卡死。
             val nextEnabled = when (pagerState.currentPage) {
-                1 -> state.shizuku.ready || state.stellar.ready
+                1 -> carrierPageReady(state)
                 2 -> state.headsetConnected
                 else -> true
             }
@@ -226,11 +262,93 @@ private fun CarrierPage(state: OnboardingUiState, onAction: (OnboardingAction) -
     ) {
         PageHeader(
             title = "选择特权方式",
-            subtitle = "StayHiFi 需要通过 Shizuku 或 Stellar 获得系统权限，任选其一准备好即可。",
+            subtitle = "StayHiFi 需要系统权限才能调校耳机参数，选一种方式准备好即可。",
         )
-        CarrierCard(state.shizuku, onAction)
-        CarrierCard(state.stellar, onAction)
+        // Task D10（§11.2）：顶部两个明确选择，不按谁先 ready 自动改选；
+        // 选择是纯 UI 态，Root 只有显式「请求 Root 授权」验证成功后才持久化。
+        ProviderChoiceCard(
+            title = "Shizuku / Stellar（推荐）",
+            description = "安装任意一个并授权，即可获得调校权限。",
+            selected = state.providerChoice == ProviderKind.SHIZUKU,
+            onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.SHIZUKU)) },
+        )
+        ProviderChoiceCard(
+            title = "Root（实验）",
+            // spec §11.2 简洁事实句（UX 收敛后口径，三条边界齐全：实验/不提上限/可退回）
+            description = "已 Root 的设备可选；不提升音质上限，随时可切回。",
+            selected = state.providerChoice == ProviderKind.ROOT,
+            onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.ROOT)) },
+        )
+        when (state.providerChoice) {
+            ProviderKind.SHIZUKU -> {
+                CarrierCard(state.shizuku, onAction)
+                CarrierCard(state.stellar, onAction)
+            }
+            ProviderKind.ROOT -> RootStatusCardSection(state, onAction)
+        }
     }
+}
+
+@Composable
+private fun ProviderChoiceCard(
+    title: String,
+    description: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                if (selected) {
+                    StatusBadge(text = "已选", positive = true)
+                }
+            }
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * Task D10：Root 状态卡（§11.2）——共享实现见 [com.chengzi.stayhifi.ui.common.RootStatusCard]
+ * （一行状态 + 授权按钮 + 查看详情弹窗）。教程侧额外保留：离开组合（离页/改选）即作废
+ * 进行中的前台 attempt，迟到成功不得提交（§11.4.6）。
+ */
+@Composable
+private fun RootStatusCardSection(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
+    DisposableEffect(Unit) {
+        onDispose { onAction(OnboardingAction.CancelRootAuthorization) }
+    }
+    val busy = state.providerOperationInFlight ||
+        state.root.status == RootStatus.REQUESTING || state.root.status == RootStatus.BINDING
+    RootStatusCard(
+        root = state.root,
+        busy = busy,
+        onRequestAuthorization = { onAction(OnboardingAction.RequestRootAuthorization) },
+    )
 }
 
 @Composable
@@ -270,7 +388,7 @@ private fun CarrierCard(
             // 提前说明，避免用户看到「允许使用 Shizuku」以为装错了 App。
             if (carrier.kind == CarrierKind.STELLAR) {
                 Text(
-                    text = "授权弹窗由 Stellar 提供，显示 Shizuku 字样属正常——Stellar 是 Shizuku 的兼容分支。",
+                    text = "授权弹窗显示 Shizuku 属正常（Stellar 是其兼容分支）。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -381,59 +499,14 @@ private fun ConnectPage(state: OnboardingUiState, onAction: (OnboardingAction) -
                 ) { Text("刷新") }
             }
         }
-    }
-}
-
-@Composable
-private fun SourcePage(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        PageHeader(
-            title = "参数从哪里来？",
-            subtitle = "选一个方式，之后随时可以改。",
-        )
-        SourceMode.entries.forEach { mode ->
-            val selected = state.sourceMode == mode
-            Card(
-                onClick = { onAction(OnboardingAction.SelectSource(mode)) },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (selected) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
-                ),
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = mode.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Spacer(Modifier.weight(1f))
-                        if (selected) {
-                            StatusBadge(text = "已选", positive = true)
-                        }
-                    }
-                    Text(
-                        text = mode.description,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
+        // v1.2.2：排障日志次级入口——连接异常时用户可就地查看/复制日志反馈，
+        // 不强制完成引导；返回经 LogsScreen BackHandler 回到本页。
+        TextButton(
+            onClick = { onAction(OnboardingAction.OpenLogs) },
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .heightIn(min = 48.dp),
+        ) { Text("排障日志") }
     }
 }
 
@@ -468,20 +541,11 @@ private fun BatteryPage(state: OnboardingUiState, onAction: (OnboardingAction) -
         // 「后台高耗电」可尽力跳系统页；「卡片锁定」无公开 API，纯文案引导。
         BatteryGuideItem(
             title = "后台高耗电 + 卡片锁定",
-            description = "在 设置→电池→后台耗电管理 中允许 StayHiFi；" +
-                "并在最近任务里下拉卡片点「锁定」，防划卡清理。",
+            description = "允许后台高耗电，并在最近任务里锁定 StayHiFi，防止被清理。",
             done = false,
             actionLabel = "去设置",
             onAction = { onAction(OnboardingAction.OpenBackgroundPower) },
         )
-        if (state.sourceMode == SourceMode.RECORD_WIZARD) {
-            Button(
-                onClick = { onAction(OnboardingAction.OpenRecordWizard) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp),
-            ) { Text("现在去录制参数模板") }
-        }
     }
 }
 
@@ -632,6 +696,26 @@ private fun OnboardingScreenPreviewCarrierNotReady() {
     }
 }
 
+@Preview(showBackground = true, name = "引导页-Root（实验）未授权")
+@Composable
+private fun OnboardingScreenPreviewRootChoice() {
+    StayHiFiTheme(dynamicColor = false) {
+        OnboardingScreen(
+            state = OnboardingUiState(
+                providerChoice = ProviderKind.ROOT,
+                root = RootSnapshot(
+                    status = RootStatus.NOT_GRANTED,
+                    granted = false,
+                    shellStatus = RootShellStatus.UNKNOWN,
+                    observedReason = "isAppGrantedRoot=false",
+                ),
+            ),
+            onAction = {},
+            initialPage = 1,
+        )
+    }
+}
+
 @Preview(showBackground = true, name = "引导页-就绪态")
 @Composable
 private fun OnboardingScreenPreviewReady() {
@@ -657,7 +741,6 @@ private fun OnboardingScreenPreviewDark() {
             state = OnboardingUiState(
                 headsetConnected = true,
                 headsetName = "OPPO Enco X3",
-                sourceMode = SourceMode.RECORD_WIZARD,
                 autostartEnabled = true,
             ),
             onAction = {},

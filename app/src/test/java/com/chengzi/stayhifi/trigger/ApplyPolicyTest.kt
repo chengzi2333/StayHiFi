@@ -1,6 +1,8 @@
 package com.chengzi.stayhifi.trigger
 
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecDeviceFixtures
+import com.chengzi.stayhifi.codec.Negotiation
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -19,6 +21,39 @@ class ApplyPolicyTest {
         cs3 = 1543503872L,
         cs4 = 0L,
     )
+
+    @Test
+    fun deriveTargetCapsNxCaps11Stays96k() {
+        // Task 4 回归：NX type14 caps=11（最高 96k），身份识别成功不得新增 192 目标
+        val target = ApplyPolicy.deriveTarget(
+            CodecDeviceFixtures.nxCurrent,
+            listOf(CodecDeviceFixtures.selectableCaps(CodecDeviceFixtures.nxType, CodecDeviceFixtures.nxCapsMask)),
+        )
+
+        assertEquals(8, target.sampleRate)
+    }
+
+    @Test
+    fun deriveTargetCapsOpdCaps10Stays96k() {
+        // Task 4 回归：OPD type18 caps=10（最高 96k），即使系统身份为 LHDC V3 也不变
+        val target = ApplyPolicy.deriveTarget(
+            CodecDeviceFixtures.opdCurrent,
+            listOf(CodecDeviceFixtures.selectableCaps(CodecDeviceFixtures.opdType, CodecDeviceFixtures.opdCapsMask)),
+        )
+
+        assertEquals(8, target.sampleRate)
+    }
+
+    @Test
+    fun deriveTargetCapsPhzCaps42Keeps192() {
+        // Task 4 回归：PHZ type19 caps=42（含 192k 位），目标维持 192kHz
+        val target = ApplyPolicy.deriveTarget(
+            CodecDeviceFixtures.phzCurrent,
+            listOf(CodecDeviceFixtures.selectableCaps(CodecDeviceFixtures.phzType, CodecDeviceFixtures.phzCapsMask)),
+        )
+
+        assertEquals(32, target.sampleRate)
+    }
 
     @Test
     fun decideReturnsFalseWhenAlreadyAligned() {
@@ -235,5 +270,177 @@ class ApplyPolicyTest {
         val target = golden.copy(sampleRate = 0, bitsPerSample = 0)
         val actual = golden.copy(sampleRate = 8, bitsPerSample = 1)
         assertTrue(ApplyPolicy.matches(target, actual))
+    }
+
+    // assessTarget：同条目能力目标与完整降档链（Task B1）
+
+    private val assessCurrent = CodecConfig(
+        codecType = 10, priority = 0,
+        sampleRate = 2, bitsPerSample = 1, channelMode = 2,
+        cs1 = 50888712L, cs2 = 0L, cs3 = 1543503872L, cs4 = 0L,
+    )
+
+    /** 条目 A：192kHz + 16bit（channel 兼容 current）。 */
+    private val cap192Bits16 = CodecConfig(
+        codecType = 10, priority = 0,
+        sampleRate = 32, bitsPerSample = 1, channelMode = 2,
+        cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+    )
+
+    /** 条目 B：96kHz + 24bit（channel 兼容 current）。 */
+    private val cap96Bits24 = CodecConfig(
+        codecType = 10, priority = 0,
+        sampleRate = 8, bitsPerSample = 2, channelMode = 2,
+        cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+    )
+
+    @Test
+    fun completeTargetNeverCombinesDifferentCapabilityEntries() {
+        // 条目 A=192+16，条目 B=96+24；目标必须整条来自同一条目，不得拼出 192+24
+        val result = ApplyPolicy.assessTarget(assessCurrent, listOf(cap192Bits16, cap96Bits24))
+
+        assertEquals(TargetAssessment.Status.COMPLETE, result.status)
+        assertEquals(32, result.target?.sampleRate)
+        assertEquals(1, result.target?.bitsPerSample)
+        assertFalse(result.candidates.any { it.sampleRate == 32 && it.bitsPerSample == 2 })
+        assertEquals(listOf(32), result.candidates.map { it.sampleRate })
+    }
+
+    @Test
+    fun completeDescendingContainsOnlySameEntryReportedRates() {
+        // 唯一条目报告 192/48（掩码 34）+ 24bit；不得从 192 降出 176.4/96/88.2/44.1
+        val soleEntry = CodecConfig(
+            codecType = 10, priority = 0,
+            sampleRate = 34, bitsPerSample = 2, channelMode = 2,
+            cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+        )
+
+        val result = ApplyPolicy.assessTarget(assessCurrent, listOf(soleEntry))
+
+        assertEquals(TargetAssessment.Status.COMPLETE, result.status)
+        assertEquals(listOf(32, 2), result.candidates.map { it.sampleRate })
+        assertTrue(result.candidates.all { it.bitsPerSample == 2 })
+    }
+
+    @Test
+    fun incompleteCurrentHasNoTargetOrCandidates() {
+        listOf(0, 3, 43, 64, -1).forEach { rate ->
+            val result = ApplyPolicy.assessTarget(assessCurrent.copy(sampleRate = rate), listOf(cap192Bits16))
+            assertEquals(TargetAssessment.Status.INCOMPLETE_CURRENT, result.status)
+            assertEquals(null, result.target)
+            assertTrue(result.candidates.isEmpty())
+        }
+        // bits=0/3/未知值同样不可写
+        listOf(0, 3, 8).forEach { bits ->
+            val result = ApplyPolicy.assessTarget(assessCurrent.copy(bitsPerSample = bits), listOf(cap192Bits16))
+            assertEquals(TargetAssessment.Status.INCOMPLETE_CURRENT, result.status)
+            assertEquals(null, result.target)
+            assertTrue(result.candidates.isEmpty())
+        }
+        // channel=0/3/4 不可写（AOSP 仅 MONO=1/STEREO=2）
+        listOf(0, 3, 4).forEach { channel ->
+            val result = ApplyPolicy.assessTarget(assessCurrent.copy(channelMode = channel), listOf(cap192Bits16))
+            assertEquals(TargetAssessment.Status.INCOMPLETE_CURRENT, result.status)
+            assertEquals(null, result.target)
+            assertTrue(result.candidates.isEmpty())
+        }
+    }
+
+    @Test
+    fun capabilityDegradedWhenCurrentCodecMissingFromSelectable() {
+        val otherCodec = cap192Bits16.copy(codecType = 4)
+        val selectable = listOf(otherCodec)
+
+        val result = ApplyPolicy.assessTarget(assessCurrent, selectable)
+
+        assertEquals(TargetAssessment.Status.CAPABILITY_DEGRADED, result.status)
+        // 旧路径：target = deriveTarget，candidates = 单参 descending
+        val oldTarget = ApplyPolicy.deriveTarget(assessCurrent, selectable)
+        assertEquals(oldTarget, result.target)
+        assertEquals(Negotiation.descending(oldTarget), result.candidates)
+        assertFalse(ApplyPolicy.isAtHighest(result, assessCurrent))
+    }
+
+    @Test
+    fun capabilityDegradedWhenSelectableIsEmpty() {
+        val result = ApplyPolicy.assessTarget(assessCurrent, emptyList())
+
+        assertEquals(TargetAssessment.Status.CAPABILITY_DEGRADED, result.status)
+        val oldTarget = ApplyPolicy.deriveTarget(assessCurrent, emptyList())
+        assertEquals(oldTarget, result.target)
+        assertEquals(Negotiation.descending(oldTarget), result.candidates)
+        assertFalse(ApplyPolicy.isAtHighest(result, assessCurrent))
+    }
+
+    @Test
+    fun capabilityDegradedWhenCapabilityIsAllZero() {
+        // 条目在但 rate/bits 全 0（AOSP NONE）：无可证明组合，回落旧路径
+        val zeroCap = cap192Bits16.copy(sampleRate = 0, bitsPerSample = 0)
+
+        val result = ApplyPolicy.assessTarget(assessCurrent, listOf(zeroCap))
+
+        assertEquals(TargetAssessment.Status.CAPABILITY_DEGRADED, result.status)
+        val oldTarget = ApplyPolicy.deriveTarget(assessCurrent, listOf(zeroCap))
+        assertEquals(oldTarget, result.target)
+        assertEquals(Negotiation.descending(oldTarget), result.candidates)
+        assertFalse(ApplyPolicy.isAtHighest(result, assessCurrent))
+    }
+
+    @Test
+    fun capsMaskTenAndElevenDeriveOnly96k() {
+        // capsRateMask=10（8|2）与 11（8|2|1）最高位都是 8（96kHz）：同条目可证明 → COMPLETE，
+        // 身份识别成功不得派生 192 目标（Task 4 回归），降档链只含条目报告的 96/48
+        listOf(10, 11).forEach { mask ->
+            val cap = cap192Bits16.copy(sampleRate = mask, bitsPerSample = 2)
+            val result = ApplyPolicy.assessTarget(assessCurrent, listOf(cap))
+
+            assertEquals(TargetAssessment.Status.COMPLETE, result.status)
+            assertEquals(8, result.target?.sampleRate)
+            assertEquals(2, result.target?.bitsPerSample)
+            // 降档链只含条目逐位报告的档位：mask=10 → [8,2]，mask=11 另含 44.1k
+            val expectedChain = listOf(8, 2) + if (mask and 1 == 1) listOf(1) else emptyList()
+            assertEquals(expectedChain, result.candidates.map { it.sampleRate })
+        }
+    }
+
+    @Test
+    fun channelIncompatibleHighEntryDoesNotOverrideLowerCompatibleEntry() {
+        // 条目 A=192+24 仅 STEREO（channel=2），current 为 MONO（channel=1）→ 不兼容；
+        // 条目 B=96+24 MONO 兼容 → COMPLETE 目标必须是 96+24，不得被 A 覆盖
+        val stereoOnlyHigh = CodecConfig(
+            codecType = 10, priority = 0,
+            sampleRate = 32, bitsPerSample = 2, channelMode = 2,
+            cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+        )
+        val monoLow = CodecConfig(
+            codecType = 10, priority = 0,
+            sampleRate = 8, bitsPerSample = 2, channelMode = 1,
+            cs1 = 0L, cs2 = 0L, cs3 = 0L, cs4 = 0L,
+        )
+        val monoCurrent = assessCurrent.copy(channelMode = 1)
+
+        val result = ApplyPolicy.assessTarget(monoCurrent, listOf(stereoOnlyHigh, monoLow))
+
+        assertEquals(TargetAssessment.Status.COMPLETE, result.status)
+        assertEquals(8, result.target?.sampleRate)
+        assertEquals(2, result.target?.bitsPerSample)
+        assertEquals(1, result.target?.channelMode)
+    }
+
+    @Test
+    fun isAtHighestTrueOnlyWhenCompleteAndMatches() {
+        val complete = ApplyPolicy.assessTarget(assessCurrent, listOf(cap192Bits16))
+        assertEquals(TargetAssessment.Status.COMPLETE, complete.status)
+
+        // COMPLETE 且 current 已达目标（cs1 已是黄金档、rate/bits 与 target 一致）
+        val aligned = assessCurrent.copy(sampleRate = 32, bitsPerSample = 1)
+        assertTrue(ApplyPolicy.isAtHighest(complete, aligned))
+        // current 未达 → false
+        assertFalse(ApplyPolicy.isAtHighest(complete, assessCurrent))
+
+        // 非 COMPLETE 一律 false（即使字段恰好相等）
+        val degraded = ApplyPolicy.assessTarget(assessCurrent, emptyList())
+        val degradedAligned = assessCurrent.copy(priority = 1_000_000)
+        assertFalse(ApplyPolicy.isAtHighest(degraded, degradedAligned))
     }
 }

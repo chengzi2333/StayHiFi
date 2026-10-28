@@ -17,12 +17,53 @@ object VendorDiagnostics {
             (Masks.isVendorLhdcRange(codecType) && codecName == "LHDC")
     }
 
+    /**
+     * Task 8：identity 门控——UNKNOWN 或厂商 native 区间内的 LHDC 放行；
+     * SBC/AAC/LDAC 等标准家族与既有 type10 保持安静，不再刷实时抓取诊断。
+     */
+    fun shouldLog(identity: CodecIdentity): Boolean =
+        identity.family == CodecFamily.UNKNOWN ||
+            (identity.family == CodecFamily.LHDC && Masks.isVendorLhdcRange(identity.nativeType))
+
     /** 按段落、流式状态与码率字段分类本轮证据。 */
     fun sampleKind(state: BtStateParser.BtState?): String = when {
         state == null -> "no-section"
         state.notStreaming -> "not-streaming"
         state.bitrateKbps == null -> "no-bitrate"
         else -> "available"
+    }
+
+    /** Task 8：按本轮解析结果分类证据，新增歧义段一类；五类小写证据名。 */
+    fun sampleKind(result: BtStateParseResult): String = when (result.status) {
+        BtStateParseStatus.NO_SECTION -> "no-section"
+        BtStateParseStatus.AMBIGUOUS_SECTION -> "ambiguous-section"
+        BtStateParseStatus.NOT_STREAMING -> "not-streaming"
+        BtStateParseStatus.NO_BITRATE -> "no-bitrate"
+        BtStateParseStatus.AVAILABLE -> "available"
+    }
+
+    /**
+     * Task 8：实时抓取诊断的唯一裁决——先过 identity 门控，再仅对无匹配段落/
+     * 无码率字段/歧义段返回原因；NOT_STREAMING 与 AVAILABLE 一律 null
+     * （NOT_STREAMING 的证据只经现有 gate 走 not-streaming 类别，不走本函数）。
+     */
+    fun realtimeIssue(identity: CodecIdentity, result: BtStateParseResult): String? {
+        if (!shouldLog(identity)) return null
+        return when (result.status) {
+            BtStateParseStatus.NO_SECTION -> "无匹配段落"
+            BtStateParseStatus.NO_BITRATE -> "无码率字段"
+            BtStateParseStatus.AMBIGUOUS_SECTION ->
+                "歧义段落: 候选=" + result.candidateSections.take(4).joinToString("/")
+            else -> null
+        }
+    }
+
+    /** 无 state 的证据文案按真实裁决区分「无段」与「多候选歧义」。 */
+    fun missingStateEvidence(result: BtStateParseResult): String = when (result.status) {
+        BtStateParseStatus.NO_SECTION -> "无匹配段落"
+        BtStateParseStatus.AMBIGUOUS_SECTION ->
+            "候选段落歧义: 候选=" + result.candidateSections.take(4).joinToString("/")
+        else -> "无可用段落状态"
     }
 
     /** 只保留排查所需字段，避免把数百行 dumpsys 全倒进 200 行日志缓冲。 */

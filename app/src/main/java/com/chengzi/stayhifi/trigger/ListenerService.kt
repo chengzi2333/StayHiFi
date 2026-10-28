@@ -13,10 +13,19 @@ import android.content.pm.ServiceInfo
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.chengzi.stayhifi.LogStore
-import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.StayHiFiApp
+import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
+import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecPresentation
+import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
+import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
-import com.chengzi.stayhifi.shell.ShizukuShellProvider
+import com.chengzi.stayhifi.shell.ProviderCoordinator
+import com.chengzi.stayhifi.shell.ProviderKind
+import com.chengzi.stayhifi.shell.ProviderOwner
+import com.chengzi.stayhifi.shell.ProviderSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,7 +64,14 @@ class ListenerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var settings: SettingsRepository
     private lateinit var notifier: Notifier
-    private lateinit var provider: ShizukuShellProvider
+
+    /**
+     * Task D8：进程级 [ProviderCoordinator]（lease/probe 统一入口，设计 §11.3）。
+     * 本服务不再构造/持有任何 provider：每次读取先 probeSelected 探测，再 acquire
+     * lease、finally close；Root anchor 进程级，onDestroy 不解绑（§11.4.5）。
+     */
+    private val coordinator: ProviderCoordinator?
+        get() = (application as? StayHiFiApp)?.providerCoordinator
 
     @Volatile
     private var notifyPersistent = false
@@ -66,10 +82,13 @@ class ListenerService : Service() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 BluetoothDevice.ACTION_ACL_CONNECTED -> onConnected(intent)
-                BluetoothDevice.ACTION_ACL_DISCONNECTED -> scope.launch {
-                    LogStore.log("ACL_DISCONNECTED，刷新常驻通知")
-                    HeadsetEvents.bump()
-                    refreshNotification()
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+                    disconnectedMac(intent, "ACL_DISCONNECTED")?.let(ApplyTriggers::onDisconnected)
+                    scope.launch {
+                        LogStore.log("ACL_DISCONNECTED，刷新常驻通知")
+                        HeadsetEvents.bump()
+                        refreshNotification()
+                    }
                 }
                 // Task 31：OriginOS 未投递 ACL_DISCONNECTED（真机广播史取证），
                 // A2DP profile 的 CONNECTION_STATE_CHANGED 是系统蓝牙进程发出的独立信号，
@@ -77,6 +96,9 @@ class ListenerService : Service() {
                 BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
                     val state = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1)
                     if (state == BluetoothProfile.STATE_DISCONNECTED) {
+                        disconnectedMac(
+                            intent, "A2DP_CONNECTION_STATE_CHANGED=DISCONNECTED",
+                        )?.let(ApplyTriggers::onDisconnected)
                         scope.launch {
                             LogStore.log("A2DP_CONNECTION_STATE_CHANGED=DISCONNECTED，刷新常驻通知")
                             HeadsetEvents.bump()
@@ -93,7 +115,6 @@ class ListenerService : Service() {
         isRunning = true
         settings = SettingsRepository(this)
         notifier = Notifier(this)
-        provider = ShizukuShellProvider(this)
 
         // 对抗审查 C2：connectedDevice 类型 FGS 要求 BLUETOOTH_CONNECT，权限缺失时
         // startForeground 抛 SecurityException——无 try/catch 会连带进程崩溃死循环。
@@ -169,7 +190,8 @@ class ListenerService : Service() {
         isRunning = false
         runCatching { unregisterReceiver(receiver) }
         pollJob?.cancel()
-        provider.unbind()
+        // Task D8：lease 均随单次操作 finally close；Root anchor 是进程级 transport，
+        // 服务销毁不解绑（§11.3：只有手动切换或显式断开才 unbind）。
         scope.cancel()
         super.onDestroy()
         LogStore.log("ListenerService 已停止")
@@ -178,6 +200,24 @@ class ListenerService : Service() {
     override fun onBind(intent: Intent?) = null
 
     // ================= ACL_CONNECTED =================
+
+    /** 仅在系统广播可安全提供地址时清断该 MAC 的触发窗口；权限失败不伪造地址。 */
+    private fun disconnectedMac(intent: Intent, signal: String): String? {
+        val device: BluetoothDevice? = try {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        } catch (se: SecurityException) {
+            LogStore.log("ListenerService $signal 读取 EXTRA_DEVICE 需要 BLUETOOTH_CONNECT: $se")
+            null
+        }
+        if (device == null) return null
+        return try {
+            device.address
+        } catch (se: SecurityException) {
+            LogStore.log("ListenerService $signal 读取设备地址需要 BLUETOOTH_CONNECT: $se")
+            null
+        }
+    }
 
     private fun onConnected(intent: Intent) {
         val device: BluetoothDevice? = try {
@@ -204,7 +244,10 @@ class ListenerService : Service() {
             HeadsetEvents.bump()
             refreshNotification()
             try {
-                ApplyWorker(this@ListenerService).run(mac, name)
+                ApplyTriggers.run(
+                    this@ListenerService, mac, name,
+                    force = false, source = TriggerSource.LISTENER_SERVICE,
+                )
             } catch (t: Throwable) {
                 LogStore.log("ListenerService 触发 ApplyWorker 未捕获异常: $t")
             }
@@ -228,20 +271,30 @@ class ListenerService : Service() {
      * 载体调用整体包 withTimeoutOrNull（同 readConnectedSummary 的
      * CARRIER_READ_TIMEOUT_MS），防 vivo 冻结 codec 进程的永久阻塞（Task 31 教训）。
      * 日志以「启动补触发」前缀区分信号源，便于浸泡排查。
+     *
+     * Task D8：载体访问走 Coordinator——本机 A2DP 预检先于一切 provider 首读；
+     * probeSelected 只探测（绝不 bind/创建 shell），未就绪时冷 Root 只去重登记
+     * NEEDS_FOREGROUND_REVALIDATION，绝不弹授权、不回退 Shizuku（§11.4.5）。
      */
     private suspend fun retriggerIfAlreadyConnected() {
         if (!isA2dpConnectedLocally()) return
-        if (!provider.isRunning || !provider.hasPermission) {
+        val coordinator = coordinator ?: return
+        val probe = coordinator.probeSelected(ProviderSource.LISTENER)
+        if (!probe.isRunning || !probe.hasPermission) {
+            if (probe.kind == ProviderKind.ROOT) coordinator.noteBackground(ProviderSource.LISTENER)
             LogStore.log("启动补触发：载体未就绪或未授权，跳过")
             return
         }
         try {
             val devices = withTimeoutOrNull(CARRIER_READ_TIMEOUT_MS) {
-                val svc = withContext(Dispatchers.IO) { provider.bind() }
+                val lease = coordinator.acquire(
+                    ProviderOwner("listener-startup"), ProviderSource.LISTENER)
                 try {
-                    JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                    JSONArray(lease.withService { svc ->
+                        withContext(Dispatchers.IO) { svc.dumpDevices() }
+                    })
                 } finally {
-                    provider.unbind()
+                    lease.close()
                 }
             }
             if (devices == null) {
@@ -256,9 +309,12 @@ class ListenerService : Service() {
                 val obj = devices.getJSONObject(i)
                 val mac = obj.getString("mac")
                 val name = obj.getString("name")
-                LogStore.log("启动补触发：发现已连接设备 $name ($mac)，补跑 ApplyWorker")
+                LogStore.log("启动补触发：发现已连接设备 $name ($mac)，提交统一触发入口")
                 try {
-                    ApplyWorker(this).run(mac, name)
+                    ApplyTriggers.run(
+                        this@ListenerService, mac, name,
+                        force = false, source = TriggerSource.STARTUP,
+                    )
                 } catch (t: Throwable) {
                     LogStore.log("启动补触发 ApplyWorker 未捕获异常: $t")
                 }
@@ -325,31 +381,50 @@ class ListenerService : Service() {
      * 两道防线：
      * 1. 先用本机蓝牙 API 判 A2DP 连接态，断连判定零载体依赖、秒级返回；
      * 2. 载体读取整体包 withTimeoutOrNull，单轮冻结最多卡 8s，循环不死。
+     *
+     * Task D8：载体访问走 Coordinator lease（finally close）；冷 Root 未就绪只去重
+     * 登记 NEEDS_FOREGROUND_REVALIDATION 并按读不到处理，绝不弹授权/回退 Shizuku。
      */
     private suspend fun readConnectedSummary(): String? {
         if (!isA2dpConnectedLocally()) return null
-        if (!provider.isRunning || !provider.hasPermission) return null
+        val coordinator = coordinator ?: return null
+        val probe = coordinator.probeSelected(ProviderSource.LISTENER)
+        if (!probe.isRunning || !probe.hasPermission) {
+            if (probe.kind == ProviderKind.ROOT) coordinator.noteBackground(ProviderSource.LISTENER)
+            return null
+        }
         return try {
             withTimeoutOrNull(CARRIER_READ_TIMEOUT_MS) {
-                val svc = withContext(Dispatchers.IO) { provider.bind() }
+                val lease = coordinator.acquire(
+                    ProviderOwner("listener-notify"), ProviderSource.LISTENER)
                 try {
-                    val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
-                    if (arr.length() == 0) {
-                        null
-                    } else {
-                        val mac = arr.getJSONObject(0).getString("mac")
-                        val name = arr.getJSONObject(0).getString("name")
-                        val obj = JSONObject(withContext(Dispatchers.IO) { svc.readConfig(mac) })
-                        if (obj.has("error")) null
-                        else {
-                            val current =
-                                CodecConfig.fromJson(obj.getJSONObject("current").toString())
-                            checkDrift(mac, name, current)
-                            "$name · ${current.summary()}"
+                    lease.withService { svc ->
+                        val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                        if (arr.length() == 0) {
+                            null
+                        } else {
+                            val mac = arr.getJSONObject(0).getString("mac")
+                            val name = arr.getJSONObject(0).getString("name")
+                            val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
+                            val obj = JSONObject(stateJson)
+                            if (obj.has("error")) {
+                                null
+                            } else {
+                                val presentation = CodecSnapshotPresenter.present(
+                                    CodecStateSnapshotJson.parse(stateJson),
+                                )
+                                if (presentation == null) {
+                                    null
+                                } else {
+                                    recordIdentityConflict(mac, presentation)
+                                    checkDrift(mac, name, presentation)
+                                    "$name · ${presentation.summary.text()}"
+                                }
+                            }
                         }
                     }
                 } finally {
-                    provider.unbind()
+                    lease.close()
                 }
             } ?: run {
                 LogStore.log("常驻通知读取参数超时（载体进程可能被系统冻结），本轮按读不到处理")
@@ -361,6 +436,17 @@ class ListenerService : Service() {
         }
     }
 
+    private fun recordIdentityConflict(mac: String, presentation: CodecPresentation) {
+        if (CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT !in presentation.issues) return
+        val identity = presentation.identity
+        if (CodecIdentityDiagnosticGate.shouldRecord(mac, presentation.current, identity)) {
+            LogStore.log(
+                "IDENTITY_CONFLICT: nativeType=${identity.nativeType} " +
+                    "system=${identity.displayName} legacy=${Masks.codecName(identity.nativeType)}"
+            )
+        }
+    }
+
     /**
      * Task 43 参数漂移提醒：轮询读回与「最近一次已验证生效目标」不一致时，
      * 弹一条结果通知「检测到系统改回了参数」+ 记 LogStore；每轮漂移期只弹一次，
@@ -369,7 +455,9 @@ class ListenerService : Service() {
      * 取舍：漂移判定只挂在 notifyPersistent=on 的 30s 轮询路径上（off 时没有轮询，
      * 靠连接事件自然重拉即可，不为漂移提醒额外唤醒载体）；通知本身受 notifyResult 开关控制。
      */
-    private suspend fun checkDrift(mac: String, name: String, current: CodecConfig) {
+    private suspend fun checkDrift(mac: String, name: String, presentation: CodecPresentation) {
+        val current = presentation.current
+        val currentSummary = presentation.summary.text()
         val target = VerifiedTargetStore.targetFor(mac) ?: return
         if (ApplyPolicy.matches(target, current)) {
             if (VerifiedTargetStore.isNotified(mac)) {
@@ -380,11 +468,11 @@ class ListenerService : Service() {
         }
         if (VerifiedTargetStore.isNotified(mac)) return
         VerifiedTargetStore.markNotified(mac)
-        LogStore.log("检测到参数漂移: $name ($mac) 目标 ${target.summary()}，读回 ${current.summary()}")
+        LogStore.log("检测到参数漂移: $name ($mac) 目标 ${target.summary()}，读回 $currentSummary")
         if (settings.isNotifyResult()) {
             notifier.notifyResult(
                 "检测到系统改回了参数",
-                "$name 当前 ${current.summary()}，与已拉满目标 ${target.summary()} 不符",
+                "$name 音质参数被系统改动，点我恢复",
             )
         }
     }
@@ -395,7 +483,7 @@ class ListenerService : Service() {
      */
     private fun isA2dpConnectedLocally(): Boolean = try {
         BluetoothAdapter.getDefaultAdapter()
-            ?.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED
+            ?.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothAdapter.STATE_CONNECTED
     } catch (se: SecurityException) {
         LogStore.log("本地 A2DP 状态读取需要 BLUETOOTH_CONNECT: $se")
         true
@@ -417,7 +505,7 @@ class ListenerService : Service() {
         private const val POLL_MS = 30_000L
         private const val CARRIER_READ_TIMEOUT_MS = 8_000L
         private const val TEXT_WAITING = "等待耳机连接"
-        private const val TEXT_RUNNING = "音质满格运行中"
+        private const val TEXT_RUNNING = "音质满血守护中"
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(

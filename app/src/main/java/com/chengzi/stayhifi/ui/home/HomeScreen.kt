@@ -25,13 +25,25 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.RealtimeDisplay
+import com.chengzi.stayhifi.codec.RealtimeDisplayFormatter
+import com.chengzi.stayhifi.codec.RealtimeState
+import com.chengzi.stayhifi.trigger.TargetAssessment
 import com.chengzi.stayhifi.ui.nav.StayHiFiIcons
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.util.DeviceNames
@@ -53,21 +65,34 @@ data class HomeUiState(
     /**
      * Task 43/44：传输层实况码率（kbps，如 400），来自 dumpsys 的 "A2DP <codec> State:" 段。
      * 仅 vivo 栈实证可读；其他栈/未连接/未流式读不到 → null。
-     * Task 46：该值在 vivo LHDC 下是粘性值（停播仍报 400000），是否真在播放以
-     * realtimeNotStreaming 为准（AudioManager.isMusicActive 即时判定，见 MainActivity）。
+     * Task 7：该值是否有意义由 [realtimeDisplay] 四态裁决（仅 AVAILABLE 携带非 null）。
      */
     val realtimeKbps: Int? = null,
-    /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。 */
+    /** Task 44：传输层调度模式原文（如 "ABR"/"HIGH"）；null 表示读不到。仅 AVAILABLE 携带。 */
     val realtimeQualityMode: String? = null,
     /**
-     * Task 44/46：判定为未在流式传输 → 实际传输行显示「未在播放」。
-     * 两条路径：AudioManager.isMusicActive=false（Task 46，即时主判定）；
-     * 或栈明确回报 bitrate ≤ 0（LDAC 实证 -1，保留兼容）。
-     * 与「本机暂不支持抓取」（realtimeKbps=null 且本字段 false → 「—」）区分，空态三分。
+     * Task 7：实际传输四态（NOT_PLAYING/AVAILABLE/NO_DATA/STACK_REPORTS_IDLE），
+     * 替换旧 realtimeNotStreaming 布尔；空态拆出 STACK_REPORTS_IDLE——播放中但栈
+     * 回报 idle（PLK110 raw=-1 实证）显示「暂无法确认」而非「未在播放」。
+     * 文案唯一入口见 [RealtimeDisplayFormatter]。
      */
-    val realtimeNotStreaming: Boolean = false,
-    /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
+    val realtimeDisplay: RealtimeDisplay = RealtimeDisplay.NO_DATA,
+    /** 是否已达本机最高音质输出；仅 COMPLETE 且读回匹配时为 true。 */
     val fullBars: Boolean = false,
+    /**
+     * 自定义音质会话生效中（手动应用的目标与当前读回一致）。
+     * 为 true 时状态行/徽标只显示「自定义」，绝不冒充满血/本机最高。
+     */
+    val manualActive: Boolean = false,
+    /** 手动调参面板数据面；null（未连接/读不到）时「自定义音质」入口禁用。 */
+    val manualEditor: ManualEditorInput? = null,
+    /**
+     * v1.2.2：特权参数是否可读。false=已连接但参数不可用（未授权/读取失败）——
+     * 保留耳机名，明细显示「—」，Apply/自定义写入禁用，状态行显示「已连接，授权后可用」。
+     */
+    val paramsAvailable: Boolean = true,
+    /** 当前目标能力完整性；null 表示尚无快照或沿用旧展示状态。 */
+    val targetStatus: TargetAssessment.Status? = null,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
     val applying: Boolean = false,
     /** 载体异常警示文案；null 表示一切正常。 */
@@ -79,6 +104,10 @@ sealed interface HomeAction {
     data object ApplyNow : HomeAction
     /** 点击红色警示横幅去修复载体。 */
     data object FixCarrier : HomeAction
+    /** 自定义音质：应用手动组合（目标已由 ManualSelection 同条目规则构造）。 */
+    data class ApplyManual(val target: CodecConfig) : HomeAction
+    /** 自定义音质：恢复系统自适应（通配目标交回协议栈自选）。 */
+    data class RestoreAdaptive(val target: CodecConfig) : HomeAction
 }
 
 /**
@@ -91,6 +120,11 @@ fun HomeScreen(
     onAction: (HomeAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 「自定义音质」弹层可见性为纯 UI 态；断连/读不到（manualEditor 置空）时自动收起。
+    var editorVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(state.manualEditor == null) {
+        if (state.manualEditor == null) editorVisible = false
+    }
     Scaffold(modifier = modifier) { innerPadding ->
         Column(
             modifier = Modifier
@@ -129,7 +163,9 @@ fun HomeScreen(
 
             Button(
                 onClick = { onAction(HomeAction.ApplyNow) },
-                enabled = state.headsetName != null && !state.applying,
+                // v1.2.2：已连接但参数读不到（未授权/读取失败）时禁用——
+                // 状态行已说明「已连接，授权后可用」，不给一个点了必失败的按钮。
+                enabled = state.headsetName != null && state.paramsAvailable && !state.applying,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 56.dp),
@@ -146,7 +182,7 @@ fun HomeScreen(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                         Text(
-                            text = "拉满中…",
+                            text = "应用中…",
                             style = MaterialTheme.typography.titleMedium,
                         )
                     }
@@ -158,7 +194,34 @@ fun HomeScreen(
                     )
                 }
             }
+
+            // 「自定义音质」次级入口（UX 拍板）：主按钮下方居中一行，不与主按钮并列；
+            // 仅在已连接且读到能力快照时可用。
+            TextButton(
+                onClick = { editorVisible = true },
+                enabled = state.manualEditor != null && !state.applying,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            ) {
+                Text("自定义音质")
+            }
         }
+    }
+
+    val editorInput = state.manualEditor
+    if (editorVisible && editorInput != null) {
+        ManualEditorSheet(
+            input = editorInput,
+            applying = state.applying,
+            onApply = {
+                editorVisible = false
+                onAction(HomeAction.ApplyManual(it))
+            },
+            onRestoreAdaptive = {
+                editorVisible = false
+                onAction(HomeAction.RestoreAdaptive(it))
+            },
+            onDismiss = { editorVisible = false },
+        )
     }
 }
 
@@ -220,9 +283,16 @@ private fun StatusCard(state: HomeUiState) {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
                 )
-                StayHiFiBadge(fullBars = state.fullBars)
+                StayHiFiBadge(
+                    status = state.targetStatus,
+                    fullBars = state.fullBars,
+                    manualActive = state.manualActive,
+                    paramsAvailable = state.paramsAvailable,
+                )
             }
-            // 机型行（Task 28）：面客机型名 + Android 版（SystemProperties 市场名键链）。
+            // 机型行（Task 28 + Task C4）：面客机型名 + Android 版。
+            // collect StateFlow：后台 preload 完成后机型行自动更新，同步路径不触发资产 IO。
+            val marketModelWithAndroid by DeviceNames.marketModelWithAndroidFlow.collectAsState()
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = StayHiFiIcons.Smartphone,
@@ -232,7 +302,7 @@ private fun StatusCard(state: HomeUiState) {
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
-                    text = DeviceNames.marketModelWithAndroid(),
+                    text = marketModelWithAndroid,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -248,16 +318,17 @@ private fun StatusCard(state: HomeUiState) {
     }
 }
 
-/** 状态卡唯一的状态文案：两态（Task 27）——真话文案，明细参数看下方 2×2 明细格。 */
+/** 状态卡唯一状态文案，与 ApplyWorker 共用 TargetAssessment 三态语义。 */
 @Composable
 private fun StatusLine(state: HomeUiState) {
-    val text = when {
-        state.headsetName == null -> "等待耳机连接"
-        state.fullBars -> "已达本机最高音质输出"
-        else -> "未拉满 · 点击重试"
-    }
     Text(
-        text = text,
+        text = HomeTargetStatus.statusLine(
+            connected = state.headsetName != null,
+            status = state.targetStatus,
+            fullBars = state.fullBars,
+            manualActive = state.manualActive,
+            paramsAvailable = state.paramsAvailable,
+        ),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onPrimaryContainer,
     )
@@ -277,10 +348,11 @@ private fun DetailGrid(state: HomeUiState) {
 
 /**
  * Task 45：实际传输行（方案 C）——分隔线 + 「实际传输」行 + 超小字解释行。
- * 空态三分（沿 Task 44 语义）：
- *   正常        → 「400 kbps · ABR（自适应）」（ABR 必须带「自适应」三字——别人不认识缩写）
- *   未在播放     → 「未在播放」（Task 46 isMusicActive 即时判定，停歌不再残留粘性码率）
- *   暂不支持抓取 → 「—（本机暂不支持抓取）」（Task 46 用户拍板的人话文案）
+ * Task 7：四态文案统一走 [RealtimeDisplayFormatter]，本层不再自行拼装：
+ *   AVAILABLE           → 「400 kbps · ABR（自适应）」（ABR 必须带「自适应」三字——别人不认识缩写）
+ *   NOT_PLAYING         → 「未在播放」（isMusicActive 即时判定，停歌不再残留粘性码率）
+ *   NO_DATA             → 「—（本机暂不支持抓取）」+ 系统不开放反馈指引
+ *   STACK_REPORTS_IDLE  → 「暂无法确认」（PLK110：播放中但栈回报 -1，不显示未在播放，也不显示反馈指引）
  * 解释行说明「为什么这么设置」；未连接耳机时本段由调用方整段跳过。
  */
 @Composable
@@ -295,29 +367,25 @@ private fun RealtimeSection(state: HomeUiState) {
                 modifier = Modifier.weight(1f),
             )
             Text(
-                text = when {
-                    state.realtimeNotStreaming -> "未在播放"
-                    state.realtimeKbps != null -> {
-                        val qm = state.realtimeQualityMode
-                        when {
-                            qm != null && qm.contains("ABR", ignoreCase = true) ->
-                                "${state.realtimeKbps} kbps · ABR（自适应）"
-                            qm != null -> "${state.realtimeKbps} kbps · $qm"
-                            else -> "${state.realtimeKbps} kbps"
-                        }
-                    }
-                    else -> "—（本机暂不支持抓取）"
-                },
+                text = RealtimeDisplayFormatter.text(
+                    RealtimeState(
+                        state.realtimeDisplay,
+                        state.realtimeKbps,
+                        state.realtimeQualityMode,
+                    ),
+                ),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
             )
         }
         Text(
-            // Task 46（用户中途追加）：只有抓取不支持时换成反馈指引，其余状态保留调度解释。
-            text = if (!state.realtimeNotStreaming && state.realtimeKbps == null) {
-                "这个机型的系统不开放实时码率读取，欢迎到设置-日志页把日志反馈给作者"
+            // Task 46（用户中途追加）：只有抓取读不到（NO_DATA）时换成反馈指引，
+            // STACK_REPORTS_IDLE 不显示该指引，其余状态保留调度解释。
+            // UX 收敛：解释行压成一句人话，研究结论（vivo 栈实测等）只留日志/反馈报告。
+            text = if (state.realtimeDisplay == RealtimeDisplay.NO_DATA) {
+                "读取不到时可到 设置 › 运行日志 复制日志反馈"
             } else {
-                "部分 vivo LHDC 栈实测固定档仍走 ABR；其他系统样本不足，请对比设置码率与实际传输"
+                "部分机型固定档仍会自适应，以实际传输为准"
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -358,8 +426,13 @@ private fun DetailCell(label: String, value: String?, modifier: Modifier = Modif
 }
 
 @Composable
-private fun StayHiFiBadge(fullBars: Boolean) {
-    val container = if (fullBars) {
+private fun StayHiFiBadge(
+    status: TargetAssessment.Status?,
+    fullBars: Boolean,
+    manualActive: Boolean = false,
+    paramsAvailable: Boolean = true,
+) {
+    val container = if (fullBars && !manualActive) {
         MaterialTheme.colorScheme.primary
     } else {
         MaterialTheme.colorScheme.surfaceVariant
@@ -384,7 +457,7 @@ private fun StayHiFiBadge(fullBars: Boolean) {
                 .background(content),
         )
         Text(
-            text = if (fullBars) "满血" else "未满血",
+            text = HomeTargetStatus.badgeLabel(status, fullBars, manualActive, paramsAvailable),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Bold,
             color = content,
@@ -405,7 +478,9 @@ private fun HomeScreenPreviewLight() {
                 quality = "1000kbps",
                 realtimeKbps = 400,
                 realtimeQualityMode = "ABR",
+                realtimeDisplay = RealtimeDisplay.AVAILABLE,
                 fullBars = true,
+                targetStatus = TargetAssessment.Status.COMPLETE,
             ),
             onAction = {},
         )
@@ -424,7 +499,7 @@ private fun HomeScreenPreviewDark() {
                 bits = "16bit",
                 quality = null,
                 fullBars = false,
-                carrierAlert = "Shizuku 未运行，点我修复",
+                carrierAlert = "Shizuku/Stellar 未运行",
             ),
             onAction = {},
         )

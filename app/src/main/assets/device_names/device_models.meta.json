@@ -1,0 +1,18 @@
+{
+  "budgets": {
+    "gzipMaxBytes": 400000,
+    "jsonMaxBytes": 1600000,
+    "snapshotMaxBytes": 600000
+  },
+  "conflicts": 1835,
+  "empty": 25472,
+  "gzipBytes": 189775,
+  "gzipSha256": "d166d0435e7307a8ab9950a26808cb19ed1cfe1618bbd196e29dd958b6e5a6e8",
+  "jsonBytes": 732120,
+  "jsonSha256": "ee8735a582c725791c3019eb50fd9f1b1ee88c1e5df1cabfc6ed6c7afa155134",
+  "snapshotDate": "2026-10-27",
+  "sourceRows": 54294,
+  "sourceSha256": "a83be8f0ac7d963011394ead55416ce701dfe8b89bec89844ab3a24a254c3a23",
+  "sourceUrl": "https://storage.googleapis.com/play_public/supported_devices.csv",
+  "written": 22327
+}

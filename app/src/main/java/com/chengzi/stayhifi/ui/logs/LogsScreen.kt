@@ -1,5 +1,7 @@
 package com.chengzi.stayhifi.ui.logs
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,24 +11,20 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.chengzi.stayhifi.ui.common.SubPageTopBar
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 
 data class LogsUiState(
@@ -45,23 +43,20 @@ sealed interface LogsAction {
  * 运行日志页：[com.chengzi.stayhifi.LogStore] 快照倒序展示 + 复制 + 清空。
  * 顶部提示「日志仅保存在本机内存」。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogsScreen(
     state: LogsUiState,
     onAction: (LogsAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 与特权方式二级页同一系统返回语义：左右滑/返回键先关闭日志页，不退出 Activity。
+    BackHandler { onAction(LogsAction.Back) }
     Scaffold(
         modifier = modifier,
         topBar = {
-            TopAppBar(
-                title = { Text("运行日志") },
-                navigationIcon = {
-                    IconButton(onClick = { onAction(LogsAction.Back) }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
+            SubPageTopBar(
+                title = "运行日志",
+                onBack = { onAction(LogsAction.Back) },
             )
         },
     ) { innerPadding ->
@@ -98,15 +93,19 @@ fun LogsScreen(
                     )
                 }
             }
+            // Task B7：动作（复制日志/清空）放可横向滑动的 Row，
+            // 小屏宁可滑动也不裁掉动作。日志页只有「复制日志」一个复制入口：
+            // 输出即脱敏且排障信息完整，用户无需在原始/反馈之间做选择。
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     text = "${state.lines.size} 条",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
                 )
                 TextButton(
                     onClick = { onAction(LogsAction.Copy) },

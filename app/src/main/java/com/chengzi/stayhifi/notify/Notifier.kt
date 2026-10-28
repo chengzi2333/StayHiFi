@@ -13,6 +13,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.chengzi.stayhifi.LogStore
 import com.chengzi.stayhifi.MainActivity
+import com.chengzi.stayhifi.RootRepairDestination
+import com.chengzi.stayhifi.StayHiFiApp
 
 /**
  * 结果通知（设计 §4.3 / §5）：成功、失败、以及 Shizuku 未运行时的"一键修复"引导。
@@ -40,14 +42,21 @@ class Notifier(private val context: Context) {
         if (!canNotify()) return
         val intent = Intent(context, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // Task D11（§11.2）：持久选择为 Root 时修复通知直达设置页 Root 区；
+        // Shizuku/首读未完成保持原指引（打开 App 首页红条 → 管理器），行为不变。
+        val selected = (context.applicationContext as? StayHiFiApp)
+            ?.providerCoordinator?.selectedProvider?.value
+        if (RootRepairDestination.opensRootSettings(selected)) {
+            intent.putExtra(MainActivity.EXTRA_OPEN_ROOT_SETTINGS, true)
+        }
         val pi = PendingIntent.getActivity(
             context, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val n = NotificationCompat.Builder(context, CHANNEL_AUTO)
             .setSmallIcon(android.R.drawable.stat_notify_error)
-            .setContentTitle("StayHiFi 需要修复特权环境")
-            .setContentText("$reason，点我打开 App 一键修复")
+            .setContentTitle("StayHiFi 权限失效")
+            .setContentText("$reason，点我修复")
             .setContentIntent(pi)
             .setAutoCancel(true)
             .build()

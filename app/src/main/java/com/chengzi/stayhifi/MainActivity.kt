@@ -46,18 +46,47 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.abs
 import kotlinx.coroutines.delay
+import com.chengzi.stayhifi.codec.BtStateParseResult
 import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecIdentity
+import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
+import com.chengzi.stayhifi.codec.CodecIdentityIssue
+import com.chengzi.stayhifi.codec.CodecOperationLog
+import com.chengzi.stayhifi.codec.CodecPresentation
+import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshot
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.DeviceProfile
+import com.chengzi.stayhifi.codec.DiagnosticSource
+import com.chengzi.stayhifi.codec.DiagnosticTrigger
 import com.chengzi.stayhifi.codec.Masks
+import com.chengzi.stayhifi.codec.RealtimeDisplay
+import com.chengzi.stayhifi.codec.VendorDiagnosticContext
+import com.chengzi.stayhifi.codec.VendorDiagnosticMetadata
 import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.codec.VendorDiagnosticGate
+import com.chengzi.stayhifi.codec.VendorStackDiagnosticRecorder
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
+import com.chengzi.stayhifi.device.ConnectionPresentation
+import com.chengzi.stayhifi.device.LocalHeadset
+import com.chengzi.stayhifi.device.LocalHeadsetResult
+import com.chengzi.stayhifi.device.LocalHeadsetSource
 import com.chengzi.stayhifi.notify.QsTileService
-import com.chengzi.stayhifi.shell.ShizukuShellProvider
+import com.chengzi.stayhifi.shell.ProviderKind
+import com.chengzi.stayhifi.shell.ProviderLease
+import com.chengzi.stayhifi.shell.ProviderOwner
+import com.chengzi.stayhifi.shell.ProviderProbe
+import com.chengzi.stayhifi.shell.ProviderSource
+import com.chengzi.stayhifi.shell.ProviderSwitchResult
+import com.chengzi.stayhifi.shell.RootFeedbackFields
+import com.chengzi.stayhifi.shell.RootVerificationResult
 import com.chengzi.stayhifi.trigger.ApplyPolicy
+import com.chengzi.stayhifi.trigger.ApplyTriggers
 import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.TriggerSource
+import com.chengzi.stayhifi.trigger.TargetAssessment
 import com.chengzi.stayhifi.trigger.HeadsetEvents
 import com.chengzi.stayhifi.trigger.ListenerService
 import com.chengzi.stayhifi.ui.devices.DevicesAction
@@ -66,7 +95,9 @@ import com.chengzi.stayhifi.ui.devices.DevicesUiState
 import com.chengzi.stayhifi.ui.devices.DeviceItemUi
 import com.chengzi.stayhifi.ui.home.HomeAction
 import com.chengzi.stayhifi.ui.home.HomeScreen
+import com.chengzi.stayhifi.ui.home.HomeStateMerge
 import com.chengzi.stayhifi.ui.home.HomeUiState
+import com.chengzi.stayhifi.ui.home.ManualEditorInput
 import com.chengzi.stayhifi.ui.logs.LogsAction
 import com.chengzi.stayhifi.ui.logs.LogsScreen
 import com.chengzi.stayhifi.ui.logs.LogsUiState
@@ -91,6 +122,7 @@ import com.chengzi.stayhifi.util.DeviceNames
 import com.chengzi.stayhifi.util.KeepAlive
 import com.chengzi.stayhifi.util.QqGroup
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -104,16 +136,77 @@ import java.util.Date
 import java.util.Locale
 
 /**
+ * Task D11：Root 修复目的地判定（设计 §11.2）。
+ * 持久选择为 Root 时，修复入口（首页红条/修复通知/QS 磁贴）直达设置页 Root 区
+ * （携带 [MainActivity.EXTRA_OPEN_ROOT_SETTINGS]），不再跳 Stellar/Shizuku 管理器；
+ * Shizuku/首读未完成保持原管理器指引。顶层独立 object：纯判定，单测可直接加载。
+ */
+internal object RootRepairDestination {
+    fun opensRootSettings(selected: ProviderKind?): Boolean = selected == ProviderKind.ROOT
+}
+
+/**
+ * Task D9：前台 probe 判定（ensure/首页刷新的共同出口，设计 §11.2/§11.4.5）。
+ * 纯事实映射：只翻译 [ProviderProbe] 的可观察状态，绝不触发 requestPermission/openShell。
+ * [ForegroundCarrierCheck.bindable] = 当前选择是否可安全 bind（Root=READY，Shizuku=running+granted）；
+ * [ForegroundCarrierCheck.carrierAlert] = 通道未运行时首页红条事实文案（未授权不出红条，保持原行为）。
+ */
+internal data class ForegroundCarrierCheck(
+    val kind: ProviderKind,
+    val bindable: Boolean,
+    /** 不可 bind 时的事实日志片段（无前缀）；bindable=true 时为 null。 */
+    val notReadyLog: String?,
+    /** 首页红条事实文案；未授权或可 bind 时为 null。 */
+    val carrierAlert: String?,
+)
+
+internal fun ProviderProbe.foregroundCheck(): ForegroundCarrierCheck = when {    !isRunning -> when (kind) {
+        ProviderKind.ROOT -> ForegroundCarrierCheck(
+            kind = kind,
+            bindable = false,
+            notReadyLog = "Root 未在当前进程就绪，需前台重验",
+            carrierAlert = "Root 通道未就绪",
+        )
+        ProviderKind.SHIZUKU -> ForegroundCarrierCheck(
+            kind = kind,
+            bindable = false,
+            notReadyLog = "特权载体未运行",
+            carrierAlert = "Shizuku/Stellar 未运行",
+        )
+    }
+    !hasPermission -> ForegroundCarrierCheck(
+        kind = kind,
+        bindable = false,
+        notReadyLog = "特权未授予",
+        carrierAlert = null,
+    )
+    else -> ForegroundCarrierCheck(
+        kind = kind,
+        bindable = true,
+        notReadyLog = null,
+        carrierAlert = null,
+    )
+}
+
+/**
  * Task 5b：正式入口。首次启动走五页 Onboarding，完成后进 Home。
- * 所有 binder/IPC 调用都在 IO 线程（[ShizukuShellProvider.bind] 是阻塞的）。
+ * Task D9：不再有 Activity 级载体字段，全部特权 IPC 经 Application 的 ProviderCoordinator
+ * probe/lease（binder 调用仍在 IO 线程）；公共 ensure 非交互——Root 永不
+ * requestPermission/openShell，Shizuku 授权只由显式按钮/录制向导抓取发起。
  */
 class MainActivity : ComponentActivity() {
 
-    private lateinit var provider: ShizukuShellProvider
+    // Task D9：进程级 Coordinator（StayHiFiApp 持有）；本 Activity 以固定 owner 租约访问。
+    private val coordinator get() = (application as StayHiFiApp).providerCoordinator
+    // Task D10：Root 状态卡的只读快照流（RootTransport 归 Application 进程级持有）。
+    private val rootTransport get() = (application as StayHiFiApp).rootTransport
+    private val activityOwner = ProviderOwner("main-activity")
     private lateinit var settingsRepo: SettingsRepository
     private lateinit var profileRepo: ProfileRepository
     // Task 46：公开 API 本地即时判定音乐播放，替代需要两轮采样的 PCM 计数增量。
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
+    // v1.2.2：本机 A2DP 设备来源（普通系统 API，无需特权）——连接事实的第一裁决来源。
+    private val localHeadsetSource by lazy { LocalHeadsetSource(this) }
 
     // ---- Onboarding 状态 ----
     private var onboardingState by mutableStateOf(OnboardingUiState())
@@ -130,16 +223,42 @@ class MainActivity : ComponentActivity() {
     private var capturedMac: String? = null
     private var capturedName: String? = null
     private var capturedConfig: CodecConfig? = null
+    private var capturedIdentity: CodecIdentity? = null
 
     // ---- Home 状态 ----
     private var homeState by mutableStateOf(HomeUiState())
     private var connectedMac: String? = null
     private var connectedName: String? = null
+    /**
+     * 自定义音质会话标记（仅内存，不持久化）：mac → 手动应用成功的目标。
+     * 只用于首页「自定义」展示语义；刷新读回与该目标不一致（重连/系统改回）即失效，
+     * 任何路径都不据此跨重连重放手动配置，自动拉满默认目标不受影响。
+     */
+    private var manualSession: Pair<String, CodecConfig>? = null
 
     // ---- 底部导航 / 日志页（Task 6） ----
     private var selectedTab by mutableStateOf(0)
     private var logsVisible by mutableStateOf(false)
     private var logs by mutableStateOf<List<String>>(emptyList())
+    // v1.2.2：教程连接页「排障日志」覆盖层——复用 LogsScreen，不要求完成引导。
+    private var onboardingLogsVisible by mutableStateOf(false)
+
+    // ---- Task D11：设置页「特权方式」区状态 ----
+    /** Root 授权/切换操作进行中（本 Activity 粒度，立即反馈禁用重复点击）。 */
+    private var settingsProviderBusy by mutableStateOf(false)
+    /** Root 区展开：EXTRA_OPEN_ROOT_SETTINGS 修复入口或点击 Root 卡置位。 */
+    private var rootSectionExpanded by mutableStateOf(false)
+    /** UX 收敛：修复入口 deep link 单调计数（布尔重复置 true 无法再次驱动设置页二级页）。 */
+    private var rootOpenSeq by mutableStateOf(0)
+
+    // ---- 通用厂商栈诊断（Task B5）：缓存最近一轮 readConfig 快照供 MANUAL 复制复用 ----
+    private var lastDiagnosticSnapshot: CodecStateSnapshot? = null
+    private var lastDiagnosticMac: String? = null
+    /** 快照采集时的实际通道（final review fix）：MANUAL 复制留证复用它，不拿复制当下通道冒充。 */
+    private var lastDiagnosticProviderKind: String? = null
+
+    // ---- 反馈日志脱敏（Task B7）：仅内存，映射不写入 DataStore/文件、不跨报告跟踪 ----
+    private val feedbackLogSanitizer = FeedbackLogSanitizer()
 
     // ---- 自更新（Task 38） ----
     private var updateChecking by mutableStateOf(false)
@@ -152,7 +271,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        provider = ShizukuShellProvider(this)
         settingsRepo = SettingsRepository(this)
         profileRepo = ProfileRepository(this)
 
@@ -194,6 +312,25 @@ class MainActivity : ComponentActivity() {
 
         // Task 38：自动更新检查——距上次 ≥24h 才联网，静默；仅新版本时弹窗（每进程最多一次）
         autoCheckUpdate()
+        // Task D11：Root 修复入口（修复通知/QS 磁贴/红条）直达设置 Root 区
+        consumeOpenRootSettingsExtra(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        consumeOpenRootSettingsExtra(intent)
+    }
+
+    /**
+     * Task D11（§11.2）：消费 EXTRA_OPEN_ROOT_SETTINGS——打开设置 tab 并展开 Root 区。
+     * 只改 UI 态（selectedTab/rootSectionExpanded），绝不触发授权/探测/切换。
+     */
+    private fun consumeOpenRootSettingsExtra(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_ROOT_SETTINGS, false) != true) return
+        selectedTab = 2
+        rootSectionExpanded = true
+        rootOpenSeq++
+        LogStore.log("Root 修复入口：打开设置页 Root 区")
     }
 
     override fun onResume() {
@@ -212,7 +349,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        provider.unbind()
+        // Task D9：只停 UI 工作（lifecycleScope 随销毁自动取消，各 lease 在 finally 关闭）；
+        // Root anchor 归 Application 进程级，Activity 销毁绝不解绑（§11.3）。
         super.onDestroy()
     }
 
@@ -231,6 +369,13 @@ class MainActivity : ComponentActivity() {
         val notifyResultOn by settingsRepo.notifyResult.collectAsState(initial = false)
         val notifyPersistentOn by settingsRepo.notifyPersistent.collectAsState(initial = false)
         val qsTileOn by settingsRepo.qsTile.collectAsState(initial = false)
+
+        // Task D11：设置页「特权方式」区的只读数据源——持久选择/生效通道/Root 快照/切换事务。
+        // 只进 UI 态，绝不触发授权/探测/写盘。
+        val selectedProvider by coordinator.selectedProvider.collectAsState()
+        val activeProvider by coordinator.activeProvider.collectAsState()
+        val rootSnapshot by rootTransport.state.collectAsState()
+        val coordinatorSwitching by coordinator.switching.collectAsState()
 
         // 耳机事件总线：连接/断开/拉满完成都 bump，首页随之刷新。
         // version=0 是初始值，跳过避免首帧与 onResume 的 refreshHome 重复刷。
@@ -337,13 +482,24 @@ class MainActivity : ComponentActivity() {
                                 batteryWhitelisted = KeepAlive.isBatteryWhitelisted(this@MainActivity),
                                 checkingUpdate = updateChecking,
                                 updateMessage = updateMessage,
+                                // Task D11：特权方式区——切换/授权进行中（Coordinator 事务或
+                                // 本 Activity 显式操作）一律禁用重复点击（§11.3）
+                                selectedProvider = selectedProvider,
+                                activeProvider = activeProvider,
+                                root = rootSnapshot,
+                                providerSwitching = coordinatorSwitching || settingsProviderBusy,
+                                rootSectionExpanded = rootSectionExpanded,
+                                rootOpenSeq = rootOpenSeq,
                             ),
                             onAction = ::onSettingsAction,
                         )
                     }
                 }
                 if (logsVisible) {
-                    LogsScreen(state = LogsUiState(logs), onAction = ::onLogsAction)
+                    LogsScreen(
+                        state = LogsUiState(logs),
+                        onAction = { onLogsAction(it) { logsVisible = false } },
+                    )
                 }
             }
         }
@@ -375,6 +531,15 @@ class MainActivity : ComponentActivity() {
                 wizardVisible = true
             }
             is DevicesAction.RestoreDefault -> onRestoreDefault(action.mac)
+            DevicesAction.OpenRecordWizard -> {
+                // UX 收敛：设备页空态入口，不带目标 MAC 约束（抓取当前连接的设备）。
+                wizardResult = null
+                wizardDeviceLabel = null
+                wizardError = null
+                wizardSaved = false
+                wizardTargetMac = null
+                wizardVisible = true
+            }
         }
     }
 
@@ -457,6 +622,82 @@ class MainActivity : ComponentActivity() {
             }
             SettingsAction.CheckUpdate -> onCheckUpdate()
             SettingsAction.DismissUpdateMessage -> updateMessage = null
+            is SettingsAction.SelectProvider -> onSettingsSelectProvider(action.kind)
+            SettingsAction.RequestRootAuthorization -> onSettingsRequestRootAuthorization()
+        }
+    }
+
+    /**
+     * Task D11（§11.2/§11.3）：设置页通道选择。
+     *  - 选 Shizuku/Stellar：任何时候都可手动选择，立即提交有界切换事务，
+     *    绝不检查 Root 可用性（撤权/断连/未验证均可退回）；切换期间拒绝重入。
+     *  - 选 Root：只展开 Root 区（纯 UI 态，不写盘）——Root 持久化只由
+     *    「请求 Root 授权」前台验证+提交完成。
+     */
+    private fun onSettingsSelectProvider(kind: ProviderKind) {
+        when (kind) {
+            ProviderKind.ROOT -> {
+                rootSectionExpanded = true
+                LogStore.log("设置：展开 Root 区（仅查看不改变持久通道）")
+            }
+            ProviderKind.SHIZUKU -> {
+                if (settingsProviderBusy || coordinator.switching.value) return
+                settingsProviderBusy = true
+                lifecycleScope.launch {
+                    try {
+                        // 改选前作废进行中前台 Root attempt：迟到成功不得提交（§11.4.6）
+                        coordinator.cancelForegroundAttempt(activityOwner)
+                        when (val r = coordinator.switchToShizuku(activityOwner, ProviderSource.SETTINGS)) {
+                            is ProviderSwitchResult.Committed ->
+                                LogStore.log("已切换到 Shizuku/Stellar（generation=${r.generation}）")
+                            is ProviderSwitchResult.NotCommitted ->
+                                LogStore.log(
+                                    "切换 Shizuku/Stellar 未提交: ${r.reason}" +
+                                        if (r.needsForegroundRevalidation) {
+                                            "（保留 Root 选择，需前台重验）"
+                                        } else {
+                                            ""
+                                        }
+                                )
+                        }
+                    } catch (ce: kotlinx.coroutines.CancellationException) {
+                        throw ce
+                    } catch (t: Throwable) {
+                        LogStore.log("切换 Shizuku/Stellar 异常: $t")
+                    } finally {
+                        settingsProviderBusy = false
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Task D11：设置 Root 卡「请求 Root 授权」——与教程同款的唯一 Root 交互入口
+     * （§11.2/§11.4.6）。前台验证+提交全走 Coordinator；进行中禁用重复点击。
+     */
+    private fun onSettingsRequestRootAuthorization() {
+        if (settingsProviderBusy || coordinator.switching.value) return
+        rootSectionExpanded = true
+        settingsProviderBusy = true
+        lifecycleScope.launch {
+            try {
+                when (val r = coordinator.verifyRootFromForeground(
+                    activityOwner, ProviderSource.SETTINGS)) {
+                    is RootVerificationResult.Committed ->
+                        LogStore.log("Root 前台验证已提交（generation=${r.generation}）")
+                    is RootVerificationResult.Failed ->
+                        LogStore.log("Root 前台验证失败: ${r.status} ${r.message ?: ""}")
+                    is RootVerificationResult.NotCommitted ->
+                        LogStore.log("Root 验证成功但切换未提交: ${r.reason}")
+                }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                LogStore.log("Root 前台验证异常: $t")
+            } finally {
+                settingsProviderBusy = false
+            }
         }
     }
 
@@ -625,35 +866,95 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun onLogsAction(action: LogsAction) {
+    private fun onLogsAction(action: LogsAction, onBack: () -> Unit) {
         when (action) {
             LogsAction.Copy -> copyLogs()
             LogsAction.Clear -> {
                 LogStore.clear()
                 resetVendorDiagnostics()
                 ApplyWorker.resetVendorDiagnostics()
+                CodecIdentityDiagnosticGate.reset()
                 btDiagLast = null
+                // Task B5：清空同时清同轮快照缓存（shared recorder 的 reset 在 ApplyWorker 内）。
+                lastDiagnosticSnapshot = null
+                lastDiagnosticMac = null
+                lastDiagnosticProviderKind = null
+                // Task B7：反馈脱敏映射仅内存，清空即弃；通用 recorder 的 reset/drain
+                // 已由 ApplyWorker.resetVendorDiagnostics 覆盖（gate 与 suppressedCount 清零）。
+                feedbackLogSanitizer.reset()
+                // Task D12：清空同时重置 Root gate 与 suppressedCount（§11.6）。
+                rootTransport.logger.reset()
+                VendorStackDiagnosticRecorder.shared.drainSuppressedCount()
                 logs = emptyList()
             }
-            LogsAction.Back -> logsVisible = false
+            LogsAction.Back -> onBack()
         }
     }
 
-    /** 用户主动复制现有内存日志；不新增持久化或上传通道。 */
+    /** Task B5：手动复制前的 MANUAL 留证。只复用最近一轮同轮快照缓存；没有同轮数据时
+     *  只记一行「无同轮快照」，绝不为此重新 bind/readConfig/dump。 */
+    private fun recordManualSnapshotForCopy() {
+        val snapshot = lastDiagnosticSnapshot
+        val mac = lastDiagnosticMac
+        if (snapshot == null || mac == null) {
+            LogStore.log("通用厂商诊断: 无同轮快照，跳过手动留证")
+            return
+        }
+        VendorStackDiagnosticRecorder.shared.record(
+            snapshot,
+            VendorDiagnosticContext(
+                mac = mac,
+                trigger = DiagnosticTrigger.MANUAL,
+                source = DiagnosticSource.MANUAL,
+                timestampMillis = System.currentTimeMillis(),
+                // final review fix：复用快照采集时的 provider kind，不拿复制当下通道冒充
+                providerKind = lastDiagnosticProviderKind ?: DIAGNOSTIC_PROVIDER_KIND,
+                device = VendorDiagnosticMetadata.current(),
+            ),
+        )
+    }
+
+    /** Task B5：复制前把被 gate 抑制的重复计数汇总成一行，随后由 LogStore.snapshot 带出。 */
+    private fun drainSuppressedDiagnosticCount() {
+        val suppressed = VendorStackDiagnosticRecorder.shared.drainSuppressedCount()
+        if (suppressed > 0) {
+            LogStore.log("通用厂商诊断: 已抑制 $suppressed 条重复快照证据")
+        }
+    }
+
+    /**
+     * 唯一的日志复制入口（原 Task B7 脱敏反馈路径升级为默认路径）：MANUAL 留证与
+     * suppressedCount drain 复用 Task B5 同款同轮快照逻辑（无缓存不读载体）；
+     * sanitizer 只接收日志行，MAC/设备名在单次报告内稳定映射 deviceN；输出前加 1 行
+     * header（含 RootFeedbackFields 与手填模板），总行数最多 200（199 行日志 + 1 行
+     * header）。剪贴板 label 与 Toast 用普通排障语境，不区分原始/反馈。
+     */
     private fun copyLogs() {
-        val lines = LogStore.snapshot()
-        if (lines.isEmpty()) {
+        recordManualSnapshotForCopy()
+        drainSuppressedDiagnosticCount()
+        // Task D12：快照前 flush Root gate，被抑制的重复计数随 suppressedCount 带出（§11.6）。
+        rootTransport.logger.flushSuppressed()
+        val sanitized = feedbackLogSanitizer.sanitize(LogStore.snapshot())
+        if (sanitized.isEmpty()) {
             Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
             return
         }
-        val header = "StayHiFi v${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) · " +
-            "${DeviceNames.marketModelWithAndroid()} · ${Build.DISPLAY}"
+        // Task D12：Root 段与手填模板并入同一行 header（单行后缀，不新增报告行）；
+        // 只含可观察状态与手填占位，不自动识别/上传 Root 管理器类型（§11.6/§12）。
+        val header = RootFeedbackFields.header(
+            selectedProvider = coordinator.selectedProvider.value,
+            activeProvider = coordinator.activeProvider.value,
+            root = rootTransport.state.value,
+        ) + " app=v${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE})" +
+            " device=${DeviceNames.marketModelWithAndroid()}" +
+            " display=${Build.DISPLAY}" +
+            " " + RootFeedbackFields.template()
         try {
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(
-                ClipData.newPlainText("StayHiFi 运行日志", (listOf(header) + lines).joinToString("\n"))
+                ClipData.newPlainText("StayHiFi 日志", "$header\n$sanitized")
             )
-            Toast.makeText(this, "已复制 ${lines.size} 条日志", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已复制日志，可直接粘贴给作者排障", Toast.LENGTH_SHORT).show()
         } catch (t: Throwable) {
             LogStore.log("复制日志失败: $t")
             Toast.makeText(this, "复制失败，请查看日志页", Toast.LENGTH_SHORT).show()
@@ -679,8 +980,32 @@ class MainActivity : ComponentActivity() {
             }
             if (wanted.isNotEmpty()) permLauncher.launch(wanted.toTypedArray())
         }
-        OnboardingScreen(state = onboardingState, onAction = ::onOnboardingAction)
+        // v1.2.2：连接页「排障日志」覆盖层——复用 LogsScreen（单一口吻复制/清空/系统返回），
+        // 不要求完成引导；BackHandler 关闭覆盖层即回到原教程页。
+        Box(Modifier.fillMaxSize()) {
+            OnboardingScreen(state = onboardingState, onAction = ::onOnboardingAction)
+            if (onboardingLogsVisible) {
+                LogsScreen(
+                    state = LogsUiState(logs),
+                    onAction = ::onOnboardingLogsAction,
+                )
+            }
+        }
+        // Task D10：Root 卡与门槛的三路只读数据源——持久选择/生效通道/Root 快照流。
+        // 只进 UI 态，绝不触发授权/写盘；离开 Onboarding 组合即停止收集。
+        LaunchedEffect(Unit) {
+            launch { coordinator.selectedProvider.collect { sel ->
+                onboardingState = onboardingState.copy(selectedProvider = sel) } }
+            launch { coordinator.activeProvider.collect { act ->
+                onboardingState = onboardingState.copy(activeProvider = act) } }
+            launch { rootTransport.state.collect { snap ->
+                onboardingState = onboardingState.copy(root = snap) } }
+        }
     }
+
+    /** v1.2.2：教程日志覆盖层的复制/清空与设置页同一实现（含脱敏与诊断复位），返回仅关覆盖层。 */
+    private fun onOnboardingLogsAction(action: LogsAction) =
+        onLogsAction(action) { onboardingLogsVisible = false }
 
     private fun onOnboardingAction(action: OnboardingAction) {
         when (action) {
@@ -690,45 +1015,88 @@ class MainActivity : ComponentActivity() {
             is OnboardingAction.InstallCarrier -> onInstallCarrier(action.kind)
             is OnboardingAction.OpenCarrierGuide -> openPackageOrLog(carrierPackage(action.kind))
             is OnboardingAction.RequestCarrierPermission -> onRequestCarrierPermission()
+            is OnboardingAction.SelectProvider -> onSelectProvider(action.kind)
+            OnboardingAction.RequestRootAuthorization -> onRequestRootAuthorization()
+            OnboardingAction.CancelRootAuthorization ->
+                coordinator.cancelForegroundAttempt(activityOwner)
             OnboardingAction.RefreshConnection -> onRefreshConnection()
-            is OnboardingAction.SelectSource ->
-                onboardingState = onboardingState.copy(sourceMode = action.mode)
+            OnboardingAction.OpenLogs -> {
+                logs = LogStore.snapshot().asReversed()
+                onboardingLogsVisible = true
+            }
             OnboardingAction.OpenAutostartSettings -> onOpenAutostartSettings()
             OnboardingAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
             OnboardingAction.OpenBackgroundPower -> onOpenBackgroundPower()
-            OnboardingAction.OpenRecordWizard -> {
-                // Task 33：Onboarding 入口不带目标 MAC 约束，清空重录锁定的 MAC。
-                wizardResult = null
-                wizardDeviceLabel = null
-                wizardError = null
-                wizardSaved = false
-                wizardTargetMac = null
-                wizardVisible = true
-            }
         }
     }
 
-    /** 两张卡共用同一 rikka 通道：running/granted 都按 provider 实际状态显示。 */
+    /**
+     * 载体卡状态（Task D9/D10）：installed 仍查包管理器；running/granted 只取
+     * Coordinator probe 的「持久所选」通道事实（只读，不 bind、不请求授权）。
+     * 持久选择为 Root 时，两张载体卡不继承 Root 的运行/授权灯（Root 状态由
+     * RootSnapshot 流独立喂给 Root 卡），仅保留安装态，运行/授权显示为未知。
+     */
     private fun refreshCarriers() {
         lifecycleScope.launch {
             val shizukuInstalled = withContext(Dispatchers.IO) { isInstalled(SHIZUKU_PACKAGE) }
             val stellarInstalled = withContext(Dispatchers.IO) { isInstalled(STELLAR_PACKAGE) }
-            val running = withContext(Dispatchers.IO) { provider.isRunning }
-            val granted = withContext(Dispatchers.IO) { provider.hasPermission }
+            val probe = withContext(Dispatchers.IO) {
+                coordinator.probeSelected(ProviderSource.ONBOARDING)
+            }
+            val rikkaFacts = probe.takeIf { it.kind == ProviderKind.SHIZUKU }
             onboardingState = onboardingState.copy(
                 shizuku = CarrierUiState(
                     kind = CarrierKind.SHIZUKU,
                     installed = shizukuInstalled,
-                    running = running,
-                    granted = granted,
+                    running = rikkaFacts?.isRunning == true,
+                    granted = rikkaFacts?.hasPermission == true,
                 ),
                 stellar = CarrierUiState(
                     kind = CarrierKind.STELLAR,
                     installed = stellarInstalled,
-                    running = running,
-                    granted = granted,
+                    running = rikkaFacts?.isRunning == true,
+                    granted = rikkaFacts?.hasPermission == true,
                 ),
             )
+        }
+    }
+
+    /**
+     * Task D10：教程内切换通道选择（§11.2）。纯 UI 态——不写 DataStore、不探测、不交互；
+     * 改选同时作废进行中的前台 Root attempt（§11.4.6），迟到成功不得提交。
+     */
+    private fun onSelectProvider(kind: ProviderKind) {
+        if (onboardingState.providerChoice == kind) return
+        coordinator.cancelForegroundAttempt(activityOwner)
+        onboardingState = onboardingState.copy(providerChoice = kind)
+    }
+
+    /**
+     * Task D10：Root 卡「请求 Root 授权」——唯一 Root 交互入口（§11.2/§11.4.6）。
+     * 前台验证+提交全走 Coordinator：auth（单飞）→ bind+健康检查 → commit；
+     * candidate 三者全部成功才写盘，失败/取消只清 candidate。进行中禁用重复点击。
+     */
+    private fun onRequestRootAuthorization() {
+        if (onboardingState.providerOperationInFlight) return
+        onboardingState = onboardingState.copy(providerOperationInFlight = true)
+        lifecycleScope.launch {
+            try {
+                when (val r = coordinator.verifyRootFromForeground(
+                    activityOwner, ProviderSource.ONBOARDING)) {
+                    is RootVerificationResult.Committed ->
+                        LogStore.log("Root 前台验证已提交（generation=${r.generation}）")
+                    is RootVerificationResult.Failed ->
+                        LogStore.log("Root 前台验证失败: ${r.status} ${r.message ?: ""}")
+                    is RootVerificationResult.NotCommitted ->
+                        LogStore.log("Root 验证成功但切换未提交: ${r.reason}")
+                }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                LogStore.log("Root 前台验证异常: $t")
+            } finally {
+                onboardingState = onboardingState.copy(providerOperationInFlight = false)
+            }
         }
     }
 
@@ -742,43 +1110,161 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Shizuku 显式授权按钮（Task D9）：仍走 lease 携带的原 provider requestPermission 流程。
+     * Root 已选时此按钮不触发任何 Root 交互（Root 授权只由教程/设置的 Root 卡显式发起）。
+     */
     private fun onRequestCarrierPermission() {
         lifecycleScope.launch {
-            val ok = withContext(Dispatchers.IO) { provider.requestPermission(this@MainActivity) }
-            LogStore.log("请求特权授权结果: $ok")
+            val probe = withContext(Dispatchers.IO) {
+                coordinator.probeSelected(ProviderSource.ONBOARDING)
+            }
+            if (probe.kind == ProviderKind.ROOT) {
+                LogStore.log("当前选择为 Root：载体授权按钮不适用，请在 Root 状态卡显式授权")
+                refreshCarriers()
+                return@launch
+            }
+            val lease = try {
+                coordinator.acquire(activityOwner, ProviderSource.ONBOARDING)
+            } catch (t: Throwable) {
+                LogStore.log("请求特权授权失败: $t")
+                refreshCarriers()
+                return@launch
+            }
+            try {
+                val shizuku = lease.shizukuProvider
+                val ok = withContext(Dispatchers.IO) {
+                    shizuku?.requestPermission(this@MainActivity) ?: false
+                }
+                LogStore.log("请求特权授权结果: $ok")
+            } finally {
+                lease.close()
+            }
             refreshCarriers()
         }
     }
 
-    /** Connect 页「刷新」：bind + dumpDevices + readConfig；命中内置预设且无档案时弹确认。 */
+    /**
+     * v1.2.2 修复：Connect 页「刷新」——本机 API 先判连接（BluetoothManager A2DP，
+     * 无需特权），特权 dump/read/presentation 只作参数增强；未授权、空列表、
+     * read error、解析失败都不能覆盖本机已连接。本机读不到（UNKNOWN 不等于断开）
+     * 才回退旧特权全路径。
+     */
     private fun onRefreshConnection() {
         lifecycleScope.launch {
             try {
-                if (!ensureCarrierReady()) return@launch
-                val svc = withContext(Dispatchers.IO) { provider.bind() }
-                val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
-                if (arr.length() == 0) {
-                    onboardingState = onboardingState.copy(
-                        headsetConnected = false, headsetName = null,
-                    )
-                    LogStore.log("刷新连接：无已连接 A2DP 设备")
-                    return@launch
+                val local = withContext(Dispatchers.IO) { localHeadsetSource.current() }
+                when (local) {
+                    is LocalHeadsetResult.Connected -> onLocalHeadsetConnected(local.headset)
+                    LocalHeadsetResult.Disconnected -> {
+                        onboardingState = onboardingState.copy(
+                            headsetConnected = false, headsetName = null,
+                        )
+                        logConnectRefreshDedup("刷新连接：本机无已连接 A2DP 设备")
+                    }
+                    LocalHeadsetResult.SecurityBlocked,
+                    LocalHeadsetResult.Unknown -> onRefreshConnectionViaProvider(local)
                 }
-                val mac = arr.getJSONObject(0).getString("mac")
-                val name = arr.getJSONObject(0).getString("name")
-                val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
-                val obj = JSONObject(stateJson)
-                if (obj.has("error")) {
-                    LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
-                    return@launch
-                }
-                val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
-                onboardingState = onboardingState.copy(headsetConnected = true, headsetName = name)
-                LogStore.log("已连接: $name ($mac)，当前 ${current.summary()}")
             } catch (t: Throwable) {
                 LogStore.log("刷新连接失败: $t")
             }
         }
+    }
+
+    /** 本机已确认连接：先点亮教程连接态，再尽力用特权通道读当前参数留证（失败不影响连接态）。 */
+    private fun onLocalHeadsetConnected(headset: LocalHeadset) {
+        onboardingState = onboardingState.copy(headsetConnected = true, headsetName = headset.name)
+        lifecycleScope.launch {
+            try {
+                if (!ensureCarrierReady()) return@launch
+                val lease = coordinator.acquire(activityOwner, ProviderSource.ONBOARDING)
+                try {
+                    lease.withService { svc ->
+                        val stateJson = withContext(Dispatchers.IO) { svc.readConfig(headset.mac) }
+                        val obj = JSONObject(stateJson)
+                        if (obj.has("error")) {
+                            LogStore.log("读取当前参数 error: ${obj.optString("error")}")
+                            return@withService
+                        }
+                        val presentation = CodecSnapshotPresenter.present(
+                            CodecStateSnapshotJson.parse(stateJson),
+                        )
+                        if (presentation == null) {
+                            LogStore.log("读取当前参数：当前配置尚未就绪")
+                            return@withService
+                        }
+                        recordIdentityConflict(headset.mac, presentation)
+                        LogStore.log("已连接: ${headset.name} (${headset.mac})，当前 ${presentation.summary.text()}")
+                    }
+                } finally {
+                    lease.close()
+                }
+            } catch (t: Throwable) {
+                LogStore.log("读取当前参数失败（不影响连接状态）: $t")
+            }
+        }
+    }
+
+    /**
+     * 本机读不到时的旧特权全路径（ensure + lease 内 dumpDevices/readConfig）。
+     * 仅 Unknown/SecurityBlocked 会走到这里，特权空列表此时才可改判为未连接。
+     */
+    private fun onRefreshConnectionViaProvider(local: LocalHeadsetResult) {
+        lifecycleScope.launch {
+            try {
+                if (!ensureCarrierReady()) return@launch
+                val lease = coordinator.acquire(activityOwner, ProviderSource.ONBOARDING)
+                try {
+                    lease.withService { svc ->
+                        val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                        if (arr.length() == 0) {
+                            if (ConnectionPresentation.providerEmptyListAuthoritative(local)) {
+                                onboardingState = onboardingState.copy(
+                                    headsetConnected = false, headsetName = null,
+                                )
+                                logConnectRefreshDedup("刷新连接：无已连接 A2DP 设备")
+                            } else {
+                                // 路由已保证本机读不到才进本路径；此处防御未来改动覆盖本机裁决
+                                LogStore.log("刷新连接：特权空列表被本机裁决拦截，保持连接态")
+                            }
+                            return@withService
+                        }
+                        val mac = arr.getJSONObject(0).getString("mac")
+                        val name = arr.getJSONObject(0).getString("name")
+                        val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
+                        val obj = JSONObject(stateJson)
+                        if (obj.has("error")) {
+                            LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
+                            return@withService
+                        }
+                        val presentation = CodecSnapshotPresenter.present(
+                            CodecStateSnapshotJson.parse(stateJson),
+                        )
+                        if (presentation == null) {
+                            LogStore.log("刷新连接：当前配置尚未就绪")
+                            return@withService
+                        }
+                        recordIdentityConflict(mac, presentation)
+                        // Task D9：旧代次 lease 迟到返回不得覆盖新 UI
+                        if (!lease.isCurrent()) return@withService
+                        onboardingState = onboardingState.copy(headsetConnected = true, headsetName = name)
+                        LogStore.log("已连接: $name ($mac)，当前 ${presentation.summary.text()}")
+                    }
+                } finally {
+                    lease.close()
+                }
+            } catch (t: Throwable) {
+                LogStore.log("刷新连接失败: $t")
+            }
+        }
+    }
+
+    /** v1.2.2：教程连接页 2.5s 轮询期间同一事实只记一次日志。 */
+    private var lastConnectRefreshLog: String? = null
+    private fun logConnectRefreshDedup(message: String) {
+        if (lastConnectRefreshLog == message) return
+        lastConnectRefreshLog = message
+        LogStore.log(message)
     }
 
     private fun onOpenAutostartSettings() {
@@ -838,58 +1324,90 @@ class MainActivity : ComponentActivity() {
         wizardError = null
         lifecycleScope.launch {
             try {
-                // 载体/授权判定内联展开（对照 ensureCarrierReady）：向导要区分两种人话文案。
-                if (!withContext(Dispatchers.IO) { provider.isRunning }) {
-                    wizardError = "Shizuku/Stellar 未运行，请先修复授权"
-                    LogStore.log("录制向导：特权载体未运行")
-                    return@launch
+                // Task D9：载体/授权判定改走 Coordinator probe（只读事实，不借通用路径触发 Root）。
+                // Shizuku 保留抓取时的内联授权申请（用户显式前台动作，原行为）；
+                // Root 未 READY 只报事实，绝不 requestPermission/openShell。
+                val probe = withContext(Dispatchers.IO) {
+                    coordinator.probeSelected(ProviderSource.ONBOARDING)
                 }
-                if (!withContext(Dispatchers.IO) { provider.hasPermission }) {
-                    val ok = withContext(Dispatchers.IO) { provider.requestPermission(this@MainActivity) }
-                    if (!ok) {
-                        wizardError = "特权授权未授予"
-                        LogStore.log("录制向导：特权授权未授予")
-                        return@launch
+                if (!probe.isRunning) {
+                    when (probe.kind) {
+                        ProviderKind.ROOT -> {
+                            wizardError = "Root 通道未就绪，请先在教程或设置中完成 Root 验证"
+                            LogStore.log("录制向导：Root 未在当前进程就绪，需前台重验")
+                        }
+                        ProviderKind.SHIZUKU -> {
+                            wizardError = "Shizuku/Stellar 未运行，请先修复授权"
+                            LogStore.log("录制向导：特权载体未运行")
+                        }
                     }
-                }
-                val svc = withContext(Dispatchers.IO) { provider.bind() }
-                val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
-                if (arr.length() == 0) {
-                    wizardError = "未检测到已连接的耳机，请先连接"
-                    LogStore.log("录制向导：无已连接 A2DP 设备")
                     return@launch
                 }
-                // Task 33：重录入口已锁定目标 MAC，按 MAC 匹配而不是取 [0]；
-                // 匹配不到说明目标耳机没连上，报错而不是抓别的设备。
-                val targetMac = wizardTargetMac
-                val idx = if (targetMac == null) {
-                    0
-                } else {
-                    (0 until arr.length()).firstOrNull {
-                        arr.getJSONObject(it).getString("mac").equals(targetMac, ignoreCase = true)
+                val lease = coordinator.acquire(activityOwner, ProviderSource.ONBOARDING)
+                try {
+                    if (!probe.hasPermission) {
+                        // 仅 Shizuku 可达（Root 的 hasPermission==READY，上面未就绪已拦截）；
+                        // 走 lease 携带的原 provider 授权流程
+                        val ok = withContext(Dispatchers.IO) {
+                            lease.shizukuProvider?.requestPermission(this@MainActivity) ?: false
+                        }
+                        if (!ok) {
+                            wizardError = "特权授权未授予"
+                            LogStore.log("录制向导：特权授权未授予")
+                            return@launch
+                        }
                     }
+                    lease.withService { svc ->
+                        val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                        if (arr.length() == 0) {
+                            wizardError = "未检测到已连接的耳机，请先连接"
+                            LogStore.log("录制向导：无已连接 A2DP 设备")
+                            return@withService
+                        }
+                        // Task 33：重录入口已锁定目标 MAC，按 MAC 匹配而不是取 [0]；
+                        // 匹配不到说明目标耳机没连上，报错而不是抓别的设备。
+                        val targetMac = wizardTargetMac
+                        val idx = if (targetMac == null) {
+                            0
+                        } else {
+                            (0 until arr.length()).firstOrNull {
+                                arr.getJSONObject(it).getString("mac").equals(targetMac, ignoreCase = true)
+                            }
+                        }
+                        if (idx == null) {
+                            wizardError = "目标耳机未连接"
+                            LogStore.log("录制向导：目标耳机 $targetMac 不在已连接设备列表")
+                            return@withService
+                        }
+                        val mac = arr.getJSONObject(idx).getString("mac")
+                        val name = arr.getJSONObject(idx).getString("name")
+                        val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
+                        val obj = JSONObject(stateJson)
+                        if (obj.has("error")) {
+                            wizardError = obj.optString("error")
+                            LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
+                            return@withService
+                        }
+                        val presentation = CodecSnapshotPresenter.present(CodecStateSnapshotJson.parse(stateJson))
+                        if (presentation == null) {
+                            wizardError = "当前参数尚未就绪，请稍后重试"
+                            LogStore.log("录制向导：当前配置尚未就绪")
+                            return@withService
+                        }
+                        recordIdentityConflict(mac, presentation)
+                        // Task D9：旧代次 lease 迟到返回不得覆盖新 UI
+                        if (!lease.isCurrent()) return@withService
+                        capturedMac = mac
+                        capturedName = name
+                        capturedConfig = presentation.current
+                        capturedIdentity = presentation.identity
+                        wizardResult = summaryToUi(presentation.summary.text())
+                        wizardDeviceLabel = "$name ($mac)"
+                        LogStore.log("录制向导抓到: $name ($mac) ${presentation.summary.text()}")
+                    }
+                } finally {
+                    lease.close()
                 }
-                if (idx == null) {
-                    wizardError = "目标耳机未连接"
-                    LogStore.log("录制向导：目标耳机 $targetMac 不在已连接设备列表")
-                    return@launch
-                }
-                val mac = arr.getJSONObject(idx).getString("mac")
-                val name = arr.getJSONObject(idx).getString("name")
-                val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
-                val obj = JSONObject(stateJson)
-                if (obj.has("error")) {
-                    wizardError = obj.optString("error")
-                    LogStore.log("readConfig 返回 error: ${obj.optString("error")}")
-                    return@launch
-                }
-                val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
-                capturedMac = mac
-                capturedName = name
-                capturedConfig = current
-                wizardResult = summaryToUi(current.summary())
-                wizardDeviceLabel = "$name ($mac)"
-                LogStore.log("录制向导抓到: $name ($mac) ${current.summary()}")
             } catch (t: Throwable) {
                 wizardError = "抓取失败：${t.message ?: t.toString()}"
                 LogStore.log("录制向导抓取失败: $t")
@@ -900,7 +1418,8 @@ class MainActivity : ComponentActivity() {
     private fun onWizardSave() {
         val mac = capturedMac
         val config = capturedConfig
-        if (mac == null || config == null) return
+        val identity = capturedIdentity
+        if (mac == null || config == null || identity == null) return
         lifecycleScope.launch {
             // Task 33：save 是 runBlocking + DataStore edit，IO 异常上抛会闪退，包 try/catch。
             try {
@@ -919,7 +1438,7 @@ class MainActivity : ComponentActivity() {
                         recordedAtMillis = System.currentTimeMillis(),
                     ))
                 }
-                LogStore.log("已保存录制档案: ${capturedName ?: mac} ($mac) ${config.summary()}")
+                LogStore.log(CodecOperationLog.savedProfile(capturedName ?: mac, mac, config, identity))
                 // 弹层内轻量成功态（Task 33），由用户点「完成」关闭。
                 wizardSaved = true
             } catch (t: Throwable) {
@@ -934,7 +1453,46 @@ class MainActivity : ComponentActivity() {
     private fun onHomeAction(action: HomeAction) {
         when (action) {
             HomeAction.ApplyNow -> onApplyNow()
-            HomeAction.FixCarrier -> openCarrierManager()
+            HomeAction.FixCarrier -> onFixCarrier()
+            is HomeAction.ApplyManual -> onApplyManual(action.target, adaptive = false)
+            is HomeAction.RestoreAdaptive -> onApplyManual(action.target, adaptive = true)
+        }
+    }
+
+    /**
+     * 自定义音质写入（首页手动调参）：目标由 ManualEditorSheet/ManualSelection 按当前
+     * selectable 同条目规则构造，此处只负责显式触发写入 + 读回验证（ApplyWorker.applyManual
+     * 与自动拉满同入口锁/断连复查）。成功：自定义目标记入会话标记（恢复自适应则清除——
+     * 系统自适应不是自定义）；失败：轻提示 + 日志。结束后统一刷新首页读回。
+     */
+    private fun onApplyManual(target: CodecConfig, adaptive: Boolean) {
+        val mac = connectedMac ?: return
+        val name = connectedName
+        homeState = homeState.copy(applying = true)
+        lifecycleScope.launch {
+            try {
+                val ok = ApplyWorker(this@MainActivity).applyManual(mac, name, target)
+                if (ok) {
+                    manualSession = if (adaptive) null else (mac to target)
+                    LogStore.log(
+                        if (adaptive) "已恢复系统自适应: ${name ?: mac}"
+                        else "自定义音质已应用: ${name ?: mac} → ${target.summary()}",
+                    )
+                } else {
+                    LogStore.log("自定义音质应用失败: ${name ?: mac} → ${target.summary()}")
+                    Toast.makeText(
+                        this@MainActivity, "应用失败，详见日志页", Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            } catch (t: Throwable) {
+                LogStore.log("自定义音质应用失败: $t")
+                Toast.makeText(
+                    this@MainActivity, "应用失败，详见日志页", Toast.LENGTH_SHORT,
+                ).show()
+            } finally {
+                homeState = homeState.copy(applying = false)
+                refreshHome()
+            }
         }
     }
 
@@ -955,218 +1513,455 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun recordIdentityConflict(mac: String, presentation: CodecPresentation) {
+        if (CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT !in presentation.issues) return
+        val identity = presentation.identity
+        if (CodecIdentityDiagnosticGate.shouldRecord(mac, presentation.current, identity)) {
+            LogStore.log(
+                "IDENTITY_CONFLICT: nativeType=${identity.nativeType} " +
+                    "system=${identity.displayName} legacy=${Masks.codecName(identity.nativeType)}"
+            )
+        }
+    }
+
+    /**
+     * Task B5：首页轮询轮的通用诊断上下文。device 只读 Build/现有 DeviceNames；
+     * [providerKind] 如实记录本轮实际 lease 通道（final review fix：Root 快照不再误标 shizuku）；
+     * dumpClues 由调用方只传入本轮已取 dump 解析出的线索。
+     */
+    private fun homeDiagnosticContext(
+        mac: String, trigger: DiagnosticTrigger, dumpClues: List<String>, providerKind: String,
+    ) = VendorDiagnosticContext(
+        mac = mac,
+        trigger = trigger,
+        source = DiagnosticSource.HOME,
+        timestampMillis = System.currentTimeMillis(),
+        providerKind = providerKind,
+        device = VendorDiagnosticMetadata.current(),
+        dumpClues = dumpClues,
+    )
+
     // 每次刷新递增代次；慢读取可并发，但只有最新轮次允许写首页状态与 PCM 前值。
     @Volatile private var refreshGeneration = 0L
 
-    /** onResume / ApplyNow 后刷新：载体异常 → 红条；否则 bind 读第一台设备实况。 */
+    /**
+     * v1.2.2 修复：本机普通 API（BluetoothManager A2DP connectedDevices）先做连接事实裁决，
+     * 特权 dump/read 只作参数增强——特权未就绪/读取失败不再把系统蓝牙已连接误判为「未连接」。
+     *  - Connected              → refreshHomeConnected：先落耳机名，再尽力增强参数；
+     *  - Disconnected           → 本机确认无 A2DP 连接：清空连接态，廉价 probe 顺带维护红条事实；
+     *  - SecurityBlocked/Unknown→ 本机读不到（UNKNOWN 不等于断开）：回退旧特权全路径。
+     */
     private fun refreshHome() {
         lifecycleScope.launch {
             val gen = ++refreshGeneration
-            val running = withContext(Dispatchers.IO) { provider.isRunning }
-            if (!running) {
-                if (gen != refreshGeneration) return@launch
+            val local = withContext(Dispatchers.IO) { localHeadsetSource.current() }
+            if (gen != refreshGeneration) return@launch
+            when (local) {
+                is LocalHeadsetResult.Connected -> refreshHomeConnected(gen, local.headset)
+                LocalHeadsetResult.Disconnected -> {
+                    homeState = homeState.copy(
+                        headsetName = null, codec = null, rate = null,
+                        bits = null, quality = null,
+                        realtimeKbps = null, realtimeQualityMode = null,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+                        manualActive = false, manualEditor = null,
+                    )
+                    connectedMac = null
+                    connectedName = null
+                    // 未连接时没有 3s 轮询，廉价 probe 仅维护红条事实（不记未授权日志）。
+                    val check = withContext(Dispatchers.IO) {
+                        coordinator.probeSelected(ProviderSource.SETTINGS)
+                    }.foregroundCheck()
+                    if (gen != refreshGeneration) return@launch
+                    homeState = homeState.copy(carrierAlert = check.carrierAlert)
+                }
+                LocalHeadsetResult.SecurityBlocked,
+                LocalHeadsetResult.Unknown -> refreshHomeProviderPath(gen, local)
+            }
+        }
+    }
+
+    /**
+     * 本机已确认连接：先落耳机名（连接事实），特权读取只增强参数。
+     * 未授权/读取失败：保留耳机名，参数置不可用（paramsAvailable=false），
+     * 状态行显示「已连接，授权后可用」，Apply/自定义写入禁用；
+     * 未授权日志按原因去重，3s 轮询不再每轮刷一条。
+     */
+    private suspend fun refreshHomeConnected(gen: Long, headset: LocalHeadset) {
+        if (gen != refreshGeneration) return
+        // 设备变化（换机/同名不同 MAC/首次连接）立即作废旧参数并清手动会话——
+        // 新设备读回完成前不得展示上一台参数，也不得让 Apply/自定义对其可用。
+        val merged = HomeStateMerge.onLocalConnected(homeState, headset, connectedMac)
+        homeState = merged.state
+        if (merged.deviceChanged) manualSession = null
+        connectedMac = headset.mac
+        connectedName = headset.name
+        // Task D9：只读 probe 判定当前选择是否可 bind（Root=READY 复查，
+        // Shizuku=pingBinder/checkSelfPermission），绝不 requestPermission/openShell。
+        val check = withContext(Dispatchers.IO) {
+            coordinator.probeSelected(ProviderSource.SETTINGS)
+        }.foregroundCheck()
+        if (!check.bindable) {
+            if (check.carrierAlert != null) {
+                if (gen != refreshGeneration) return
+                homeState = homeState.copy(carrierAlert = check.carrierAlert)
+                markHomeParamsUnavailable()
+                return
+            }
+            // 未授权（running 但未 granted）：保留耳机名，参数不可用，去重日志后跳过读取
+            if (gen != refreshGeneration) return
+            homeState = homeState.copy(carrierAlert = null)
+            markHomeParamsUnavailable()
+            logHomeNotReadyDedup("首页刷新：${check.notReadyLog}，跳过设备读取")
+            return
+        }
+        if (gen != refreshGeneration) return
+        homeState = homeState.copy(carrierAlert = null)
+        lastHomeNotReadyLog = null
+        try {
+            val lease = coordinator.acquire(activityOwner, ProviderSource.SETTINGS)
+            try {
+                // Task 46：bind 同为 binder 调用，ColorOS 冻结载体时同样可能永久阻塞，
+                // 包 8s 超时；超时早退不清空已有状态（连接事实已由本机裁决，
+                // 参数至多停留在旧值，绝不回写断开）。
+                val bound = withTimeoutOrNull(8_000) { lease.withService { } }
+                if (bound == null) {
+                    LogStore.log("首页刷新：bind 超时(8s)，本轮跳过")
+                    return
+                }
+                lease.withService { svc ->
+                    readHomeState(gen, lease, svc, headset.mac, headset.name)
+                }
+            } finally {
+                lease.close()
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            LogStore.log("首页刷新失败: $t")
+            // 边界：读取/诊断异常与读取失败同口径——本轮仍最新时保留耳机名、
+            // 参数置不可用，旧手动配置（manualEditor）不得继续可用。
+            if (gen == refreshGeneration) markHomeParamsUnavailable()
+        }
+    }
+
+    /**
+     * 本机读不到时的旧特权全路径（probe → lease → dumpDevices 找第一台 → readConfig 增强）。
+     * 仅 Unknown/SecurityBlocked 会走到这里，特权空列表此时才可改判为未连接。
+     */
+    private suspend fun refreshHomeProviderPath(gen: Long, local: LocalHeadsetResult) {
+        // Task D9：只读 probe 判定当前选择是否可 bind，绝不 requestPermission/openShell。
+        val check = withContext(Dispatchers.IO) {
+            coordinator.probeSelected(ProviderSource.SETTINGS)
+        }.foregroundCheck()
+        if (!check.bindable) {
+            if (check.carrierAlert != null) {
+                if (gen != refreshGeneration) return
                 homeState = homeState.copy(
-                    carrierAlert = "Shizuku/Stellar 未运行，点我修复",
+                    carrierAlert = check.carrierAlert,
                     headsetName = null,
-                    codec = null,
-                    rate = null,
-                    bits = null,
-                    quality = null,
-                    realtimeKbps = null,
-                    realtimeQualityMode = null,
-                    realtimeNotStreaming = false,
-                    fullBars = false,
+                    codec = null, rate = null, bits = null, quality = null,
+                    realtimeKbps = null, realtimeQualityMode = null,
+                    realtimeDisplay = RealtimeDisplay.NO_DATA,
+                    fullBars = false, targetStatus = null,
+                    manualActive = false, manualEditor = null,
                 )
                 connectedMac = null
                 connectedName = null
-                return@launch
+                return
             }
-            if (gen != refreshGeneration) return@launch
+            // 未授权（running 但未 granted）：保持原行为——先消红条，去重日志后跳过读取
+            if (gen != refreshGeneration) return
             homeState = homeState.copy(carrierAlert = null)
-            if (!withContext(Dispatchers.IO) { provider.hasPermission }) {
-                LogStore.log("首页刷新：特权未授予，跳过设备读取")
-                return@launch
-            }
+            logHomeNotReadyDedup("首页刷新：${check.notReadyLog}，跳过设备读取")
+            return
+        }
+        if (gen != refreshGeneration) return
+        homeState = homeState.copy(carrierAlert = null)
+        lastHomeNotReadyLog = null
+        try {
+            val lease = coordinator.acquire(activityOwner, ProviderSource.SETTINGS)
             try {
-                // Task 46（Task 3 审查捎带裁定）：bind 同为 binder 调用，ColorOS 冻结载体
-                // 时同样可能永久阻塞，与 dumpDevices/readConfig 同口径包 8s 超时；
-                // 超时早退与「特权未授予」分支一致（直接 return，不清空已有状态）。
-                // 超时必须在 IO 外层：取消的是等待线程，已发出的同步 binder 调用本身
-                // 不可中断，IO 线程可能滞留。
-                val svc = withTimeoutOrNull(8_000) {
-                    withContext(Dispatchers.IO) { provider.bind() }
-                }
-                if (svc == null) {
+                // Task 46：bind 同为 binder 调用，ColorOS 冻结载体时同样可能永久阻塞，
+                // 与 dumpDevices/readConfig 同口径包 8s 超时；超时早退与「特权未授予」
+                // 分支一致（直接 return，不清空已有状态）。
+                // Task D9：首趟 withService 只完成通道就绪，正式读取在第二趟 withService
+                // （Root IPC 必须在 Mutex 内串行）。
+                val bound = withTimeoutOrNull(8_000) { lease.withService { } }
+                if (bound == null) {
                     LogStore.log("首页刷新：bind 超时(8s)，本轮跳过")
-                    return@launch
+                    return
                 }
-                // Task 45：ColorOS 可能冻结载体进程使 binder 永久阻塞（ListenerService
-                // 浸泡实测已踩过），dumpDevices/readConfig 各包 8s 超时（同
-                // ListenerService 兜底口径）；超时按「本轮读不到」走与无设备相同的
-                // 清空/早退路径，避免首页协程挂起停旧数据被误诊为「参数显示不出来」。
-                val devicesJson = withTimeoutOrNull(8_000) {
-                    withContext(Dispatchers.IO) { svc.dumpDevices() }
-                }
-                if (devicesJson == null) {
-                    LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
-                    if (gen != refreshGeneration) return@launch
-                    homeState = homeState.copy(
-                        headsetName = null, codec = null, rate = null,
-                        bits = null, quality = null,
-                        realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeNotStreaming = false, fullBars = false,
-                    )
-                    connectedMac = null
-                    connectedName = null
-                    return@launch
-                }
-                val arr = JSONArray(devicesJson)
-                if (arr.length() == 0) {
-                    if (gen != refreshGeneration) return@launch
-                    homeState = homeState.copy(
-                        headsetName = null, codec = null, rate = null,
-                        bits = null, quality = null,
-                        realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeNotStreaming = false, fullBars = false,
-                    )
-                    connectedMac = null
-                    connectedName = null
-                    return@launch
-                }
-                val mac = arr.getJSONObject(0).getString("mac")
-                val name = arr.getJSONObject(0).getString("name")
-                val stateJson = withTimeoutOrNull(8_000) {
-                    withContext(Dispatchers.IO) { svc.readConfig(mac) }
-                }
-                if (stateJson == null) {
-                    LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
-                    if (gen != refreshGeneration) return@launch
-                    homeState = homeState.copy(
-                        headsetName = null, codec = null, rate = null,
-                        bits = null, quality = null,
-                        realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeNotStreaming = false, fullBars = false,
-                    )
-                    connectedMac = null
-                    connectedName = null
-                    return@launch
-                }
-                val obj = JSONObject(stateJson)
-                if (obj.has("error")) {
-                    LogStore.log("首页 readConfig error: ${obj.optString("error")}")
-                    return@launch
-                }
-                val current = CodecConfig.fromJson(obj.getJSONObject("current").toString())
-                // Task 27 两态裁决：fullBars = 与 ApplyWorker 同一份 deriveTarget 判定
-                // （readConfig 响应已含 selectable），四字段相等即"已达本机最高音质输出"。
-                val selectable = obj.optJSONArray("selectable")?.let { arr ->
-                    (0 until arr.length()).map {
-                        CodecConfig.fromJson(arr.getJSONObject(it).toString())
+                lease.withService { svc ->
+                    // Task 45：ColorOS 可能冻结载体进程使 binder 永久阻塞（ListenerService
+                    // 浸泡实测已踩过），dumpDevices 包 8s 超时（同 readConfig 兜底口径）。
+                    val devicesJson = withTimeoutOrNull(8_000) {
+                        withContext(Dispatchers.IO) { svc.dumpDevices() }
                     }
-                } ?: emptyList()
-                val fullBars = ApplyPolicy.matches(
-                    ApplyPolicy.deriveTarget(current, selectable), current,
-                )
-                // Task 46：播放判定先行——isMusicActive=false 时不再读 dump，首轮直接
-                // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
-                // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
-                // （旧 dump 读取块已由下方 isMusicActive 版取代，合并时整段移除。）
-                // Task 45：ColorOS 新栈 LHDC 在 vendor 段（0x10..0x1F），
-                // 用 selectable 能力掩码佐证后再认 LHDC。
-                val capsMask = Masks.capsRateMask(current.codecType, selectable)
-                val codecName = Masks.codecName(current.codecType, capsMask)
-                val isMusicActive = audioManager.isMusicActive
-                var preciseCodec: String? = null
-                var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
-                // 保留本次 dump 原文与 parsed state，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
-                var btDump: String? = null
-                var parsedState: BtStateParser.BtState? = null
-                if (!isMusicActive) {
-                    logBtDiag(null)
-                } else {
-                    try {
-                        // Task 46 并行分支：dumpBtState 超时必须在 IO 外层（对齐
-                        // ListenerService 范式；取消的是等待，阻塞中的 binder 不可中断）。
-                        val btJson = withTimeoutOrNull(8_000) {
-                            withContext(Dispatchers.IO) { svc.dumpBtState() }
-                        }
-                        if (btJson == null) {
-                            realtimeDiag(current, codecName, "超时(8s)")
+                    if (devicesJson == null) {
+                        LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+                        if (gen != refreshGeneration || !lease.isCurrent()) return@withService
+                        // 边界：超时不是「无设备」的正面证据——本机读不到（UNKNOWN 不等于断开）
+                        // 只降级参数、保留既有连接态，绝不 clearHomeConnection。
+                        homeState = HomeStateMerge.providerTimeoutDegrade(local, homeState)
+                        return@withService
+                    }
+                    val arr = JSONArray(devicesJson)
+                    if (arr.length() == 0) {
+                        if (gen != refreshGeneration || !lease.isCurrent()) return@withService
+                        if (ConnectionPresentation.providerEmptyListAuthoritative(local)) {
+                            clearHomeConnection()
                         } else {
-                            val btObj = JSONObject(btJson)
-                            if (btObj.has("error")) {
-                                realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
-                            } else {
-                                btDump = btObj.optString("dump")
-                                // 必须走 current+selectable 的佐证版名称；单参映射会把
-                                // ColorOS 19 变成 vendor(19)，永远匹配不到 LHDC 段。
-                                val parsed = BtStateParser.parse(
-                                    btDump.orEmpty(), current, selectable,
-                                )
-                                parsedState = parsed
-                                realtime = BtStateParser.realtimeDisplay(isMusicActive = true, state = parsed)
-                                if (parsed == null) {
-                                    realtimeDiag(current, codecName, "无匹配段落")
-                                } else {
-                                    preciseCodec = parsed.codec
-                                    if (!realtime.notStreaming && realtime.bitrateKbps == null) {
-                                        realtimeDiag(current, codecName, "无码率字段")
-                                    } else {
-                                        logBtDiag(null)
-                                    }
-                                }
-                            }
+                            // 路由已保证本机读不到才进本路径；此处防御未来改动覆盖本机裁决
+                            LogStore.log("首页刷新：特权空列表被本机裁决拦截，保持连接态")
                         }
-                    } catch (t: Throwable) {
-                        realtimeDiag(current, codecName, "读取异常: $t")
+                        return@withService
                     }
+                    val mac = arr.getJSONObject(0).getString("mac")
+                    val name = arr.getJSONObject(0).getString("name")
+                    readHomeState(gen, lease, svc, mac, name)
                 }
-                // Task 53：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump 与 parsed state。
-                // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；首页按 mac+raw+真实类别去重。
-                val state = parsedState
-                val kind = VendorDiagnostics.sampleKind(state)
-                if (btDump != null && VendorDiagnostics.shouldLog(current.codecType, capsMask) &&
-                    recordUnknownVendor(mac, current, kind)
-                ) {
-                    LogStore.log(
-                        "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
-                            "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
-                            "mac=$mac capsRateMask=$capsMask current=${current.toJson()}"
-                    )
-                    if (state != null) {
-                        LogStore.log(
-                            "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
-                                "sample=$kind ${VendorDiagnostics.evidence(state)}"
-                        )
+            } finally {
+                lease.close()
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            LogStore.log("首页刷新失败: $t")
+            // 边界：特权路径异常同样只降级参数、保留既有连接态（UNKNOWN 不等于断开）。
+            if (gen == refreshGeneration) markHomeParamsUnavailable()
+        }
+    }
+
+    /** 清空首页连接态（仅本机确认断开/特权空列表且本机读不到）；不触碰 carrierAlert 字段。 */
+    private fun clearHomeConnection() {
+        homeState = homeState.copy(
+            headsetName = null, codec = null, rate = null, bits = null, quality = null,
+            realtimeKbps = null, realtimeQualityMode = null,
+            realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
+            manualActive = false, manualEditor = null,
+        )
+        connectedMac = null
+        connectedName = null
+    }
+
+    /**
+     * v1.2.2：参数置不可用但保留连接事实——耳机名/connectedMac 不动，
+     * 明细格显示「—」，状态行显示「已连接，授权后可用」，Apply/自定义写入禁用。
+     */
+    private fun markHomeParamsUnavailable() {
+        homeState = HomeStateMerge.paramsUnavailable(homeState)
+    }
+
+    /** v1.2.2：同一未就绪原因只记一次，避免首页 3s 轮询每轮刷一条错误日志。 */
+    private var lastHomeNotReadyLog: String? = null
+    private fun logHomeNotReadyDedup(message: String) {
+        if (lastHomeNotReadyLog == message) return
+        lastHomeNotReadyLog = message
+        LogStore.log(message)
+    }
+
+    /**
+     * 特权参数读取（v1.2.2 从 refreshHome 抽出，dumpBtState/诊断/B5 recorder 行为不变）：
+     * 锁定设备 (mac/name) 后 readConfig + 实况 dump + 厂商诊断 + UI 写入。
+     * 连接事实由调用方裁决（本机 API 或特权 dumpDevices），本函数任何读取失败
+     * 只把参数置为不可用并保留耳机名，绝不回写断开。
+     */
+    private suspend fun readHomeState(
+        gen: Long,
+        lease: ProviderLease,
+        svc: ICodecService,
+        mac: String,
+        name: String,
+    ) {
+        val stateJson = withTimeoutOrNull(8_000) {
+            withContext(Dispatchers.IO) { svc.readConfig(mac) }
+        }
+        if (stateJson == null) {
+            LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            return
+        }
+        val obj = JSONObject(stateJson)
+        if (obj.has("error")) {
+            LogStore.log("首页 readConfig error: ${obj.optString("error")}")
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            return
+        }
+        // 边界：解析失败与读取失败同口径——保留耳机名、参数置不可用，
+        // 绝不落到外层 catch 保留旧 paramsAvailable=true / 旧 manualEditor。
+        val snapshot: CodecStateSnapshot
+        val presentation: CodecPresentation?
+        try {
+            snapshot = CodecStateSnapshotJson.parse(stateJson)
+            presentation = CodecSnapshotPresenter.present(snapshot)
+        } catch (t: Throwable) {
+            LogStore.log("首页刷新：快照解析失败: $t")
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            return
+        }
+        if (presentation == null) {
+            // Task B5：current 缺失轮也留证（currentNull 等 reason）并缓存同轮快照。
+            val diagContext = homeDiagnosticContext(
+                mac, DiagnosticTrigger.CODEC_UPDATE, dumpClues = emptyList(),
+                providerKind = lease.kind.stored,
+            )
+            VendorStackDiagnosticRecorder.shared.record(snapshot, diagContext)
+            lastDiagnosticSnapshot = snapshot
+            lastDiagnosticMac = mac
+            lastDiagnosticProviderKind = lease.kind.stored
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            logBtDiag(null)
+            return
+        }
+        recordIdentityConflict(mac, presentation)
+        val current = presentation.current
+        val selectable = snapshot.selectable
+        val targetAssessment = ApplyPolicy.assessTarget(current, selectable)
+        val fullBars = ApplyPolicy.isAtHighest(targetAssessment, current)
+        // Task 46：播放判定先行——isMusicActive=false 时不再读 dump，首轮直接
+        // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
+        // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
+        val capsMask = Masks.capsRateMask(current.codecType, selectable)
+        val codecName = presentation.identity.displayName
+        val isMusicActive = audioManager.isMusicActive
+        var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
+        // 保留本次 dump 原文与 parsed state/result，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
+        var btDump: String? = null
+        var parsedState: BtStateParser.BtState? = null
+        var parsedResult: BtStateParseResult? = null
+        if (!isMusicActive) {
+            logBtDiag(null)
+        } else {
+            try {
+                // Task 46 并行分支：dumpBtState 超时必须在 IO 外层（对齐
+                // ListenerService 范式；取消的是等待，阻塞中的 binder 不可中断）。
+                val btJson = withTimeoutOrNull(8_000) {
+                    withContext(Dispatchers.IO) { svc.dumpBtState() }
+                }
+                // Task 8：超时/error JSON 等抓取诊断先过 identity 门控，
+                // 标准编码器保持安静；安静路径复位去重基准，身份切回 vendor 可重记。
+                if (btJson == null) {
+                    if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                        realtimeDiag(current, codecName, "超时(8s)")
                     } else {
-                        LogStore.log(
-                            "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
-                                "sample=$kind 无匹配段落"
+                        logBtDiag(null)
+                    }
+                } else {
+                    val btObj = JSONObject(btJson)
+                    if (btObj.has("error")) {
+                        if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                            realtimeDiag(current, codecName, "error JSON: ${btObj.optString("error")}")
+                        } else {
+                            logBtDiag(null)
+                        }
+                    } else {
+                        btDump = btObj.optString("dump")
+                        // Task 6：身份来自 presentation；仅唯一无歧义段可补充精确版本显示。
+                        val result = BtStateParser.parseResult(
+                            btDump.orEmpty(), presentation.identity,
                         )
-                        VendorDiagnostics.dumpClues(btDump)
-                            .forEach { LogStore.log("dumpsys线索: $it") }
+                        val parsed = result.state
+                        parsedState = parsed
+                        parsedResult = result
+                        realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+                        // Task 8：实时诊断唯一出口——identity 门控 + 仅无段/无码率/歧义；
+                        // NOT_STREAMING 走下方 vendor 证据，AVAILABLE 复位去重基准。
+                        val issue = VendorDiagnostics.realtimeIssue(presentation.identity, result)
+                        if (issue != null) {
+                            realtimeDiag(current, codecName, issue)
+                        } else {
+                            logBtDiag(null)
+                        }
                     }
                 }
-                if (gen != refreshGeneration) return@launch
-                homeState = homeState.copy(
-                    headsetName = name,
-                    // Task 44：编码器格优先用 dumpsys 段落精确名（如 "LHDC V5"），
-                    // 读不到回落 Masks 映射名；CodecConfig 层语义不动（cs1 档位仍按 codecType）。
-                    codec = preciseCodec ?: Masks.codecName(current.codecType, capsMask),
-                    rate = Masks.rateHz(current.sampleRate),
-                    bits = Masks.bitsDepth(current.bitsPerSample),
-                    quality = Masks.qualityLabel(current.codecType, current.cs1, capsMask),
-                    realtimeKbps = realtime.bitrateKbps,
-                    realtimeQualityMode = realtime.qualityMode,
-                    realtimeNotStreaming = realtime.notStreaming,
-                    fullBars = fullBars,
-                )
-                connectedMac = mac
-                connectedName = name
             } catch (t: Throwable) {
-                LogStore.log("首页刷新失败: $t")
+                if (VendorDiagnostics.shouldLog(presentation.identity)) {
+                    realtimeDiag(current, codecName, "读取异常: $t")
+                } else {
+                    logBtDiag(null)
+                }
             }
         }
+        // Task 53：与 ApplyWorker 同口径的轻量厂商诊断，复用上方同一次 dump 与 parsed result。
+        // 19 号已识别 LHDC 也记录 raw cs1 + 实况证据；首页按 mac+raw+真实类别去重。
+        // Task 8：门控改用 identity，NOT_STREAMING 只经本 gate 留一次 not-streaming 证据。
+        val state = parsedState
+        val result = parsedResult
+        val kind = result?.let { VendorDiagnostics.sampleKind(it) }
+        if (btDump != null && result != null && kind != null &&
+            VendorDiagnostics.shouldLog(presentation.identity) &&
+            recordUnknownVendor(mac, current, kind)
+        ) {
+            LogStore.log(
+                "厂商编码器诊断: 机型=${DeviceNames.marketModel()} " +
+                    "Android=${Build.VERSION.RELEASE} 构建=${Build.DISPLAY} " +
+                    "mac=$mac capsRateMask=$capsMask current=${current.toJson()}"
+            )
+            if (state != null) {
+                LogStore.log(
+                    "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
+                        "sample=$kind ${VendorDiagnostics.evidence(state)}"
+                )
+            } else {
+                LogStore.log(
+                    "dumpsys证据: mac=$mac source=home isMusicActive=$isMusicActive " +
+                        "sample=$kind ${VendorDiagnostics.missingStateEvidence(result)}"
+                )
+                VendorDiagnostics.dumpClues(btDump)
+                    .forEach { LogStore.log("dumpsys线索: $it") }
+            }
+        }
+        // Task B5：同一轮 readConfig 的通用厂商栈留证——播放中 PLAYING、否则 CODEC_UPDATE；
+        // dumpClues 只复用本轮已取的 dump（不新增 dumpBtState 调用）。旧 dumpsys 证据/
+        // 24 行线索与专用 gate 仍负责原实时诊断，通用 recorder 不重复 raw current 块。
+        lastDiagnosticSnapshot = snapshot
+        lastDiagnosticMac = mac
+        lastDiagnosticProviderKind = lease.kind.stored
+        VendorStackDiagnosticRecorder.shared.record(
+            snapshot,
+            homeDiagnosticContext(
+                mac,
+                trigger = if (isMusicActive) DiagnosticTrigger.PLAYING
+                    else DiagnosticTrigger.CODEC_UPDATE,
+                dumpClues = btDump?.let { VendorDiagnostics.dumpClues(it) }.orEmpty(),
+                providerKind = lease.kind.stored,
+            ),
+        )
+        // Task D9：refreshGeneration + lease.generation 双重代次守卫，
+        // 旧轮次/旧通道的迟到返回一律不得写新 UI
+        if (gen != refreshGeneration || !lease.isCurrent()) return
+        // 自定义音质会话：读回与手动目标一致才保持「自定义」展示；
+        // 不一致（重连/系统改回/重新拉满）即失效，绝不跨重连重放。
+        val manual = manualSession
+        val manualActive = manual != null && manual.first == mac &&
+            ApplyPolicy.matches(manual.second, current)
+        if (manual != null && !manualActive) manualSession = null
+        homeState = homeState.copy(
+            headsetName = name,
+            // 仅泛称身份可由唯一无歧义段补精确版本；精确身份不被旧段名降级。
+            codec = BtStateParser.presentedCodecName(presentation.identity, parsedResult),
+            rate = presentation.summary.rate,
+            bits = presentation.summary.bits,
+            quality = presentation.summary.quality,
+            realtimeKbps = realtime.bitrateKbps,
+            realtimeQualityMode = realtime.qualityMode,
+            realtimeDisplay = realtime.display,
+            fullBars = fullBars,
+            targetStatus = targetAssessment.status,
+            manualActive = manualActive,
+            // 系统已裁决身份随数据面进弹层：佐证当前 codec 家族/显示名
+            // （OPD 这类 LHDC V3 caps 仅 48/96 的自救场景）
+            manualEditor = ManualEditorInput(
+                current, selectable, presentation.identity,
+            ),
+            // v1.2.2：读回成功即参数可用（Apply/自定义恢复可用）。
+            paramsAvailable = true,
+        )
+        connectedMac = mac
+        connectedName = name
     }
 
     private fun onApplyNow() {
@@ -1177,13 +1972,30 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 // 对抗审查 I2：手动入口传 force=true，不被 autoApply=false 静默拦截
-                ApplyWorker(this@MainActivity).run(mac, name, force = true)
+                ApplyTriggers.run(
+                    this@MainActivity, mac, name,
+                    force = true, source = TriggerSource.MANUAL,
+                )
             } catch (t: Throwable) {
                 LogStore.log("立即满血失败: $t")
             } finally {
                 homeState = homeState.copy(applying = false)
                 refreshHome()
             }
+        }
+    }
+
+    /**
+     * Task D11（§11.2）：红条点击修复。Root 持久选择下打开设置 Root 区，
+     * 不再跳 Stellar/Shizuku 管理器；Shizuku/首读未完成保持原管理器指引。
+     */
+    private fun onFixCarrier() {
+        if (RootRepairDestination.opensRootSettings(coordinator.selectedProvider.value)) {
+            selectedTab = 2
+            rootSectionExpanded = true
+            LogStore.log("首页修复：Root 通道未就绪，打开设置页 Root 区")
+        } else {
+            openCarrierManager()
         }
     }
 
@@ -1203,20 +2015,17 @@ class MainActivity : ComponentActivity() {
 
     // ================= 公共工具 =================
 
-    /** 载体未运行时给日志；未授权时先申请。返回是否可安全 bind。 */
+    /**
+     * 非交互 ensure（Task D9，设计 §11.2/§11.4.5）：只返回当前选择是否可 bind。
+     * 对 Root 永不 requestPermission/openShell；Shizuku 未授权也只记事实并返回 false
+     * （授权交互只由显式授权按钮/录制向导抓取发起）。
+     */
     private suspend fun ensureCarrierReady(): Boolean {
-        if (!withContext(Dispatchers.IO) { provider.isRunning }) {
-            LogStore.log("特权载体未运行")
-            return false
-        }
-        if (!withContext(Dispatchers.IO) { provider.hasPermission }) {
-            val ok = withContext(Dispatchers.IO) { provider.requestPermission(this@MainActivity) }
-            if (!ok) {
-                LogStore.log("特权授权未授予")
-                return false
-            }
-        }
-        return true
+        val check = withContext(Dispatchers.IO) {
+            coordinator.probeSelected(ProviderSource.ONBOARDING)
+        }.foregroundCheck()
+        if (!check.bindable) LogStore.log(check.notReadyLog ?: "特权通道不可用")
+        return check.bindable
     }
 
     private fun isInstalled(pkg: String): Boolean = try {
@@ -1255,11 +2064,12 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    /** 档案出处四字段 → 设备页展示行；旧档案无出处时返回空（不显示）。 */
+    /** 档案出处 → 设备页展示行；旧档案无出处时返回空（不显示）。
+     *  UX 收敛：构建指纹（recordedBuildDisplay）属诊断字段，只留日志/反馈，不上设备卡。 */
     private fun DeviceProfile.provenanceLine(): String {
         if (recordedAtMillis == 0L) return ""
         val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(recordedAtMillis))
-        return listOf("记录于 $recordedOnModel", "Android $recordedAndroidVersion", recordedBuildDisplay, date)
+        return listOf("记录于 $recordedOnModel", "Android $recordedAndroidVersion", date)
             .filter { it.isNotBlank() }
             .joinToString(" · ")
     }
@@ -1267,6 +2077,10 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val STELLAR_PACKAGE = "roro.stellar.manager"
+        /** Task D11：Root 修复入口 extra——onCreate/onNewIntent 消费后打开设置 tab 并展开 Root 区。 */
+        const val EXTRA_OPEN_ROOT_SETTINGS = "com.chengzi.stayhifi.extra.OPEN_ROOT_SETTINGS"
+        /** Task B5：诊断 providerKind 兜底值（无同轮快照通道记录时的旧默认；正常路径一律用采集时的 lease.kind）。 */
+        private const val DIAGNOSTIC_PROVIDER_KIND = "shizuku"
         /** Task 38：自动更新检查节流间隔（24h）。 */
         private const val AUTO_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
         /** Task 38：自动弹窗每进程最多一次（伴生对象，配置变更重建后仍记得已弹过）。 */
