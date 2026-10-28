@@ -95,6 +95,7 @@ import com.chengzi.stayhifi.ui.devices.DevicesUiState
 import com.chengzi.stayhifi.ui.devices.DeviceItemUi
 import com.chengzi.stayhifi.ui.home.HomeAction
 import com.chengzi.stayhifi.ui.home.HomeScreen
+import com.chengzi.stayhifi.ui.home.HomeStateMerge
 import com.chengzi.stayhifi.ui.home.HomeUiState
 import com.chengzi.stayhifi.ui.home.ManualEditorInput
 import com.chengzi.stayhifi.ui.logs.LogsAction
@@ -121,6 +122,7 @@ import com.chengzi.stayhifi.util.DeviceNames
 import com.chengzi.stayhifi.util.KeepAlive
 import com.chengzi.stayhifi.util.QqGroup
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -1587,12 +1589,11 @@ class MainActivity : ComponentActivity() {
      */
     private suspend fun refreshHomeConnected(gen: Long, headset: LocalHeadset) {
         if (gen != refreshGeneration) return
-        if (homeState.headsetName == null) {
-            // 断开→已连接首次落名：参数尚不可知，避免瞬时「未拉满，点下方按钮重试」误态
-            homeState = homeState.copy(headsetName = headset.name, paramsAvailable = false)
-        } else {
-            homeState = homeState.copy(headsetName = headset.name)
-        }
+        // 设备变化（换机/同名不同 MAC/首次连接）立即作废旧参数并清手动会话——
+        // 新设备读回完成前不得展示上一台参数，也不得让 Apply/自定义对其可用。
+        val merged = HomeStateMerge.onLocalConnected(homeState, headset, connectedMac)
+        homeState = merged.state
+        if (merged.deviceChanged) manualSession = null
         connectedMac = headset.mac
         connectedName = headset.name
         // Task D9：只读 probe 判定当前选择是否可 bind（Root=READY 复查，
@@ -1635,7 +1636,11 @@ class MainActivity : ComponentActivity() {
                 lease.close()
             }
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             LogStore.log("首页刷新失败: $t")
+            // 边界：读取/诊断异常与读取失败同口径——本轮仍最新时保留耳机名、
+            // 参数置不可用，旧手动配置（manualEditor）不得继续可用。
+            if (gen == refreshGeneration) markHomeParamsUnavailable()
         }
     }
 
@@ -1695,7 +1700,9 @@ class MainActivity : ComponentActivity() {
                     if (devicesJson == null) {
                         LogStore.log("首页刷新：读取超时(8s)，本轮跳过")
                         if (gen != refreshGeneration || !lease.isCurrent()) return@withService
-                        clearHomeConnection()
+                        // 边界：超时不是「无设备」的正面证据——本机读不到（UNKNOWN 不等于断开）
+                        // 只降级参数、保留既有连接态，绝不 clearHomeConnection。
+                        homeState = HomeStateMerge.providerTimeoutDegrade(local, homeState)
                         return@withService
                     }
                     val arr = JSONArray(devicesJson)
@@ -1717,11 +1724,14 @@ class MainActivity : ComponentActivity() {
                 lease.close()
             }
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             LogStore.log("首页刷新失败: $t")
+            // 边界：特权路径异常同样只降级参数、保留既有连接态（UNKNOWN 不等于断开）。
+            if (gen == refreshGeneration) markHomeParamsUnavailable()
         }
     }
 
-    /** 清空首页连接态（本机确认断开/特权空列表/特权超时）；不触碰 carrierAlert 字段。 */
+    /** 清空首页连接态（仅本机确认断开/特权空列表且本机读不到）；不触碰 carrierAlert 字段。 */
     private fun clearHomeConnection() {
         homeState = homeState.copy(
             headsetName = null, codec = null, rate = null, bits = null, quality = null,
@@ -1738,12 +1748,7 @@ class MainActivity : ComponentActivity() {
      * 明细格显示「—」，状态行显示「已连接，授权后可用」，Apply/自定义写入禁用。
      */
     private fun markHomeParamsUnavailable() {
-        homeState = homeState.copy(
-            codec = null, rate = null, bits = null, quality = null,
-            realtimeKbps = null, realtimeQualityMode = null,
-            realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
-            manualActive = false, manualEditor = null, paramsAvailable = false,
-        )
+        homeState = HomeStateMerge.paramsUnavailable(homeState)
     }
 
     /** v1.2.2：同一未就绪原因只记一次，避免首页 3s 轮询每轮刷一条错误日志。 */
@@ -1783,8 +1788,19 @@ class MainActivity : ComponentActivity() {
             markHomeParamsUnavailable()
             return
         }
-        val snapshot = CodecStateSnapshotJson.parse(stateJson)
-        val presentation = CodecSnapshotPresenter.present(snapshot)
+        // 边界：解析失败与读取失败同口径——保留耳机名、参数置不可用，
+        // 绝不落到外层 catch 保留旧 paramsAvailable=true / 旧 manualEditor。
+        val snapshot: CodecStateSnapshot
+        val presentation: CodecPresentation?
+        try {
+            snapshot = CodecStateSnapshotJson.parse(stateJson)
+            presentation = CodecSnapshotPresenter.present(snapshot)
+        } catch (t: Throwable) {
+            LogStore.log("首页刷新：快照解析失败: $t")
+            if (gen != refreshGeneration || !lease.isCurrent()) return
+            markHomeParamsUnavailable()
+            return
+        }
         if (presentation == null) {
             // Task B5：current 缺失轮也留证（currentNull 等 reason）并缓存同轮快照。
             val diagContext = homeDiagnosticContext(
