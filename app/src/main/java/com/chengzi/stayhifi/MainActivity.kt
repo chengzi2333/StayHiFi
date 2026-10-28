@@ -74,6 +74,7 @@ import com.chengzi.stayhifi.shell.ProviderKind
 import com.chengzi.stayhifi.shell.ProviderOwner
 import com.chengzi.stayhifi.shell.ProviderProbe
 import com.chengzi.stayhifi.shell.ProviderSource
+import com.chengzi.stayhifi.shell.ProviderSwitchResult
 import com.chengzi.stayhifi.shell.RootVerificationResult
 import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyTriggers
@@ -126,6 +127,16 @@ import java.util.Date
 import java.util.Locale
 
 /**
+ * Task D11：Root 修复目的地判定（设计 §11.2）。
+ * 持久选择为 Root 时，修复入口（首页红条/修复通知/QS 磁贴）直达设置页 Root 区
+ * （携带 [MainActivity.EXTRA_OPEN_ROOT_SETTINGS]），不再跳 Stellar/Shizuku 管理器；
+ * Shizuku/首读未完成保持原管理器指引。顶层独立 object：纯判定，单测可直接加载。
+ */
+internal object RootRepairDestination {
+    fun opensRootSettings(selected: ProviderKind?): Boolean = selected == ProviderKind.ROOT
+}
+
+/**
  * Task D9：前台 probe 判定（ensure/首页刷新的共同出口，设计 §11.2/§11.4.5）。
  * 纯事实映射：只翻译 [ProviderProbe] 的可观察状态，绝不触发 requestPermission/openShell。
  * [ForegroundCarrierCheck.bindable] = 当前选择是否可安全 bind（Root=READY，Shizuku=running+granted）；
@@ -140,8 +151,7 @@ internal data class ForegroundCarrierCheck(
     val carrierAlert: String?,
 )
 
-internal fun ProviderProbe.foregroundCheck(): ForegroundCarrierCheck = when {
-    !isRunning -> when (kind) {
+internal fun ProviderProbe.foregroundCheck(): ForegroundCarrierCheck = when {    !isRunning -> when (kind) {
         ProviderKind.ROOT -> ForegroundCarrierCheck(
             kind = kind,
             bindable = false,
@@ -214,6 +224,12 @@ class MainActivity : ComponentActivity() {
     private var logsVisible by mutableStateOf(false)
     private var logs by mutableStateOf<List<String>>(emptyList())
 
+    // ---- Task D11：设置页「特权方式」区状态 ----
+    /** Root 授权/切换操作进行中（本 Activity 粒度，立即反馈禁用重复点击）。 */
+    private var settingsProviderBusy by mutableStateOf(false)
+    /** Root 区展开：EXTRA_OPEN_ROOT_SETTINGS 修复入口或点击 Root 卡置位。 */
+    private var rootSectionExpanded by mutableStateOf(false)
+
     // ---- 通用厂商栈诊断（Task B5）：缓存最近一轮 readConfig 快照供 MANUAL 复制复用 ----
     private var lastDiagnosticSnapshot: CodecStateSnapshot? = null
     private var lastDiagnosticMac: String? = null
@@ -273,6 +289,24 @@ class MainActivity : ComponentActivity() {
 
         // Task 38：自动更新检查——距上次 ≥24h 才联网，静默；仅新版本时弹窗（每进程最多一次）
         autoCheckUpdate()
+        // Task D11：Root 修复入口（修复通知/QS 磁贴/红条）直达设置 Root 区
+        consumeOpenRootSettingsExtra(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        consumeOpenRootSettingsExtra(intent)
+    }
+
+    /**
+     * Task D11（§11.2）：消费 EXTRA_OPEN_ROOT_SETTINGS——打开设置 tab 并展开 Root 区。
+     * 只改 UI 态（selectedTab/rootSectionExpanded），绝不触发授权/探测/切换。
+     */
+    private fun consumeOpenRootSettingsExtra(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_ROOT_SETTINGS, false) != true) return
+        selectedTab = 2
+        rootSectionExpanded = true
+        LogStore.log("Root 修复入口：打开设置页 Root 区")
     }
 
     override fun onResume() {
@@ -311,6 +345,13 @@ class MainActivity : ComponentActivity() {
         val notifyResultOn by settingsRepo.notifyResult.collectAsState(initial = false)
         val notifyPersistentOn by settingsRepo.notifyPersistent.collectAsState(initial = false)
         val qsTileOn by settingsRepo.qsTile.collectAsState(initial = false)
+
+        // Task D11：设置页「特权方式」区的只读数据源——持久选择/生效通道/Root 快照/切换事务。
+        // 只进 UI 态，绝不触发授权/探测/写盘。
+        val selectedProvider by coordinator.selectedProvider.collectAsState()
+        val activeProvider by coordinator.activeProvider.collectAsState()
+        val rootSnapshot by rootTransport.state.collectAsState()
+        val coordinatorSwitching by coordinator.switching.collectAsState()
 
         // 耳机事件总线：连接/断开/拉满完成都 bump，首页随之刷新。
         // version=0 是初始值，跳过避免首帧与 onResume 的 refreshHome 重复刷。
@@ -417,6 +458,13 @@ class MainActivity : ComponentActivity() {
                                 batteryWhitelisted = KeepAlive.isBatteryWhitelisted(this@MainActivity),
                                 checkingUpdate = updateChecking,
                                 updateMessage = updateMessage,
+                                // Task D11：特权方式区——切换/授权进行中（Coordinator 事务或
+                                // 本 Activity 显式操作）一律禁用重复点击（§11.3）
+                                selectedProvider = selectedProvider,
+                                activeProvider = activeProvider,
+                                root = rootSnapshot,
+                                providerSwitching = coordinatorSwitching || settingsProviderBusy,
+                                rootSectionExpanded = rootSectionExpanded,
                             ),
                             onAction = ::onSettingsAction,
                         )
@@ -537,6 +585,82 @@ class MainActivity : ComponentActivity() {
             }
             SettingsAction.CheckUpdate -> onCheckUpdate()
             SettingsAction.DismissUpdateMessage -> updateMessage = null
+            is SettingsAction.SelectProvider -> onSettingsSelectProvider(action.kind)
+            SettingsAction.RequestRootAuthorization -> onSettingsRequestRootAuthorization()
+        }
+    }
+
+    /**
+     * Task D11（§11.2/§11.3）：设置页通道选择。
+     *  - 选 Shizuku/Stellar：任何时候都可手动选择，立即提交有界切换事务，
+     *    绝不检查 Root 可用性（撤权/断连/未验证均可退回）；切换期间拒绝重入。
+     *  - 选 Root：只展开 Root 区（纯 UI 态，不写盘）——Root 持久化只由
+     *    「请求 Root 授权」前台验证+提交完成。
+     */
+    private fun onSettingsSelectProvider(kind: ProviderKind) {
+        when (kind) {
+            ProviderKind.ROOT -> {
+                rootSectionExpanded = true
+                LogStore.log("设置：展开 Root 区（仅查看不改变持久通道）")
+            }
+            ProviderKind.SHIZUKU -> {
+                if (settingsProviderBusy || coordinator.switching.value) return
+                settingsProviderBusy = true
+                lifecycleScope.launch {
+                    try {
+                        // 改选前作废进行中前台 Root attempt：迟到成功不得提交（§11.4.6）
+                        coordinator.cancelForegroundAttempt(activityOwner)
+                        when (val r = coordinator.switchToShizuku(activityOwner, ProviderSource.SETTINGS)) {
+                            is ProviderSwitchResult.Committed ->
+                                LogStore.log("已切换到 Shizuku/Stellar（generation=${r.generation}）")
+                            is ProviderSwitchResult.NotCommitted ->
+                                LogStore.log(
+                                    "切换 Shizuku/Stellar 未提交: ${r.reason}" +
+                                        if (r.needsForegroundRevalidation) {
+                                            "（保留 Root 选择，需前台重验）"
+                                        } else {
+                                            ""
+                                        }
+                                )
+                        }
+                    } catch (ce: kotlinx.coroutines.CancellationException) {
+                        throw ce
+                    } catch (t: Throwable) {
+                        LogStore.log("切换 Shizuku/Stellar 异常: $t")
+                    } finally {
+                        settingsProviderBusy = false
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Task D11：设置 Root 卡「请求 Root 授权」——与教程同款的唯一 Root 交互入口
+     * （§11.2/§11.4.6）。前台验证+提交全走 Coordinator；进行中禁用重复点击。
+     */
+    private fun onSettingsRequestRootAuthorization() {
+        if (settingsProviderBusy || coordinator.switching.value) return
+        rootSectionExpanded = true
+        settingsProviderBusy = true
+        lifecycleScope.launch {
+            try {
+                when (val r = coordinator.verifyRootFromForeground(
+                    activityOwner, ProviderSource.SETTINGS)) {
+                    is RootVerificationResult.Committed ->
+                        LogStore.log("Root 前台验证已提交（generation=${r.generation}）")
+                    is RootVerificationResult.Failed ->
+                        LogStore.log("Root 前台验证失败: ${r.status} ${r.message ?: ""}")
+                    is RootVerificationResult.NotCommitted ->
+                        LogStore.log("Root 验证成功但切换未提交: ${r.reason}")
+                }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                LogStore.log("Root 前台验证异常: $t")
+            } finally {
+                settingsProviderBusy = false
+            }
         }
     }
 
@@ -1217,7 +1341,7 @@ class MainActivity : ComponentActivity() {
     private fun onHomeAction(action: HomeAction) {
         when (action) {
             HomeAction.ApplyNow -> onApplyNow()
-            HomeAction.FixCarrier -> openCarrierManager()
+            HomeAction.FixCarrier -> onFixCarrier()
         }
     }
 
@@ -1563,6 +1687,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Task D11（§11.2）：红条点击修复。Root 持久选择下打开设置 Root 区，
+     * 不再跳 Stellar/Shizuku 管理器；Shizuku/首读未完成保持原管理器指引。
+     */
+    private fun onFixCarrier() {
+        if (RootRepairDestination.opensRootSettings(coordinator.selectedProvider.value)) {
+            selectedTab = 2
+            rootSectionExpanded = true
+            LogStore.log("首页修复：Root 通道未就绪，打开设置页 Root 区")
+        } else {
+            openCarrierManager()
+        }
+    }
+
     /** 红条点击：优先跳已安装的管理器 App（Stellar 优先，其次 Shizuku）。 */
     private fun openCarrierManager() {
         val pkg = when {
@@ -1640,6 +1778,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val STELLAR_PACKAGE = "roro.stellar.manager"
+        /** Task D11：Root 修复入口 extra——onCreate/onNewIntent 消费后打开设置 tab 并展开 Root 区。 */
+        const val EXTRA_OPEN_ROOT_SETTINGS = "com.chengzi.stayhifi.extra.OPEN_ROOT_SETTINGS"
         /** Task B5：单一 rikka 通道（Stellar 透明兼容），诊断 providerKind 如实记录。 */
         private const val DIAGNOSTIC_PROVIDER_KIND = "shizuku"
         /** Task 38：自动更新检查节流间隔（24h）。 */

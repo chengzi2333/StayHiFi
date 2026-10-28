@@ -8,6 +8,7 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.chengzi.stayhifi.LogStore
 import com.chengzi.stayhifi.MainActivity
+import com.chengzi.stayhifi.RootRepairDestination
 import com.chengzi.stayhifi.StayHiFiApp
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.shell.ProviderKind
@@ -50,7 +51,8 @@ class QsTileService : TileService() {
                     if (probe.kind == ProviderKind.ROOT) {
                         coordinator.noteBackground(ProviderSource.QS)
                     }
-                    openApp()
+                    // Task D11（§11.2）：Root 未就绪时直达设置页 Root 修复区；Shizuku 指引不变
+                    openApp(openRootSettings = RootRepairDestination.opensRootSettings(probe.kind))
                     return@launch
                 }
                 val lease = coordinator.acquire(ProviderOwner("qs"), ProviderSource.QS)
@@ -93,9 +95,12 @@ class QsTileService : TileService() {
 
     // The tested SDK>=35 decision guards the PendingIntent overload's API 34 minimum.
     @SuppressLint("NewApi")
-    private fun openApp() {
+    private fun openApp(openRootSettings: Boolean = false) {
         val intent = Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (openRootSettings) {
+            intent.putExtra(MainActivity.EXTRA_OPEN_ROOT_SETTINGS, true)
+        }
         runCatching {
             if (QsTileCollapseDecision.usePendingIntent(Build.VERSION.SDK_INT)) {
                 val pendingIntent = PendingIntent.getActivity(

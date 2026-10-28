@@ -3,13 +3,16 @@ package com.chengzi.stayhifi.ui.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,6 +33,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.BuildConfig
+import com.chengzi.stayhifi.shell.ProviderKind
+import com.chengzi.stayhifi.shell.RootShellStatus
+import com.chengzi.stayhifi.shell.RootSnapshot
+import com.chengzi.stayhifi.shell.RootStatus
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.util.QqGroup
 
@@ -48,6 +55,20 @@ data class SettingsUiState(
     val checkingUpdate: Boolean = false,
     /** Task 38：检查结果内联提示（已是最新/检查失败），非 null 时弹 snackbar。 */
     val updateMessage: String? = null,
+    /** Task D11：Coordinator 持久选择 / 生效通道（首读前为 null，按默认 Shizuku 展示）。 */
+    val selectedProvider: ProviderKind? = null,
+    val activeProvider: ProviderKind? = null,
+    /** Task D11：Root 可观察快照（Root 状态/最近错误数据源，初值与冷启动一致）。 */
+    val root: RootSnapshot = RootSnapshot(
+        status = RootStatus.UNVERIFIED,
+        granted = null,
+        shellStatus = RootShellStatus.UNKNOWN,
+        observedReason = "cold start",
+    ),
+    /** Task D11：切换事务/授权请求进行中——禁用重复操作（§11.3 单飞/有界切换）。 */
+    val providerSwitching: Boolean = false,
+    /** Task D11：Root 区展开（EXTRA_OPEN_ROOT_SETTINGS 修复入口/点击 Root 卡）。 */
+    val rootSectionExpanded: Boolean = false,
 )
 
 /** 设置页全部动作上抛，本层无逻辑。 */
@@ -66,6 +87,10 @@ sealed interface SettingsAction {
     data object DismissUpdateMessage : SettingsAction
     data object CopyQqGroupNumber : SettingsAction
     data object OpenQqGroup : SettingsAction
+    /** Task D11：设置页「特权方式」选择——Shizuku/Stellar 立即提交切换事务；Root 只展开 Root 区（纯 UI 态）。 */
+    data class SelectProvider(val kind: ProviderKind) : SettingsAction
+    /** Task D11：Root 卡唯一授权入口——显式点击才触发前台验证+提交（§11.2/§11.4.6）。 */
+    data object RequestRootAuthorization : SettingsAction
 }
 
 /**
@@ -105,6 +130,37 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
             )
+
+            // Task D11（§11.2）：与首次教程同一「特权方式」入口——已升级用户无需清数据
+            // 即可参与 Root 实验；「改用 Shizuku/Stellar」任何时候可手动选择，不要求 Root 当前可用。
+            SectionTitle("特权方式")
+            ProviderSelectCard(
+                title = "Shizuku / Stellar（默认）",
+                description = "借助 Shizuku 或 Stellar 获得系统权限，任选其一准备好即可。",
+                selected = (state.selectedProvider ?: ProviderKind.SHIZUKU) == ProviderKind.SHIZUKU,
+                enabled = !state.providerSwitching,
+                onClick = { onAction(SettingsAction.SelectProvider(ProviderKind.SHIZUKU)) },
+            )
+            ProviderSelectCard(
+                title = "Root（实验）",
+                // spec §11.2 原文，不得改写
+                description = "适用于已经 Root 的设备。仅提供系统权限通道，不会提高耳机或编码器能力上限。" +
+                    "兼容性仍在收集反馈，可随时手动切回 Shizuku/Stellar。",
+                selected = state.selectedProvider == ProviderKind.ROOT,
+                enabled = !state.providerSwitching,
+                onClick = { onAction(SettingsAction.SelectProvider(ProviderKind.ROOT)) },
+            )
+            if (state.providerSwitching) {
+                Text(
+                    text = "正在切换特权方式…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            // 已持久 Root（含撤权后保留选择）或经修复入口/点击展开时，显示 Root 独立状态与修复入口。
+            if (state.selectedProvider == ProviderKind.ROOT || state.rootSectionExpanded) {
+                SettingsRootStatusCard(state, onAction)
+            }
 
             SectionTitle("自动化")
             SwitchRow(
@@ -317,6 +373,170 @@ private fun SectionTitle(text: String) {
         fontWeight = FontWeight.Bold,
         color = MaterialTheme.colorScheme.primary,
     )
+}
+
+/** Task D11：「特权方式」选择卡；切换事务进行中禁用重复点击（§11.3）。 */
+@Composable
+private fun ProviderSelectCard(
+    title: String,
+    description: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                if (selected) {
+                    Text(
+                        text = "已选",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * Task D11：Root 独立状态卡（§11.2）——不硬套「已安装/运行中/已授权」三灯，
+ * 展示 Root 可用性、授权状态、服务连接状态和最近错误（事实与推测分列）。
+ * 已持久 Root 撤权后保留选择并在此显示修复入口，不静默回退；
+ * 授权按钮仅显式动作可用，switching/requesting 期间禁用重复操作。
+ */
+@Composable
+private fun SettingsRootStatusCard(
+    state: SettingsUiState,
+    onAction: (SettingsAction) -> Unit,
+) {
+    val root = state.root
+    val ready = root.status == RootStatus.READY
+    val busy = state.providerSwitching ||
+        root.status == RootStatus.REQUESTING || root.status == RootStatus.BINDING
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (ready) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Root 状态",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                if (ready) {
+                    Text(
+                        text = "已就绪",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            RootFactRow("Root 可用性", rootAvailabilityText(root))
+            RootFactRow("授权状态", rootGrantText(root))
+            RootFactRow("服务连接", rootServiceText(root))
+            RootFactRow("最近错误", rootLastErrorText(root))
+            if (!ready) {
+                Button(
+                    onClick = { onAction(SettingsAction.RequestRootAuthorization) },
+                    enabled = !busy,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
+                    Text(if (busy) "正在验证…" else "请求 Root 授权")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RootFactRow(label: String, value: String) {
+    Row {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.size(8.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Root 可用性（事实）：是否拿到过 root shell；libsu 默认 shell 可能回落普通 sh（§11.4.1）。 */
+private fun rootAvailabilityText(root: RootSnapshot): String = when (root.shellStatus) {
+    RootShellStatus.ROOT_SHELL -> "可用（已获取 Root shell）"
+    RootShellStatus.NON_ROOT_SHELL -> "不可用（当前 shell 非 Root）"
+    RootShellStatus.UNKNOWN -> "尚未验证"
+}
+
+/** 授权状态（可观察三态，§11.4.2）：无法区分「用户拒绝/没有 su/管理器不兼容」，如实合并表述。 */
+private fun rootGrantText(root: RootSnapshot): String = when (root.granted) {
+    true -> "已授权"
+    false -> "未获得 Root 权限（可能被拒绝，或设备没有可用 Root）"
+    null -> "尚未验证"
+}
+
+private fun rootServiceText(root: RootSnapshot): String = when (root.status) {
+    RootStatus.READY -> "已连接并通过健康检查"
+    RootStatus.BINDING -> "连接中…"
+    RootStatus.BIND_NULL, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED -> "连接失败"
+    RootStatus.DISCONNECTED -> "已断开"
+    else -> "未连接"
+}
+
+/** 最近错误：只写可观察事实；推测原因（reasonHint）按 §11.6 另列，不与事实混写。 */
+private fun rootLastErrorText(root: RootSnapshot): String {
+    val isError = when (root.status) {
+        RootStatus.NOT_GRANTED, RootStatus.SHELL_FAILURE, RootStatus.AUTH_TIMEOUT,
+        RootStatus.BIND_NULL, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED,
+        RootStatus.DISCONNECTED, RootStatus.NEEDS_FOREGROUND_REVALIDATION,
+        -> true
+        else -> false
+    }
+    if (!isError) return "无"
+    val fact = root.observedReason.ifBlank { root.status.name }
+    return root.reasonHint?.let { "$fact\n推测原因：$it" } ?: fact
 }
 
 @Composable
