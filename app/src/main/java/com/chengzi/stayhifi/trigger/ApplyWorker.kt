@@ -5,6 +5,7 @@ import android.media.AudioManager
 import android.os.Build
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.LogStore
+import com.chengzi.stayhifi.StayHiFiApp
 import com.chengzi.stayhifi.codec.BtStateParser
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.CodecIdentity
@@ -28,10 +29,15 @@ import com.chengzi.stayhifi.codec.VendorStackDiagnosticRecorder
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
-import com.chengzi.stayhifi.shell.ShizukuShellProvider
+import com.chengzi.stayhifi.shell.ProviderAccessException
+import com.chengzi.stayhifi.shell.ProviderCoordinator
+import com.chengzi.stayhifi.shell.ProviderLease
+import com.chengzi.stayhifi.shell.ProviderOwner
+import com.chengzi.stayhifi.shell.ProviderSource
 import com.chengzi.stayhifi.util.DeviceNames
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -49,6 +55,12 @@ import org.json.JSONObject
  * 对抗审查 I3：run 主体持 [ApplyLock.mutex]，三路触发互斥串行。
  * 对抗审查 I2：force=true（手动入口）跳过 autoApply=false 的自动触发拦截。
  *
+ * Task D8：provider 访问统一走进程级 [ProviderCoordinator]——[connectionGuard]
+ * （B4 互斥 + 锁内断连复查）持 ApplyLock.mutex 后，经 [applyGate] acquire 带代次
+ * lease，read/write/dump helper 各以 lease.withService 包住单次 IPC，lease 由
+ * gate finally close（Shizuku 解绑本 owner provider；Root anchor 进程级不解绑）。
+ * 冷 Root/切换事务进行中非交互跳过：只记日志，不弹授权、不发修复通知、不回退 Shizuku。
+ *
  * Task 35：写入+读回验证通过后，该 MAC 无档案则自动建档（source=AUTO、autoApply=true、
  * 记录读回的实际生效配置），档案仅供设备页展示与按设备开关，仍不参与拉满决策。
  */
@@ -58,8 +70,36 @@ class ApplyWorker(context: Context) {
     private val settings by lazy { SettingsRepository(appContext) }
     private val profiles by lazy { ProfileRepository(appContext) }
     private val notifier by lazy { Notifier(appContext) }
-    private val provider by lazy { ShizukuShellProvider(appContext) }
     private val audioManager by lazy { appContext.getSystemService(AudioManager::class.java) }
+
+    /**
+     * Task D8：进程级 [ProviderCoordinator] 接缝——生产取 StayHiFiApp 单例（构造即异步
+     * 首读持久选择，此后按选择签发 lease），JVM 单测注入 fake 装配；本类不再构造/持有
+     * 任何 provider（设计 §11.3/§11.4.5）。
+     */
+    internal var coordinator: ProviderCoordinator? = null
+
+    /**
+     * 生产恒非 null（Application 即 StayHiFiApp）；null 只出现在未注入 Coordinator 的
+     * B4 遗留 JVM 接缝测试（FakeContext）。
+     */
+    private fun requireCoordinator(): ProviderCoordinator? =
+        coordinator ?: (appContext as? StayHiFiApp)?.providerCoordinator
+
+    /**
+     * Task D8：写入路径的 provider 取用闸门（设计 §11.3）。外层 [connectionGuard] 已持
+     * ApplyLock.mutex（B4 互斥与锁内断连复查不变，本机 A2DP 预检先于一切 provider
+     * 首读/acquire），故闸门持实例内锁，只固定「锁后 acquire → withService IPC →
+     * finally close」顺序，避免与外层全局锁重入死锁；跨入口互斥仍由外层全局锁保证。
+     */
+    internal var applyGate: ApplyProviderGate = ApplyProviderGate(Mutex())
+
+    /**
+     * Task D8：restoreEnv 默认实现桥接的当前 lease（仅在 restoreWithLease 的 gate
+     * 作用域内非空）。lease 的 close 由 gate finally 负责，restoreEnv.unbind 不再
+     * 解绑载体、仅保留为既有单测接缝。
+     */
+    private var activeRestoreLease: ProviderLease? = null
 
     /** Task B4：日志落点接缝（默认 LogStore），JVM 单测注入收集器避免 android.util.Log stub。 */
     internal var logSink: (String) -> Unit = { LogStore.log(it) }
@@ -73,12 +113,16 @@ class ApplyWorker(context: Context) {
         ApplyLock.mutex, LocalBluetoothA2dpProbe(appContext), ::log,
     )
 
-    /** 恢复默认载体的环境接缝（Task B4，JVM 单测注入 fake；默认即生产实现）。 */
+    /** 恢复默认载体的环境接缝（Task B4，JVM 单测注入 fake；Task D8：默认实现桥接当前 lease）。 */
     internal var restoreEnv = RestoreEnv(
-        shellReady = { waitForShell() },
-        hasPrivilege = { provider.hasPermission },
-        bind = { withContext(Dispatchers.IO) { provider.bind() } },
-        unbind = { provider.unbind() },
+        shellReady = { waitForShell(activeRestoreLease) },
+        hasPrivilege = { hasPrivilege(activeRestoreLease) },
+        bind = {
+            val lease = activeRestoreLease
+                ?: throw IllegalStateException("restore lease 缺失（gate 作用域外调用）")
+            withContext(Dispatchers.IO) { lease.withService { it } }
+        },
+        unbind = { },
         notifyFix = { notifier.notifyFixRequired(it) },
         notify = { t, c -> notifier.notifyResult(t, c) },
         notifyResultIfEnabled = { t, c -> notifyResult(t, c) },
@@ -103,13 +147,14 @@ class ApplyWorker(context: Context) {
      * Task B5：通用厂商栈诊断上下文（CONNECTION/APPLY）。只读 Build/现有 DeviceNames，
      * 单 rikka 通道（Stellar 透明兼容），不新增任何载体 IO；dumpClues 留空——
      * ApplyWorker 的 dumpsys 证据/24 行线索仍由旧专用 gate 负责，避免重复 raw 块。
+     * Task D8：providerKind 如实记录实际 lease 通道（Shizuku=shizuku 与旧值一致）。
      */
-    private fun diagnosticContext(mac: String) = VendorDiagnosticContext(
+    private fun diagnosticContext(mac: String, lease: ProviderLease) = VendorDiagnosticContext(
         mac = mac,
         trigger = DiagnosticTrigger.CONNECTION,
         source = DiagnosticSource.APPLY,
         timestampMillis = System.currentTimeMillis(),
-        providerKind = DIAGNOSTIC_PROVIDER_KIND,
+        providerKind = lease.kind.stored,
         device = VendorDiagnosticMetadata.current(),
     )
 
@@ -123,26 +168,50 @@ class ApplyWorker(context: Context) {
             log("等待上一次拉满完成…")
         }
         connectionGuard.run(target) {
-            runLocked(target, name, force)
+            runWithLease(target, name, force)
         }
     }
 
-    private suspend fun runLocked(mac: String, name: String?, force: Boolean) {
+    /**
+     * Task D8：共用入口锁（[connectionGuard] 持 ApplyLock.mutex）内经 [applyGate]
+     * 取 lease——锁后才 acquire，lease finally close。冷 Root/切换事务进行中
+     * （[ProviderAccessException]）非交互跳过：只记一条日志，不发修复通知、不弹授权、
+     * 不回退 Shizuku（§11.4.5）；NEEDS_FOREGROUND_REVALIDATION 已由 Coordinator
+     * 按状态变化去重记录。
+     */
+    private suspend fun runWithLease(mac: String, name: String?, force: Boolean) {
+        val coordinator = requireCoordinator() ?: run {
+            // 防御不可达路径：宁可跳过本轮触发也不在后台炸出未捕获异常
+            log("ProviderCoordinator 不可用，跳过本次触发")
+            return
+        }
         try {
-            if (!waitForShell()) {
+            applyGate.withLease(
+                coordinator, ProviderOwner("apply"), ProviderSource.APPLY,
+            ) { lease ->
+                runLocked(mac, name, force, lease)
+            }
+        } catch (e: ProviderAccessException) {
+            log("特权通道不可用（${e.reason}），跳过本次触发，需前台确认通道状态")
+        }
+    }
+
+    private suspend fun runLocked(mac: String, name: String?, force: Boolean, lease: ProviderLease) {
+        try {
+            if (!waitForShell(lease)) {
                 log("Shizuku 未运行，发一键修复通知")
                 notifier.notifyFixRequired("Shizuku 未运行")
                 return
             }
             // 对抗审查 I5：pingBinder 只证明 server 活着，不证明本 App 仍被授权。
             // 授权被撤后 bind 会抛异常并被误报成「拉满失败」，先查 hasPermission 引导修复。
-            if (!provider.hasPermission) {
+            // Root 通道的 READY（授权+bind+健康检查）已由 acquire 保证，无这两项检查。
+            if (!hasPrivilege(lease)) {
                 log("特权授权已被撤销，发引导修复通知")
                 notifier.notifyFixRequired("特权授权已被撤销")
                 return
             }
-            val service = withContext(Dispatchers.IO) { provider.bind() }
-            val initial = pollForDevice(service, mac) ?: run {
+            val initial = pollForDevice(lease, mac) ?: run {
                 log("设备 5s 内未出现在 A2DP，放弃本次触发")
                 return
             }
@@ -150,8 +219,10 @@ class ApplyWorker(context: Context) {
             // Task B5：settled 快照在统一解析点留证——解析 Throwable 走 recordFailure，
             // error JSON 同样留失败证据；正常 settled snapshot 进入通用 recorder
             // （有 reason 或状态跃迁才留行，重复轮询由 gate 抑制），不新增任何载体 IO。
-            val diagContext = diagnosticContext(mac)
-            val settledJson = withContext(Dispatchers.IO) { service.readConfig(mac) }
+            val diagContext = diagnosticContext(mac, lease)
+            val settledJson = lease.withService { svc ->
+                withContext(Dispatchers.IO) { svc.readConfig(mac) }
+            }
             val settledSnapshot = parseSettledSnapshot(settledJson, diagContext) ?: return
             val settledPresentation = CodecSnapshotPresenter.present(settledSnapshot) ?: run {
                 // current 缺失（null/解析降级）：currentNull 等 reason 照常留证。
@@ -176,41 +247,42 @@ class ApplyWorker(context: Context) {
                         "mac=$mac capsRateMask=$capsMask current=${settled.current.toJson()}"
                 )
                 val isMusicActive = VendorDiagnostics.readMusicActive { audioManager.isMusicActive }
-                withContext(Dispatchers.IO) {
-                    try {
-                        val dumpObj = JSONObject(service.dumpBtState())
-                        if (dumpObj.has("error")) {
+                try {
+                    val dumpJson = lease.withService { svc ->
+                        withContext(Dispatchers.IO) { svc.dumpBtState() }
+                    }
+                    val dumpObj = JSONObject(dumpJson)
+                    if (dumpObj.has("error")) {
+                        log(
+                            "dumpsys诊断失败: ${dumpObj.optString("error")} " +
+                                "source=apply isMusicActive=$isMusicActive sample=dump-error"
+                        )
+                    } else {
+                        val dump = dumpObj.optString("dump")
+                        val parseResult = BtStateParser.parseResult(
+                            dump, settled.presentation.identity,
+                        )
+                        val state = parseResult.state
+                        val kind = VendorDiagnostics.sampleKind(parseResult)
+                        if (state != null) {
                             log(
-                                "dumpsys诊断失败: ${dumpObj.optString("error")} " +
-                                    "source=apply isMusicActive=$isMusicActive sample=dump-error"
+                                "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +
+                                    "sample=$kind ${VendorDiagnostics.evidence(state)}"
                             )
                         } else {
-                            val dump = dumpObj.optString("dump")
-                            val parseResult = BtStateParser.parseResult(
-                                dump, settled.presentation.identity,
+                            log(
+                                "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +
+                                    "sample=$kind ${VendorDiagnostics.missingStateEvidence(parseResult)}"
                             )
-                            val state = parseResult.state
-                            val kind = VendorDiagnostics.sampleKind(parseResult)
-                            if (state != null) {
-                                log(
-                                    "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +
-                                        "sample=$kind ${VendorDiagnostics.evidence(state)}"
-                                )
-                            } else {
-                                log(
-                                    "dumpsys证据: mac=$mac source=apply isMusicActive=$isMusicActive " +
-                                        "sample=$kind ${VendorDiagnostics.missingStateEvidence(parseResult)}"
-                                )
-                                VendorDiagnostics.dumpClues(dump)
-                                    .forEach { log("dumpsys线索: $it") }
-                            }
+                            VendorDiagnostics.dumpClues(dump)
+                                .forEach { log("dumpsys线索: $it") }
                         }
-                    } catch (t: Throwable) {
-                        log(
-                            "dumpsys诊断异常: $t source=apply isMusicActive=$isMusicActive " +
-                                "sample=dump-exception"
-                        )
                     }
+                } catch (t: Throwable) {
+                    log(
+                        "dumpsys诊断异常: $t source=apply isMusicActive=$isMusicActive " +
+                            "sample=dump-exception"
+                    )
                 }
             }
 
@@ -219,21 +291,21 @@ class ApplyWorker(context: Context) {
                 log("已有档案但 autoApply=false，跳过写入")
             } else {
                 applyDerived(
-                    service, mac, name, settled.current, settled.selectable,
+                    lease, mac, name, settled.current, settled.selectable,
                     settled.presentation.identity,
                 )
             }
         } catch (t: Throwable) {
             log("自动拉满失败: $t")
             notifier.notifyResult("音质拉满失败", "${name ?: mac}: ${t.message}")
-        } finally {
-            provider.unbind()
         }
+        // Task D8：lease 由 applyGate finally close（Shizuku 解绑本 owner provider；
+        // Root anchor 进程级、不属于任何 lease，不在此解绑）。
     }
 
     /** 统一路径：三态目标裁决 + 候选执行器；不完整 current 在任何写入副作用前结束。 */
     private suspend fun applyDerived(
-        service: ICodecService, mac: String, name: String?,
+        lease: ProviderLease, mac: String, name: String?,
         current: CodecConfig, selectable: List<CodecConfig>, identity: CodecIdentity,
     ) {
         val assessment = ApplyPolicy.assessTarget(current, selectable)
@@ -248,7 +320,7 @@ class ApplyWorker(context: Context) {
             beforeFirstWrite = { recordOriginConfig(mac, current) },
             writeVerified = { candidate ->
                 log("写入候选: ${summary(candidate, identity)}")
-                val verified = writeVerified(service, mac, candidate, identity)
+                val verified = writeVerified(lease, mac, candidate, identity)
                 if (!verified) {
                     log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
                 }
@@ -279,7 +351,7 @@ class ApplyWorker(context: Context) {
                 // 写入+读回验证通过：保留原漂移基准、首次 origin 与自动建档语义。
                 VerifiedTargetStore.record(mac, candidate)
                 autoCreateProfile(
-                    mac, name, readState(service, mac)?.current ?: candidate,
+                    mac, name, readState(lease, mac)?.current ?: candidate,
                     origin = current, identity = identity,
                 )
             }
@@ -295,10 +367,12 @@ class ApplyWorker(context: Context) {
 
     /** writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。 */
     private suspend fun writeVerified(
-        service: ICodecService, mac: String, target: CodecConfig, identity: CodecIdentity,
+        lease: ProviderLease, mac: String, target: CodecConfig, identity: CodecIdentity,
     ): Boolean {
         repeat(OUTER_RETRIES) { attempt ->
-            val res = withContext(Dispatchers.IO) { service.writeConfig(mac, target.toJson()) }
+            val res = lease.withService { svc ->
+                withContext(Dispatchers.IO) { svc.writeConfig(mac, target.toJson()) }
+            }
             val err = parseError(res)
             if (err != null) {
                 log("writeConfig 返回 error: $err")
@@ -384,9 +458,32 @@ class ApplyWorker(context: Context) {
         log("恢复默认参数: $name ($mac) → ${origin.summary()}")
         var ok = false
         connectionGuard.run(mac) {
-            ok = restoreDefaultCarrier(mac, name, origin)
+            ok = restoreWithLease(mac, name, origin)
         }
         return ok
+    }
+
+    /** 与 [runWithLease] 同一入口契约：共用入口锁后才 acquire，lease finally close，冷 Root 非交互跳过。 */
+    private suspend fun restoreWithLease(mac: String, name: String, origin: CodecConfig): Boolean {
+        // B4 遗留 JVM 接缝测试（FakeContext 无进程级 Coordinator）直接走注入载体；
+        // 生产恒走 gate（null 时默认 restoreEnv.bind 也会因 lease 缺失即抛，不会静默写设备）。
+        val coordinator = requireCoordinator()
+            ?: return restoreDefaultCarrier(mac, name, origin)
+        return try {
+            applyGate.withLease(
+                coordinator, ProviderOwner("apply-restore"), ProviderSource.APPLY,
+            ) { lease ->
+                activeRestoreLease = lease
+                try {
+                    restoreDefaultCarrier(mac, name, origin)
+                } finally {
+                    activeRestoreLease = null
+                }
+            }
+        } catch (e: ProviderAccessException) {
+            log("特权通道不可用（${e.reason}），恢复默认跳过，需前台确认通道状态")
+            false
+        }
     }
 
     /** 恢复默认载体（锁内、复查后）：绑定 → writeConfig(origin) → 读回验证 → 成功/失败通知。 */
@@ -434,8 +531,12 @@ class ApplyWorker(context: Context) {
         }
     }
 
-    /** 轮询 Shizuku binder，最多 3s。 */
-    private suspend fun waitForShell(): Boolean {
+    /**
+     * 轮询 Shizuku binder，最多 3s。Task D8：只读 lease 内 Shizuku provider；
+     * Root 通道（shizukuProvider 为 null）READY 已由 acquire 保证，直接放行。
+     */
+    private suspend fun waitForShell(lease: ProviderLease?): Boolean {
+        val provider = lease?.shizukuProvider ?: return true
         repeat(SHELL_WAIT_STEPS) {
             if (provider.isRunning) return true
             delay(POLL_DELAY_MS)
@@ -443,15 +544,29 @@ class ApplyWorker(context: Context) {
         return provider.isRunning
     }
 
+    /** Shizuku 通道查 hasPermission（授权撤销引导修复）；Root READY 已由 acquire 保证。 */
+    private fun hasPrivilege(lease: ProviderLease?): Boolean =
+        lease?.shizukuProvider?.hasPermission ?: true
+
     /** ACL_CONNECTED 先于 A2DP attach（PoC 实测最多 ~2s）：轮询 readConfig 直到设备出现，最多 5s。 */
-    private suspend fun pollForDevice(service: ICodecService, mac: String): DeviceState? {
+    private suspend fun pollForDevice(lease: ProviderLease, mac: String): DeviceState? {
         repeat(DEVICE_POLL_STEPS) {
-            val res = withContext(Dispatchers.IO) { service.readConfig(mac) }
+            val res = lease.withService { svc ->
+                withContext(Dispatchers.IO) { svc.readConfig(mac) }
+            }
             readState(res)?.let { return it }
             delay(POLL_DELAY_MS)
         }
-        return readState(withContext(Dispatchers.IO) { service.readConfig(mac) })
+        return readState(lease.withService { svc ->
+            withContext(Dispatchers.IO) { svc.readConfig(mac) }
+        })
     }
+
+    /** Task D8：lease 版读快照——单次读取独立 withService；codec 数据类型与返回语义不变。 */
+    private suspend fun readState(lease: ProviderLease, mac: String): DeviceState? =
+        readState(lease.withService { svc ->
+            withContext(Dispatchers.IO) { svc.readConfig(mac) }
+        })
 
     private fun readState(service: ICodecService, mac: String): DeviceState? =
         readState(service.readConfig(mac))
@@ -547,8 +662,6 @@ class ApplyWorker(context: Context) {
         private const val SETTLE_MS = 1500L             // 等 A2DP 协商稳定
         private const val OUTER_RETRIES = 3             // 读回不一致重试次数
         private const val RETRY_DELAY_MS = 1000L
-        /** Task B5：单一 rikka 通道（Stellar 透明兼容），诊断 providerKind 如实记录。 */
-        private const val DIAGNOSTIC_PROVIDER_KIND = "shizuku"
 
         /** Task B5：ApplyWorker 与 MainActivity 共用的通用厂商栈 recorder。 */
         private val vendorStackRecorder = VendorStackDiagnosticRecorder.shared

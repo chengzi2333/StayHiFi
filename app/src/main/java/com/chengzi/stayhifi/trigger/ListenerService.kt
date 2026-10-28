@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.chengzi.stayhifi.LogStore
+import com.chengzi.stayhifi.StayHiFiApp
 import com.chengzi.stayhifi.codec.CodecIdentityDiagnosticGate
 import com.chengzi.stayhifi.codec.CodecIdentityIssue
 import com.chengzi.stayhifi.codec.CodecPresentation
@@ -21,7 +22,10 @@ import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
-import com.chengzi.stayhifi.shell.ShizukuShellProvider
+import com.chengzi.stayhifi.shell.ProviderCoordinator
+import com.chengzi.stayhifi.shell.ProviderKind
+import com.chengzi.stayhifi.shell.ProviderOwner
+import com.chengzi.stayhifi.shell.ProviderSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -60,7 +64,14 @@ class ListenerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var settings: SettingsRepository
     private lateinit var notifier: Notifier
-    private lateinit var provider: ShizukuShellProvider
+
+    /**
+     * Task D8：进程级 [ProviderCoordinator]（lease/probe 统一入口，设计 §11.3）。
+     * 本服务不再构造/持有任何 provider：每次读取先 probeSelected 探测，再 acquire
+     * lease、finally close；Root anchor 进程级，onDestroy 不解绑（§11.4.5）。
+     */
+    private val coordinator: ProviderCoordinator?
+        get() = (application as? StayHiFiApp)?.providerCoordinator
 
     @Volatile
     private var notifyPersistent = false
@@ -104,7 +115,6 @@ class ListenerService : Service() {
         isRunning = true
         settings = SettingsRepository(this)
         notifier = Notifier(this)
-        provider = ShizukuShellProvider(this)
 
         // 对抗审查 C2：connectedDevice 类型 FGS 要求 BLUETOOTH_CONNECT，权限缺失时
         // startForeground 抛 SecurityException——无 try/catch 会连带进程崩溃死循环。
@@ -180,7 +190,8 @@ class ListenerService : Service() {
         isRunning = false
         runCatching { unregisterReceiver(receiver) }
         pollJob?.cancel()
-        provider.unbind()
+        // Task D8：lease 均随单次操作 finally close；Root anchor 是进程级 transport，
+        // 服务销毁不解绑（§11.3：只有手动切换或显式断开才 unbind）。
         scope.cancel()
         super.onDestroy()
         LogStore.log("ListenerService 已停止")
@@ -260,20 +271,30 @@ class ListenerService : Service() {
      * 载体调用整体包 withTimeoutOrNull（同 readConnectedSummary 的
      * CARRIER_READ_TIMEOUT_MS），防 vivo 冻结 codec 进程的永久阻塞（Task 31 教训）。
      * 日志以「启动补触发」前缀区分信号源，便于浸泡排查。
+     *
+     * Task D8：载体访问走 Coordinator——本机 A2DP 预检先于一切 provider 首读；
+     * probeSelected 只探测（绝不 bind/创建 shell），未就绪时冷 Root 只去重登记
+     * NEEDS_FOREGROUND_REVALIDATION，绝不弹授权、不回退 Shizuku（§11.4.5）。
      */
     private suspend fun retriggerIfAlreadyConnected() {
         if (!isA2dpConnectedLocally()) return
-        if (!provider.isRunning || !provider.hasPermission) {
+        val coordinator = coordinator ?: return
+        val probe = coordinator.probeSelected(ProviderSource.LISTENER)
+        if (!probe.isRunning || !probe.hasPermission) {
+            if (probe.kind == ProviderKind.ROOT) coordinator.noteBackground(ProviderSource.LISTENER)
             LogStore.log("启动补触发：载体未就绪或未授权，跳过")
             return
         }
         try {
             val devices = withTimeoutOrNull(CARRIER_READ_TIMEOUT_MS) {
-                val svc = withContext(Dispatchers.IO) { provider.bind() }
+                val lease = coordinator.acquire(
+                    ProviderOwner("listener-startup"), ProviderSource.LISTENER)
                 try {
-                    JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                    JSONArray(lease.withService { svc ->
+                        withContext(Dispatchers.IO) { svc.dumpDevices() }
+                    })
                 } finally {
-                    provider.unbind()
+                    lease.close()
                 }
             }
             if (devices == null) {
@@ -360,39 +381,50 @@ class ListenerService : Service() {
      * 两道防线：
      * 1. 先用本机蓝牙 API 判 A2DP 连接态，断连判定零载体依赖、秒级返回；
      * 2. 载体读取整体包 withTimeoutOrNull，单轮冻结最多卡 8s，循环不死。
+     *
+     * Task D8：载体访问走 Coordinator lease（finally close）；冷 Root 未就绪只去重
+     * 登记 NEEDS_FOREGROUND_REVALIDATION 并按读不到处理，绝不弹授权/回退 Shizuku。
      */
     private suspend fun readConnectedSummary(): String? {
         if (!isA2dpConnectedLocally()) return null
-        if (!provider.isRunning || !provider.hasPermission) return null
+        val coordinator = coordinator ?: return null
+        val probe = coordinator.probeSelected(ProviderSource.LISTENER)
+        if (!probe.isRunning || !probe.hasPermission) {
+            if (probe.kind == ProviderKind.ROOT) coordinator.noteBackground(ProviderSource.LISTENER)
+            return null
+        }
         return try {
             withTimeoutOrNull(CARRIER_READ_TIMEOUT_MS) {
-                val svc = withContext(Dispatchers.IO) { provider.bind() }
+                val lease = coordinator.acquire(
+                    ProviderOwner("listener-notify"), ProviderSource.LISTENER)
                 try {
-                    val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
-                    if (arr.length() == 0) {
-                        null
-                    } else {
-                        val mac = arr.getJSONObject(0).getString("mac")
-                        val name = arr.getJSONObject(0).getString("name")
-                        val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
-                        val obj = JSONObject(stateJson)
-                        if (obj.has("error")) {
+                    lease.withService { svc ->
+                        val arr = JSONArray(withContext(Dispatchers.IO) { svc.dumpDevices() })
+                        if (arr.length() == 0) {
                             null
                         } else {
-                            val presentation = CodecSnapshotPresenter.present(
-                                CodecStateSnapshotJson.parse(stateJson),
-                            )
-                            if (presentation == null) {
+                            val mac = arr.getJSONObject(0).getString("mac")
+                            val name = arr.getJSONObject(0).getString("name")
+                            val stateJson = withContext(Dispatchers.IO) { svc.readConfig(mac) }
+                            val obj = JSONObject(stateJson)
+                            if (obj.has("error")) {
                                 null
                             } else {
-                                recordIdentityConflict(mac, presentation)
-                                checkDrift(mac, name, presentation)
-                                "$name · ${presentation.summary.text()}"
+                                val presentation = CodecSnapshotPresenter.present(
+                                    CodecStateSnapshotJson.parse(stateJson),
+                                )
+                                if (presentation == null) {
+                                    null
+                                } else {
+                                    recordIdentityConflict(mac, presentation)
+                                    checkDrift(mac, name, presentation)
+                                    "$name · ${presentation.summary.text()}"
+                                }
                             }
                         }
                     }
                 } finally {
-                    provider.unbind()
+                    lease.close()
                 }
             } ?: run {
                 LogStore.log("常驻通知读取参数超时（载体进程可能被系统冻结），本轮按读不到处理")
