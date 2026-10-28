@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.codec.RealtimeDisplay
 import com.chengzi.stayhifi.codec.RealtimeDisplayFormatter
 import com.chengzi.stayhifi.codec.RealtimeState
+import com.chengzi.stayhifi.trigger.TargetAssessment
 import com.chengzi.stayhifi.ui.nav.StayHiFiIcons
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.util.DeviceNames
@@ -68,8 +69,10 @@ data class HomeUiState(
      * 文案唯一入口见 [RealtimeDisplayFormatter]。
      */
     val realtimeDisplay: RealtimeDisplay = RealtimeDisplay.NO_DATA,
-    /** 是否已达本机最高音质输出（Task 27 两态：与 ApplyWorker 同一份 deriveTarget 判定）。 */
+    /** 是否已达本机最高音质输出；仅 COMPLETE 且读回匹配时为 true。 */
     val fullBars: Boolean = false,
+    /** 当前目标能力完整性；null 表示尚无快照或沿用旧展示状态。 */
+    val targetStatus: TargetAssessment.Status? = null,
     /** 手动拉满进行中（Task 31）：按钮进入处理态，ApplyWorker 完成/失败后回弹。 */
     val applying: Boolean = false,
     /** 载体异常警示文案；null 表示一切正常。 */
@@ -222,7 +225,7 @@ private fun StatusCard(state: HomeUiState) {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
                 )
-                StayHiFiBadge(fullBars = state.fullBars)
+                StayHiFiBadge(status = state.targetStatus, fullBars = state.fullBars)
             }
             // 机型行（Task 28）：面客机型名 + Android 版（SystemProperties 市场名键链）。
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -250,16 +253,15 @@ private fun StatusCard(state: HomeUiState) {
     }
 }
 
-/** 状态卡唯一的状态文案：两态（Task 27）——真话文案，明细参数看下方 2×2 明细格。 */
+/** 状态卡唯一状态文案，与 ApplyWorker 共用 TargetAssessment 三态语义。 */
 @Composable
 private fun StatusLine(state: HomeUiState) {
-    val text = when {
-        state.headsetName == null -> "等待耳机连接"
-        state.fullBars -> "已达本机最高音质输出"
-        else -> "未拉满 · 点击重试"
-    }
     Text(
-        text = text,
+        text = HomeTargetStatus.statusLine(
+            connected = state.headsetName != null,
+            status = state.targetStatus,
+            fullBars = state.fullBars,
+        ),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onPrimaryContainer,
     )
@@ -356,7 +358,7 @@ private fun DetailCell(label: String, value: String?, modifier: Modifier = Modif
 }
 
 @Composable
-private fun StayHiFiBadge(fullBars: Boolean) {
+private fun StayHiFiBadge(status: TargetAssessment.Status?, fullBars: Boolean) {
     val container = if (fullBars) {
         MaterialTheme.colorScheme.primary
     } else {
@@ -382,7 +384,7 @@ private fun StayHiFiBadge(fullBars: Boolean) {
                 .background(content),
         )
         Text(
-            text = if (fullBars) "满血" else "未满血",
+            text = HomeTargetStatus.badgeLabel(status, fullBars),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.Bold,
             color = content,
@@ -405,6 +407,7 @@ private fun HomeScreenPreviewLight() {
                 realtimeQualityMode = "ABR",
                 realtimeDisplay = RealtimeDisplay.AVAILABLE,
                 fullBars = true,
+                targetStatus = TargetAssessment.Status.COMPLETE,
             ),
             onAction = {},
         )

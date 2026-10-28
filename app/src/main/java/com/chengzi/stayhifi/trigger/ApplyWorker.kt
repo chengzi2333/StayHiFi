@@ -37,9 +37,9 @@ import org.json.JSONObject
  * → 延迟 1.5s 等协议栈协商稳定 → 写入 → 读回验证（writeConfig 内部 500ms×8，
  * 外层再 1s×3 兜底重试）→ 按 notifyResult 发通知 → unbind，零驻留。
  *
- * Task 27 两态裁决：目标唯一来源 = [ApplyPolicy.deriveTarget]（现场派生本机最高），
- * 所有设备统一路径，按 [Negotiation.descending] 逐候选写入直到读回一致；
- * 档案不参与拉满决策（仅设备页展示），仅保留 autoApply=false 的自动触发拦截。
+ * Task B2：目标由 [ApplyPolicy.assessTarget] 统一裁决，候选由 [ApplyCandidateRunner] 执行；
+ * 完整能力使用同条目约束链，能力缺失保留 [Negotiation.descending] 旧兼容路径，
+ * current 不完整则零写入。档案不参与拉满决策（仅设备页展示），仅保留 autoApply=false 的自动触发拦截。
  *
  * 对抗审查 I3：run 主体持 [ApplyLock.mutex]，三路触发互斥串行。
  * 对抗审查 I2：force=true（手动入口）跳过 autoApply=false 的自动触发拦截。
@@ -166,7 +166,6 @@ class ApplyWorker(context: Context) {
             if (!force && profile != null && !profile.autoApply) {
                 log("已有档案但 autoApply=false，跳过写入")
             } else {
-                log("派生本机最高目标")
                 applyDerived(
                     service, mac, name, settled.current, settled.selectable,
                     settled.presentation.identity,
@@ -180,49 +179,66 @@ class ApplyWorker(context: Context) {
         }
     }
 
-    /** 统一路径：deriveTarget 派生本机最高目标，按降档序列逐候选写入，直到读回一致（设计 §4.2.1）。 */
+    /** 统一路径：三态目标裁决 + 候选执行器；不完整 current 在任何写入副作用前结束。 */
     private suspend fun applyDerived(
         service: ICodecService, mac: String, name: String?,
         current: CodecConfig, selectable: List<CodecConfig>, identity: CodecIdentity,
     ) {
-        val golden = ApplyPolicy.deriveTarget(current, selectable)
-        for (candidate in Negotiation.descending(golden)) {
-            if (!ApplyPolicy.decide(current, candidate)) {
-                log("当前已是本机最高 ${summary(candidate, identity)}，跳过写入")
-                notifyResult("音质已拉满", "${name ?: mac} 已是本机最高音质输出")
-                // Task 43：早退=读回已验证与本机最高一致，记入漂移基准（漂移提醒用）。
+        val assessment = ApplyPolicy.assessTarget(current, selectable)
+        when (assessment.status) {
+            TargetAssessment.Status.COMPLETE -> log("派生本机最高目标")
+            TargetAssessment.Status.CAPABILITY_DEGRADED -> log("能力未完整暴露，按兼容目标重试")
+            TargetAssessment.Status.INCOMPLETE_CURRENT -> Unit
+        }
+        val result = ApplyCandidateRunner().run(
+            current = current,
+            assessment = assessment,
+            beforeFirstWrite = { recordOriginConfig(mac, current) },
+            writeVerified = { candidate ->
+                log("写入候选: ${summary(candidate, identity)}")
+                val verified = writeVerified(service, mac, candidate, identity)
+                if (!verified) {
+                    log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
+                }
+                verified
+            },
+        )
+        when (result) {
+            is ApplyRunResult.AlreadyAligned -> {
+                val candidate = result.candidate
+                if (assessment.status == TargetAssessment.Status.COMPLETE) {
+                    log("当前已是本机最高 ${summary(candidate, identity)}，跳过写入")
+                    notifyResult("音质已拉满", "${name ?: mac} 已是本机最高音质输出")
+                } else {
+                    log("当前目标已确认（能力未完整）: ${summary(candidate, identity)}")
+                    notifyResult("目标已确认", "${name ?: mac} 当前目标已确认（能力未完整）")
+                }
+                // 早退同样是已读回验证：保留原漂移基准与自动建档语义，不回填 origin。
                 VerifiedTargetStore.record(mac, candidate)
-                // Task 36 Bug C：老用户重装后参数已被上次装机拉满（蓝牙栈保存），必命中此早退分支，
-                // 此前直接 return 不走 autoCreateProfile，设备页永远空白。
-                // 读回即验证：current 是 settled 阶段读回的真实生效配置，
-                // 早退=已验证与本机最高一致，同样够建档资格。
-                // Task 42：早退分支不回填 originConfig——写入前的状态就是最高，不是「默认」，
-                // 把它当原始配置记下来会让「恢复默认参数」变成再拉满一次，失去后悔药意义。
                 autoCreateProfile(mac, name, current, origin = null, identity = identity)
-                return
             }
-            // Task 42：写入第一个候选之前，把写入前原始协商配置（settled.current）记入档案，
-            // 供设备页「恢复默认参数」写回。只记第一次，后续触发不覆盖。
-            recordOriginConfig(mac, current)
-            log("写入候选: ${summary(candidate, identity)}")
-            if (writeVerified(service, mac, candidate, identity)) {
-                notifyResult("音质拉满成功", "${name ?: mac} → ${summary(candidate, identity)}")
-                // Task 43：写入+读回验证通过 → 记入漂移基准（漂移提醒用）。
-                // 注意：漂移比对用 ApplyPolicy.matches（含 cs1），而服务端 applied 判定
-                // 不含 cs1——栈未套用 cs1 的罕见情况会被判成漂移，属可接受的保守误报。
+            is ApplyRunResult.Applied -> {
+                val candidate = result.candidate
+                if (assessment.status == TargetAssessment.Status.COMPLETE) {
+                    notifyResult("音质拉满成功", "${name ?: mac} → ${summary(candidate, identity)}")
+                } else {
+                    notifyResult("目标已确认", "${name ?: mac} 当前目标已确认（能力未完整）")
+                }
+                // 写入+读回验证通过：保留原漂移基准、首次 origin 与自动建档语义。
                 VerifiedTargetStore.record(mac, candidate)
-                // Task 35：确认实际生效（写入+读回验证通过）后才建档，不是写完就建；
-                // 档案 config 记录读回的真实落点（非派生目标）。
                 autoCreateProfile(
                     mac, name, readState(service, mac)?.current ?: candidate,
                     origin = current, identity = identity,
                 )
-                return
             }
-            log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
+            ApplyRunResult.Exhausted -> {
+                log("所有候选均失败")
+                notifier.notifyResult("音质拉满失败", "${name ?: mac}：所有候选读回不一致")
+            }
+            ApplyRunResult.IncompleteCurrent -> {
+                log("参数不完整 · 暂无法判定，跳过写入: mac=$mac current=${current.toJson()}")
+            }
         }
-        log("所有候选均失败")
-        notifier.notifyResult("音质拉满失败", "${name ?: mac}：所有候选读回不一致")
     }
 
     /** writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。 */

@@ -67,6 +67,7 @@ import com.chengzi.stayhifi.notify.QsTileService
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
 import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.TargetAssessment
 import com.chengzi.stayhifi.trigger.HeadsetEvents
 import com.chengzi.stayhifi.trigger.ListenerService
 import com.chengzi.stayhifi.ui.devices.DevicesAction
@@ -1011,6 +1012,7 @@ class MainActivity : ComponentActivity() {
                     realtimeQualityMode = null,
                     realtimeDisplay = RealtimeDisplay.NO_DATA,
                     fullBars = false,
+                    targetStatus = null,
                 )
                 connectedMac = null
                 connectedName = null
@@ -1049,7 +1051,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1062,7 +1064,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1080,7 +1082,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1099,7 +1101,7 @@ class MainActivity : ComponentActivity() {
                         headsetName = null, codec = null, rate = null,
                         bits = null, quality = null,
                         realtimeKbps = null, realtimeQualityMode = null,
-                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false,
+                        realtimeDisplay = RealtimeDisplay.NO_DATA, fullBars = false, targetStatus = null,
                     )
                     connectedMac = null
                     connectedName = null
@@ -1109,10 +1111,8 @@ class MainActivity : ComponentActivity() {
                 recordIdentityConflict(mac, presentation)
                 val current = presentation.current
                 val selectable = snapshot.selectable
-                // Task 27 两态裁决：fullBars 仍使用旧 current+selectable/ApplyPolicy。
-                val fullBars = ApplyPolicy.matches(
-                    ApplyPolicy.deriveTarget(current, selectable), current,
-                )
+                val targetAssessment = ApplyPolicy.assessTarget(current, selectable)
+                val fullBars = ApplyPolicy.isAtHighest(targetAssessment, current)
                 // Task 46：播放判定先行——isMusicActive=false 时不再读 dump，首轮直接
                 // 显示「未在播放」；true 才读取真实码率，避免 LHDC 粘性值首读闪烁。
                 // 保留 Task 44 的段落精确名、-1 未流式语义与 Task 46 并行分支的 8s 超时保护。
@@ -1219,6 +1219,7 @@ class MainActivity : ComponentActivity() {
                     realtimeQualityMode = realtime.qualityMode,
                     realtimeDisplay = realtime.display,
                     fullBars = fullBars,
+                    targetStatus = targetAssessment.status,
                 )
                 connectedMac = mac
                 connectedName = name
