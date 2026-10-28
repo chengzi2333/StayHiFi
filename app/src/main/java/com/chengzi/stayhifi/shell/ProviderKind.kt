@@ -29,6 +29,8 @@ enum class ProviderAccessReason {
     STALE_GENERATION,
     /** lease 已 close */
     LEASE_CLOSED,
+    /** Task D7：切换事务进行中（SWITCHING），拒绝签发新 session（§11.3） */
+    SWITCHING,
 }
 
 class ProviderAccessException(

@@ -6,11 +6,16 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
+import com.chengzi.stayhifi.shell.LibsuRootBackend
+import com.chengzi.stayhifi.shell.ProviderCoordinator
+import com.chengzi.stayhifi.shell.RootTransport
+import com.chengzi.stayhifi.shell.ShizukuShellProvider
 import com.chengzi.stayhifi.trigger.ListenerService
 import com.chengzi.stayhifi.updater.UpdateCleanup
 import com.chengzi.stayhifi.util.DeviceNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -21,6 +26,14 @@ import kotlinx.coroutines.runBlocking
  * 因此在进程创建的第一时间确保它活着。
  */
 class StayHiFiApp : Application() {
+
+    /** Task D7：进程级 Root transport（设计 §11.3）。构造零 shell 预热、零授权交互。 */
+    lateinit var rootTransport: RootTransport
+        private set
+
+    /** Task D7：进程级特权通道协调器；构造即在注入 scope 异步首读持久选择，不阻塞主线程。 */
+    lateinit var providerCoordinator: ProviderCoordinator
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -40,6 +53,22 @@ class StayHiFiApp : Application() {
         CoroutineScope(Dispatchers.IO).launch {
             runCatching { UpdateCleanup.deleteStaleApks(applicationContext) }
         }
+        // Task D7：仅创建进程级 RootTransport/ProviderCoordinator——构造即异步首读持久
+        // 选择（collect 在注入 scope），不新增 runBlocking、不预热 shell/RootService（§11.3/§11.4.1）。
+        val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        rootTransport = RootTransport(
+            applicationScope = appScope,
+            backend = LibsuRootBackend(applicationContext),
+            authDispatcher = Dispatchers.IO,
+            mainDispatcher = Dispatchers.Main,
+        )
+        providerCoordinator = ProviderCoordinator(
+            applicationScope = appScope,
+            store = SettingsRepository(applicationContext),
+            shizukuFactory = { ShizukuShellProvider(applicationContext) },
+            rootStatusSource = ProviderCoordinator.RootStatusSource { rootTransport.grantedState() },
+            rootTransport = rootTransport,
+        )
         // 对抗审查 C2：权限被撤（隐私恐慌后常见）时 startForeground 会抛 SecurityException
         // 连带进程崩溃死循环。拉起前先查 BLUETOOTH_CONNECT，runBlocking 整体兜底 try/catch。
         try {

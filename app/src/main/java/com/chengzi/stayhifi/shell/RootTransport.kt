@@ -215,6 +215,22 @@ class RootTransport(
         )
     }
 
+    /** Task D7：按 owner 作废全部进行中的前台 attempt（离页/改选/手动取消；§11.4.6）。 */
+    fun invalidateAttemptsOf(owner: ProviderOwner) {
+        val targets = synchronized(lock) {
+            records.values.filter { it.attempt.owner == owner && !it.expired }
+        }
+        targets.forEach {
+            expireRecord(
+                it,
+                status = RootStatus.UNVERIFIED,
+                errorClass = RootErrorClass.NONE,
+                outcome = "invalidated",
+                reason = "owner(${owner.id}) 取消（离页/改选/手动取消）",
+            )
+        }
+    }
+
     // ─────────────────────────── Task D5：bind / 健康检查 / anchor ───────────────────────────
 
     /** READY anchor 的当前 IPC 接口；仅当前进程 READY 时非空（供 RootShellProvider/lease 只读复用）。 */
