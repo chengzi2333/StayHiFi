@@ -75,7 +75,7 @@
         <!-- 快捷设置磁贴：一键拉满 -->
         <service
             android:name=".notify.QsTileService"
-            android:label="StayHiFi"
+            android:label="StayHiFi 拉满"
             android:icon="@drawable/ic_qs_tile"
             android:exported="true"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">

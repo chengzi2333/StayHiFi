@@ -62,14 +62,15 @@ fun RecordWizard(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 Text(
-                    text = "录制参数模板",
+                    text = "记录当前参数",
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                 )
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WizardStep(index = 1, text = "连上耳机后直接点下面的「抓取当前参数」，抓取当前协商参数存档，用于设备页记录。")
-                    WizardStep(index = 2, text = "确认抓到的耳机和参数没问题，保存为这台耳机的档案。")
-                }
+                // UX 收敛：两步说明并为一条，动作名与按钮一致（抓取 → 保存）
+                WizardStep(
+                    index = 1,
+                    text = "连上耳机后点「抓取当前参数」，确认无误后存为这台耳机的档案。",
+                )
 
                 // 失败路径内联展示（Task 33）：不再只写 LogStore 静默失败。
                 if (error != null) {
@@ -164,7 +165,8 @@ fun RecordWizard(
                         }
                         if (result != null) {
                             TextButton(onClick = onSave, modifier = Modifier.heightIn(min = 48.dp)) {
-                                Text("保存为这台耳机的模板")
+                                // 结果卡已显示耳机名与参数，按钮无需复述
+                                Text("保存")
                             }
                         }
                     }

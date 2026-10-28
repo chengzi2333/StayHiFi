@@ -187,7 +187,7 @@ class ForegroundProviderProbeTest {
 
         val check = h.coordinator.probeSelected(ProviderSource.ONBOARDING).foregroundCheck()
         assertFalse("Root 未 READY 时 ensure 不得放行 bind", check.bindable)
-        assertEquals("Root 未就绪出事实红条", "Root 通道未就绪，点我修复", check.carrierAlert)
+        assertEquals("Root 未就绪出事实红条", "Root 通道未就绪", check.carrierAlert)
 
         // ensure 之后的 lease 获取同样拒绝：唯一允许的后台/公共终态是 NEEDS_FOREGROUND_REVALIDATION
         try {
@@ -252,7 +252,7 @@ class ForegroundProviderProbeTest {
             ProviderKind.ROOT, isRunning = false, hasPermission = false, rootGranted = false,
         ).foregroundCheck()
         assertFalse(rootDown.bindable)
-        assertEquals("Root 通道未就绪，点我修复", rootDown.carrierAlert)
+        assertEquals("Root 通道未就绪", rootDown.carrierAlert)
         assertEquals("Root 未在当前进程就绪，需前台重验", rootDown.notReadyLog)
 
         // Shizuku 未运行：保持原红条文案
@@ -260,7 +260,7 @@ class ForegroundProviderProbeTest {
             ProviderKind.SHIZUKU, isRunning = false, hasPermission = false,
         ).foregroundCheck()
         assertFalse(shizukuDown.bindable)
-        assertEquals("Shizuku/Stellar 未运行，点我修复", shizukuDown.carrierAlert)
+        assertEquals("Shizuku/Stellar 未运行", shizukuDown.carrierAlert)
         assertEquals("特权载体未运行", shizukuDown.notReadyLog)
 
         // Shizuku 运行但未授权：不出红条（保持原首页行为），只供 ensure/日志使用

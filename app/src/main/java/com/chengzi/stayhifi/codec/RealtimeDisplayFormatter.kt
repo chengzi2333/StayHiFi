@@ -11,7 +11,8 @@ object RealtimeDisplayFormatter {
         RealtimeDisplay.NOT_PLAYING -> "未在播放"
         // PLK110：播放中但栈回报 -1——暂无法确认，绝不显示「未在播放」
         RealtimeDisplay.STACK_REPORTS_IDLE -> "暂无法确认"
-        RealtimeDisplay.NO_DATA -> "—（本机暂不支持抓取）"
+        // UX 收敛（主 agent 裁决）：只陈述「暂读取不到」，不断言本机不支持
+        RealtimeDisplay.NO_DATA -> "暂无法读取"
         RealtimeDisplay.AVAILABLE -> {
             val kbps = state.bitrateKbps?.takeIf { it > 0 } ?: return "暂无法确认"
             val qm = state.qualityMode

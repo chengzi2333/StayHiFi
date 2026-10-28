@@ -9,7 +9,7 @@ class HomeTargetStatusTest {
     @Test
     fun incompleteCurrentUsesNeutralStatusAndBadge() {
         assertEquals(
-            "参数不完整 · 暂无法判定",
+            "暂无法读取当前参数",
             HomeTargetStatus.statusLine(
                 connected = true,
                 status = TargetAssessment.Status.INCOMPLETE_CURRENT,
@@ -25,7 +25,7 @@ class HomeTargetStatusTest {
     @Test
     fun degradedCapabilityCannotMasqueradeAsFullBars() {
         assertEquals(
-            "能力未完整暴露 · 暂无法确认最高",
+            "最高能力暂无法确认",
             HomeTargetStatus.statusLine(
                 connected = true,
                 status = TargetAssessment.Status.CAPABILITY_DEGRADED,
@@ -53,7 +53,7 @@ class HomeTargetStatusTest {
             HomeTargetStatus.badgeLabel(TargetAssessment.Status.COMPLETE, fullBars = true),
         )
         assertEquals(
-            "未拉满 · 点击重试",
+            "未拉满，点下方按钮重试",
             HomeTargetStatus.statusLine(
                 connected = true,
                 status = TargetAssessment.Status.COMPLETE,
@@ -127,7 +127,7 @@ class HomeTargetStatusTest {
     @Test
     fun missingAssessmentCannotShowFullBars() {
         assertEquals(
-            "未拉满 · 点击重试",
+            "未拉满，点下方按钮重试",
             HomeTargetStatus.statusLine(connected = true, status = null, fullBars = true),
         )
         assertEquals("未满血", HomeTargetStatus.badgeLabel(status = null, fullBars = true))

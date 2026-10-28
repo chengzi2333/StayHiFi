@@ -74,12 +74,12 @@ fun DevicesScreen(
                 .padding(horizontal = 20.dp, vertical = 16.dp),
         ) {
             Text(
-                text = "设备档案",
+                text = "我的设备",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                text = "档案仅作本机记录；拉满目标由本机现场派生",
+                text = "记录只存在本机；拉满目标以连接时实测为准",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -185,7 +185,7 @@ private fun DeviceCard(item: DeviceItemUi, onAction: (DevicesAction) -> Unit) {
                     onClick = { onAction(DevicesAction.ReRecord(item.mac)) },
                     modifier = Modifier.heightIn(min = 48.dp),
                 ) {
-                    Text("重录")
+                    Text("重新记录")
                 }
             }
         }
@@ -235,7 +235,7 @@ private fun DevicesScreenPreviewLight() {
                         configSummary = "LDAC·96kHz·24bit",
                         source = DeviceProfile.Source.CAPTURED,
                         autoApply = false,
-                        provenance = "记录于 V2505A · Android 15 · PD2505_A_15.1.23.2 · 2026-10-21",
+                        provenance = "记录于 V2505A · Android 15 · 2026-10-21",
                     ),
                 ),
             ),

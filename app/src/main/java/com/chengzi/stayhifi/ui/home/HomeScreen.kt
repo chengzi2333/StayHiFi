@@ -370,12 +370,13 @@ private fun RealtimeSection(state: HomeUiState) {
             )
         }
         Text(
-            // Task 46（用户中途追加）：只有抓取不支持（NO_DATA）时换成反馈指引，
+            // Task 46（用户中途追加）：只有抓取读不到（NO_DATA）时换成反馈指引，
             // STACK_REPORTS_IDLE 不显示该指引，其余状态保留调度解释。
+            // UX 收敛：解释行压成一句人话，研究结论（vivo 栈实测等）只留日志/反馈报告。
             text = if (state.realtimeDisplay == RealtimeDisplay.NO_DATA) {
-                "这个机型的系统不开放实时码率读取，欢迎到设置-日志页把日志反馈给作者"
+                "读取不到时可到 设置 › 运行日志 复制日志反馈"
             } else {
-                "部分 vivo LHDC 栈实测固定档仍走 ABR；其他系统样本不足，请对比设置码率与实际传输"
+                "部分机型固定档仍会自适应，以实际传输为准"
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -488,7 +489,7 @@ private fun HomeScreenPreviewDark() {
                 bits = "16bit",
                 quality = null,
                 fullBars = false,
-                carrierAlert = "Shizuku 未运行，点我修复",
+                carrierAlert = "Shizuku/Stellar 未运行",
             ),
             onAction = {},
         )

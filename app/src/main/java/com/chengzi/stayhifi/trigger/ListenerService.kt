@@ -472,7 +472,7 @@ class ListenerService : Service() {
         if (settings.isNotifyResult()) {
             notifier.notifyResult(
                 "检测到系统改回了参数",
-                "$name 当前 $currentSummary，与已拉满目标 ${target.summary()} 不符",
+                "$name 音质参数被系统改动，点我恢复",
             )
         }
     }
@@ -505,7 +505,7 @@ class ListenerService : Service() {
         private const val POLL_MS = 30_000L
         private const val CARRIER_READ_TIMEOUT_MS = 8_000L
         private const val TEXT_WAITING = "等待耳机连接"
-        private const val TEXT_RUNNING = "音质满格运行中"
+        private const val TEXT_RUNNING = "音质满血守护中"
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(

@@ -158,13 +158,13 @@ internal fun ProviderProbe.foregroundCheck(): ForegroundCarrierCheck = when {   
             kind = kind,
             bindable = false,
             notReadyLog = "Root 未在当前进程就绪，需前台重验",
-            carrierAlert = "Root 通道未就绪，点我修复",
+            carrierAlert = "Root 通道未就绪",
         )
         ProviderKind.SHIZUKU -> ForegroundCarrierCheck(
             kind = kind,
             bindable = false,
             notReadyLog = "特权载体未运行",
-            carrierAlert = "Shizuku/Stellar 未运行，点我修复",
+            carrierAlert = "Shizuku/Stellar 未运行",
         )
     }
     !hasPermission -> ForegroundCarrierCheck(
@@ -237,6 +237,8 @@ class MainActivity : ComponentActivity() {
     private var settingsProviderBusy by mutableStateOf(false)
     /** Root 区展开：EXTRA_OPEN_ROOT_SETTINGS 修复入口或点击 Root 卡置位。 */
     private var rootSectionExpanded by mutableStateOf(false)
+    /** UX 收敛：修复入口 deep link 单调计数（布尔重复置 true 无法再次驱动设置页二级页）。 */
+    private var rootOpenSeq by mutableStateOf(0)
 
     // ---- 通用厂商栈诊断（Task B5）：缓存最近一轮 readConfig 快照供 MANUAL 复制复用 ----
     private var lastDiagnosticSnapshot: CodecStateSnapshot? = null
@@ -316,6 +318,7 @@ class MainActivity : ComponentActivity() {
         if (intent?.getBooleanExtra(EXTRA_OPEN_ROOT_SETTINGS, false) != true) return
         selectedTab = 2
         rootSectionExpanded = true
+        rootOpenSeq++
         LogStore.log("Root 修复入口：打开设置页 Root 区")
     }
 
@@ -475,6 +478,7 @@ class MainActivity : ComponentActivity() {
                                 root = rootSnapshot,
                                 providerSwitching = coordinatorSwitching || settingsProviderBusy,
                                 rootSectionExpanded = rootSectionExpanded,
+                                rootOpenSeq = rootOpenSeq,
                             ),
                             onAction = ::onSettingsAction,
                         )
@@ -1826,11 +1830,12 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    /** 档案出处四字段 → 设备页展示行；旧档案无出处时返回空（不显示）。 */
+    /** 档案出处 → 设备页展示行；旧档案无出处时返回空（不显示）。
+     *  UX 收敛：构建指纹（recordedBuildDisplay）属诊断字段，只留日志/反馈，不上设备卡。 */
     private fun DeviceProfile.provenanceLine(): String {
         if (recordedAtMillis == 0L) return ""
         val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(recordedAtMillis))
-        return listOf("记录于 $recordedOnModel", "Android $recordedAndroidVersion", recordedBuildDisplay, date)
+        return listOf("记录于 $recordedOnModel", "Android $recordedAndroidVersion", date)
             .filter { it.isNotBlank() }
             .joinToString(" · ")
     }

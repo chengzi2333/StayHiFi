@@ -39,6 +39,7 @@ import com.chengzi.stayhifi.shell.ProviderKind
 import com.chengzi.stayhifi.shell.RootShellStatus
 import com.chengzi.stayhifi.shell.RootSnapshot
 import com.chengzi.stayhifi.shell.RootStatus
+import com.chengzi.stayhifi.ui.common.RootStatusCard
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -273,16 +274,15 @@ private fun CarrierPage(state: OnboardingUiState, onAction: (OnboardingAction) -
         // Task D10（§11.2）：顶部两个明确选择，不按谁先 ready 自动改选；
         // 选择是纯 UI 态，Root 只有显式「请求 Root 授权」验证成功后才持久化。
         ProviderChoiceCard(
-            title = "Shizuku / Stellar（默认）",
-            description = "借助 Shizuku 或 Stellar 获得系统权限，任选其一准备好即可。",
+            title = "Shizuku / Stellar（推荐）",
+            description = "安装任意一个并授权，即可获得调校权限。",
             selected = state.providerChoice == ProviderKind.SHIZUKU,
             onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.SHIZUKU)) },
         )
         ProviderChoiceCard(
             title = "Root（实验）",
-            // spec §11.2 原文，不得改写
-            description = "适用于已经 Root 的设备。仅提供系统权限通道，不会提高耳机或编码器能力上限。" +
-                "兼容性仍在收集反馈，可随时手动切回 Shizuku/Stellar。",
+            // spec §11.2 简洁事实句（UX 收敛后口径，三条边界齐全：实验/不提上限/可退回）
+            description = "已 Root 的设备可选；不提升音质上限，随时可切回。",
             selected = state.providerChoice == ProviderKind.ROOT,
             onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.ROOT)) },
         )
@@ -291,7 +291,7 @@ private fun CarrierPage(state: OnboardingUiState, onAction: (OnboardingAction) -
                 CarrierCard(state.shizuku, onAction)
                 CarrierCard(state.stellar, onAction)
             }
-            ProviderKind.ROOT -> RootStatusCard(state, onAction)
+            ProviderKind.ROOT -> RootStatusCardSection(state, onAction)
         }
     }
 }
@@ -340,114 +340,22 @@ private fun ProviderChoiceCard(
 }
 
 /**
- * Task D10：Root 独立状态卡（§11.2）——不硬套「已安装/运行中/已授权」三灯，
- * 展示 Root 可用性、授权状态、服务连接状态和最近错误（事实与推测分列）。
- * 离开组合（离页/改选）即作废进行中的前台 attempt，迟到成功不得提交（§11.4.6）。
+ * Task D10：Root 状态卡（§11.2）——共享实现见 [com.chengzi.stayhifi.ui.common.RootStatusCard]
+ * （一行状态 + 授权按钮 + 查看详情弹窗）。教程侧额外保留：离开组合（离页/改选）即作废
+ * 进行中的前台 attempt，迟到成功不得提交（§11.4.6）。
  */
 @Composable
-private fun RootStatusCard(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
+private fun RootStatusCardSection(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
     DisposableEffect(Unit) {
         onDispose { onAction(OnboardingAction.CancelRootAuthorization) }
     }
-    val root = state.root
-    val ready = root.status == RootStatus.READY
     val busy = state.providerOperationInFlight ||
-        root.status == RootStatus.REQUESTING || root.status == RootStatus.BINDING
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = if (ready) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant
-            },
-        ),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "Root 状态",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(Modifier.weight(1f))
-                if (ready) {
-                    StatusBadge(text = "已就绪", positive = true)
-                }
-            }
-            RootFactRow("Root 可用性", rootAvailabilityText(root))
-            RootFactRow("授权状态", rootGrantText(root))
-            RootFactRow("服务连接", rootServiceText(root))
-            RootFactRow("最近错误", rootLastErrorText(root))
-            if (!ready) {
-                Button(
-                    onClick = { onAction(OnboardingAction.RequestRootAuthorization) },
-                    enabled = !busy,
-                    modifier = Modifier.heightIn(min = 48.dp),
-                ) {
-                    Text(
-                        if (busy) "正在验证…" else "请求 Root 授权",
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RootFactRow(label: String, value: String) {
-    Row {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.size(8.dp))
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-/** Root 可用性（事实）：是否拿到过 root shell；libsu 默认 shell 可能回落普通 sh（§11.4.1）。 */
-private fun rootAvailabilityText(root: RootSnapshot): String = when (root.shellStatus) {
-    RootShellStatus.ROOT_SHELL -> "可用（已获取 Root shell）"
-    RootShellStatus.NON_ROOT_SHELL -> "不可用（当前 shell 非 Root）"
-    RootShellStatus.UNKNOWN -> "尚未验证"
-}
-
-/** 授权状态（可观察三态，§11.4.2）：无法区分「用户拒绝/没有 su/管理器不兼容」，如实合并表述。 */
-private fun rootGrantText(root: RootSnapshot): String = when (root.granted) {
-    true -> "已授权"
-    false -> "未获得 Root 权限（可能被拒绝，或设备没有可用 Root）"
-    null -> "尚未验证"
-}
-
-private fun rootServiceText(root: RootSnapshot): String = when (root.status) {
-    RootStatus.READY -> "已连接并通过健康检查"
-    RootStatus.BINDING -> "连接中…"
-    RootStatus.BIND_NULL, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED -> "连接失败"
-    RootStatus.DISCONNECTED -> "已断开"
-    else -> "未连接"
-}
-
-/** 最近错误：只写可观察事实；推测原因（reasonHint）按 §11.6 另列，不与事实混写。 */
-private fun rootLastErrorText(root: RootSnapshot): String {
-    val isError = when (root.status) {
-        RootStatus.NOT_GRANTED, RootStatus.SHELL_FAILURE, RootStatus.AUTH_TIMEOUT,
-        RootStatus.BIND_NULL, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED,
-        RootStatus.DISCONNECTED, RootStatus.NEEDS_FOREGROUND_REVALIDATION,
-        -> true
-        else -> false
-    }
-    if (!isError) return "无"
-    val fact = root.observedReason.ifBlank { root.status.name }
-    return root.reasonHint?.let { "$fact\n推测原因：$it" } ?: fact
+        state.root.status == RootStatus.REQUESTING || state.root.status == RootStatus.BINDING
+    RootStatusCard(
+        root = state.root,
+        busy = busy,
+        onRequestAuthorization = { onAction(OnboardingAction.RequestRootAuthorization) },
+    )
 }
 
 @Composable
@@ -487,7 +395,7 @@ private fun CarrierCard(
             // 提前说明，避免用户看到「允许使用 Shizuku」以为装错了 App。
             if (carrier.kind == CarrierKind.STELLAR) {
                 Text(
-                    text = "授权弹窗由 Stellar 提供，显示 Shizuku 字样属正常——Stellar 是 Shizuku 的兼容分支。",
+                    text = "授权弹窗显示 Shizuku 属正常（Stellar 是其兼容分支）。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -685,8 +593,7 @@ private fun BatteryPage(state: OnboardingUiState, onAction: (OnboardingAction) -
         // 「后台高耗电」可尽力跳系统页；「卡片锁定」无公开 API，纯文案引导。
         BatteryGuideItem(
             title = "后台高耗电 + 卡片锁定",
-            description = "在 设置→电池→后台耗电管理 中允许 StayHiFi；" +
-                "并在最近任务里下拉卡片点「锁定」，防划卡清理。",
+            description = "允许后台高耗电，并在最近任务里锁定 StayHiFi，防止被清理。",
             done = false,
             actionLabel = "去设置",
             onAction = { onAction(OnboardingAction.OpenBackgroundPower) },

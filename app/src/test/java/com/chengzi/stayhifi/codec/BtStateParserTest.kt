@@ -403,7 +403,7 @@ class BtStateParserTest {
         assertEquals(BtStateParseStatus.NO_BITRATE, noBitrate.status)
         val display = BtStateParser.realtimeDisplay(isMusicActive = true, result = noBitrate)
         assertEquals(RealtimeDisplay.NO_DATA, display.display)
-        assertEquals("—（本机暂不支持抓取）", RealtimeDisplayFormatter.text(display))
+        assertEquals("暂无法读取", RealtimeDisplayFormatter.text(display))
     }
 
     @Test

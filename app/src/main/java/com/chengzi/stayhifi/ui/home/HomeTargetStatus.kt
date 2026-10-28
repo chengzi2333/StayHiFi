@@ -13,10 +13,12 @@ object HomeTargetStatus {
         !connected -> "等待耳机连接"
         // 自定义会话优先于一切满血判定：手动降档绝不冒充满血/本机最高
         manualActive -> "自定义参数生效中"
-        status == TargetAssessment.Status.INCOMPLETE_CURRENT -> "参数不完整 · 暂无法判定"
-        status == TargetAssessment.Status.CAPABILITY_DEGRADED -> "能力未完整暴露 · 暂无法确认最高"
+        // UX 收敛（主 agent 裁决）：内部枚举名不上面客文案；
+        // DEGRADED 只陈述「最高暂无法确认」，不冒明确认最高
+        status == TargetAssessment.Status.INCOMPLETE_CURRENT -> "暂无法读取当前参数"
+        status == TargetAssessment.Status.CAPABILITY_DEGRADED -> "最高能力暂无法确认"
         status == TargetAssessment.Status.COMPLETE && fullBars -> "已达本机最高音质输出"
-        else -> "未拉满 · 点击重试"
+        else -> "未拉满，点下方按钮重试"
     }
 
     fun badgeLabel(

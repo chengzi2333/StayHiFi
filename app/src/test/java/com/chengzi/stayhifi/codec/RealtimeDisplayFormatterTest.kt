@@ -8,7 +8,7 @@ import org.junit.Test
 /**
  * Task 7：RealtimeDisplayFormatter 单测——首页「实际传输」行唯一文案入口。
  * 四态文案逐字固定：NOT_PLAYING=未在播放、STACK_REPORTS_IDLE=暂无法确认、
- * NO_DATA=—（本机暂不支持抓取）、AVAILABLE=码率行（ABR 必须带「自适应」三字）。
+ * NO_DATA=暂无法读取、AVAILABLE=码率行（ABR 必须带「自适应」三字）。
  */
 class RealtimeDisplayFormatterTest {
 
@@ -29,7 +29,7 @@ class RealtimeDisplayFormatterTest {
     @Test
     fun noDataShowsUnsupportedText() {
         assertEquals(
-            "—（本机暂不支持抓取）",
+            "暂无法读取",
             RealtimeDisplayFormatter.text(RealtimeState(RealtimeDisplay.NO_DATA)),
         )
     }
