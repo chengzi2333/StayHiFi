@@ -40,6 +40,8 @@ import com.chengzi.stayhifi.shell.RootShellStatus
 import com.chengzi.stayhifi.shell.RootSnapshot
 import com.chengzi.stayhifi.shell.RootStatus
 import com.chengzi.stayhifi.ui.common.RootStatusCard
+import com.chengzi.stayhifi.ui.common.SubPageTopBar
+import com.chengzi.stayhifi.ui.common.noWindowInsets
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import com.chengzi.stayhifi.util.QqGroup
 
@@ -335,16 +337,13 @@ private fun ProviderPage(
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text("返回")
-            }
-            Text(
-                text = "特权方式",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-            )
-        }
+        // 与运行日志页同一返回箭头样式；本页已在外层 Scaffold content padding 之内，
+        // TopAppBar 自带的状态栏内边距置零，避免重复叠加。
+        SubPageTopBar(
+            title = "特权方式",
+            onBack = onBack,
+            windowInsets = noWindowInsets,
+        )
         ProviderSelectCard(
             title = "Shizuku / Stellar（推荐）",
             description = "安装任意一个并授权，即可获得调校权限。",
