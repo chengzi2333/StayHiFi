@@ -1,5 +1,6 @@
 package com.chengzi.stayhifi.ui.logs
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -48,6 +49,8 @@ fun LogsScreen(
     onAction: (LogsAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 与特权方式二级页同一系统返回语义：左右滑/返回键先关闭日志页，不退出 Activity。
+    BackHandler { onAction(LogsAction.Back) }
     Scaffold(
         modifier = modifier,
         topBar = {
