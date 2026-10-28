@@ -26,6 +26,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -227,7 +229,9 @@ private fun StatusCard(state: HomeUiState) {
                 )
                 StayHiFiBadge(status = state.targetStatus, fullBars = state.fullBars)
             }
-            // 机型行（Task 28）：面客机型名 + Android 版（SystemProperties 市场名键链）。
+            // 机型行（Task 28 + Task C4）：面客机型名 + Android 版。
+            // collect StateFlow：后台 preload 完成后机型行自动更新，同步路径不触发资产 IO。
+            val marketModelWithAndroid by DeviceNames.marketModelWithAndroidFlow.collectAsState()
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = StayHiFiIcons.Smartphone,
@@ -237,7 +241,7 @@ private fun StatusCard(state: HomeUiState) {
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(
-                    text = DeviceNames.marketModelWithAndroid(),
+                    text = marketModelWithAndroid,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

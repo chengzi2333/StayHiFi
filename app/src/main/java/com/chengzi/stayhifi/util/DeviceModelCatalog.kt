@@ -48,14 +48,37 @@ internal class DeviceModelCatalog(
 
     private fun loadBounded(): Map<String, String> {
         openAsset().use { raw ->
-            GZIPInputStream(raw).use { gzip ->
-                val bytes = gzip.readNBytes(MAX_DECOMPRESSED_BYTES + 1)
+            // aapt 会把 assets 里的 .gz 透明解压并去掉 .gz 后缀（APK 内是裸 JSON）；
+            // 按 magic sniff 兼容两种打包形态，行为对调用方一致。
+            val buffered = java.io.BufferedInputStream(raw)
+            buffered.mark(2)
+            val b1 = buffered.read()
+            val b2 = buffered.read()
+            buffered.reset()
+            val payload = if (b1 == 0x1f && b2 == 0x8b) GZIPInputStream(buffered) else buffered
+            payload.use { input ->
+                // 手写有界读取：InputStream.readNBytes 需 API 33，minSdk 29 不可用。
+                val bytes = readAtMost(input, MAX_DECOMPRESSED_BYTES + 1)
                 if (bytes.size > MAX_DECOMPRESSED_BYTES) {
                     throw IllegalStateException("解压后超过 $MAX_DECOMPRESSED_BYTES bytes 上限")
                 }
                 return JSON.decodeFromString(bytes.toString(Charsets.UTF_8))
             }
         }
+    }
+
+    /** 至多读取 [limit] 字节；流更长时静默截断，由调用方按超限失败处理。 */
+    private fun readAtMost(input: InputStream, limit: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        var remaining = limit
+        while (remaining > 0) {
+            val n = input.read(buffer, 0, minOf(buffer.size, remaining))
+            if (n < 0) break
+            out.write(buffer, 0, n)
+            remaining -= n
+        }
+        return out.toByteArray()
     }
 
     private companion object {

@@ -8,6 +8,7 @@ import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.trigger.ListenerService
 import com.chengzi.stayhifi.updater.UpdateCleanup
+import com.chengzi.stayhifi.util.DeviceNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -23,6 +24,12 @@ class StayHiFiApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Task C4：机型目录只注入 applicationContext（主线程、无 IO）；
+        // 有界 GZIP/JSON 预载挪到 IO 协程单飞执行，首屏不解析全表、不阻塞启动。
+        DeviceNames.initialize(this)
+        CoroutineScope(Dispatchers.IO).launch {
+            DeviceNames.preload()
+        }
         // Task 30：档案 DataStore 预热——冷文件 IO + 全量 JSON 解码挪到启动期 IO 线程。
         // 不预热时首次切设备页才冷初始化，全砸在切换帧上（实测单帧 150ms）。
         CoroutineScope(Dispatchers.IO).launch {

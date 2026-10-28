@@ -108,6 +108,15 @@ class DeviceModelCatalogTest {
     }
 
     @Test
+    fun test_plainJsonWithoutGzip_isAccepted() {
+        // aapt 打包时会把 .gz 资产透明解压并改名；裸 JSON 形态必须同样可读。
+        val plain = "{\"OPD2409\":\"OPPO Pad 4 Pro\"}".toByteArray(Charsets.UTF_8)
+        val (catalog, _) = catalogWith(plain)
+        assertEquals(CatalogLoadState.READY, catalog.preload())
+        assertEquals("OPPO Pad 4 Pro", catalog.lookup("OPD2409"))
+    }
+
+    @Test
     fun test_concurrentPreload_opensOnceAndConsistentState() {
         val asset = gzipJson(mapOf("OPD2409" to "OPPO Pad 4 Pro"))
         val (catalog, openCount) = catalogWith(asset)
