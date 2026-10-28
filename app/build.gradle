@@ -98,6 +98,9 @@ dependencies {
 
     testImplementation 'junit:junit:4.13.2'
 
+    // Task B4：JVM 单测需要真实 org.json（android.jar 内为 not-mocked stub，readState/parseError 无法跑）。
+    testImplementation 'org.json:json:20240303'
+
     androidTestImplementation 'androidx.test:runner:1.7.0'
     androidTestImplementation 'androidx.test.ext:junit:1.3.0'
 }

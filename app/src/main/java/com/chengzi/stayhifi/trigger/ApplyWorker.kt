@@ -26,7 +26,6 @@ import com.chengzi.stayhifi.shell.ShizukuShellProvider
 import com.chengzi.stayhifi.util.DeviceNames
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -50,13 +49,34 @@ import org.json.JSONObject
 class ApplyWorker(context: Context) {
 
     private val appContext = context.applicationContext
-    private val settings = SettingsRepository(appContext)
-    private val profiles = ProfileRepository(appContext)
-    private val notifier = Notifier(appContext)
-    private val provider = ShizukuShellProvider(appContext)
+    private val settings by lazy { SettingsRepository(appContext) }
+    private val profiles by lazy { ProfileRepository(appContext) }
+    private val notifier by lazy { Notifier(appContext) }
+    private val provider by lazy { ShizukuShellProvider(appContext) }
     private val audioManager by lazy { appContext.getSystemService(AudioManager::class.java) }
 
-    private fun log(msg: String) = LogStore.log(msg)
+    /** Task B4：日志落点接缝（默认 LogStore），JVM 单测注入收集器避免 android.util.Log stub。 */
+    internal var logSink: (String) -> Unit = { LogStore.log(it) }
+    private fun log(msg: String) = logSink(msg)
+
+    /**
+     * Task B4：锁后 per-MAC 本机 A2DP 断连复查。internal 以便单测注入 fake probe；
+     * force 不传入——手动入口不能绕过复查，只影响 runLocked 的 autoApply 判断。
+     */
+    internal var connectionGuard = ApplyConnectionGuard(
+        ApplyLock.mutex, LocalBluetoothA2dpProbe(appContext), ::log,
+    )
+
+    /** 恢复默认载体的环境接缝（Task B4，JVM 单测注入 fake；默认即生产实现）。 */
+    internal var restoreEnv = RestoreEnv(
+        shellReady = { waitForShell() },
+        hasPrivilege = { provider.hasPermission },
+        bind = { withContext(Dispatchers.IO) { provider.bind() } },
+        unbind = { provider.unbind() },
+        notifyFix = { notifier.notifyFixRequired(it) },
+        notify = { t, c -> notifier.notifyResult(t, c) },
+        notifyResultIfEnabled = { t, c -> notifyResult(t, c) },
+    )
 
     private fun recordIdentityConflict(mac: String, presentation: CodecPresentation) {
         if (CodecIdentityIssue.SYSTEM_LEGACY_CONFLICT !in presentation.issues) return
@@ -82,7 +102,7 @@ class ApplyWorker(context: Context) {
         if (ApplyLock.mutex.isLocked) {
             log("等待上一次拉满完成…")
         }
-        ApplyLock.mutex.withLock {
+        connectionGuard.run(target) {
             runLocked(target, name, force)
         }
     }
@@ -323,52 +343,62 @@ class ApplyWorker(context: Context) {
     }
 
     /**
-     * Task 42：恢复默认参数（设备页「后悔药」入口）——把首次拉满前的原始协商配置写回设备：
-     * 绑定载体 → writeConfig(origin) → 读回验证（ApplyPolicy.matches(origin, actual)）→ 成功/失败通知。
-     * 与自动拉满同一把 [ApplyLock.mutex] 互斥串行；失败不碰档案，返回是否成功（供调用方决定是否连带关自动拉满）。
+     * Task 42：恢复默认参数（设备页「后悔药」入口）——把首次拉满前的原始协商配置写回设备。
+     * Task B4：与自动拉满同走 [connectionGuard]——排队后 DISCONNECTED 时零载体调用、
+     * 不向设备写 origin、不发成功通知；CONNECTED/UNKNOWN 才执行原绑定→写入→读回流程，
+     * 通知与读回语义不变，不新增 TriggerGate、不改变恢复目标。
      */
     suspend fun restoreDefault(mac: String, name: String, origin: CodecConfig): Boolean {
         log("恢复默认参数: $name ($mac) → ${origin.summary()}")
-        return ApplyLock.mutex.withLock {
-            try {
-                if (!waitForShell()) {
-                    log("Shizuku 未运行，发一键修复通知")
-                    notifier.notifyFixRequired("Shizuku 未运行")
-                    return@withLock false
-                }
-                if (!provider.hasPermission) {
-                    log("特权授权已被撤销，发引导修复通知")
-                    notifier.notifyFixRequired("特权授权已被撤销")
-                    return@withLock false
-                }
-                val service = withContext(Dispatchers.IO) { provider.bind() }
-                val res = withContext(Dispatchers.IO) { service.writeConfig(mac, origin.toJson()) }
-                val err = parseError(res)
-                if (err != null) {
-                    log("恢复默认写入失败: $err")
-                    notifier.notifyResult("恢复默认参数失败", "$name: $err")
-                    return@withLock false
-                }
-                // 读回验证：与拉满同一套 matches 生效语义（codecType/rate/bits/cs1）
-                val actual = readState(service, mac)?.current
-                if (actual != null && ApplyPolicy.matches(origin, actual)) {
-                    log("恢复默认成功 ✓ 读回=${actual.summary()}")
-                    // Task 43：后悔药生效后旧的拉满目标作废，否则轮询立刻把默认参数误报成漂移
-                    VerifiedTargetStore.clear(mac)
-                    notifyResult("已恢复默认参数", "$name → ${actual.summary()}")
-                    true
-                } else {
-                    log("恢复默认读回不一致: ${actual?.summary() ?: "读取失败"}")
-                    notifier.notifyResult("恢复默认参数失败", "$name：读回与原始配置不一致")
-                    false
-                }
-            } catch (t: Throwable) {
-                log("恢复默认参数失败: $t")
-                notifier.notifyResult("恢复默认参数失败", "$name: ${t.message}")
-                false
-            } finally {
-                provider.unbind()
+        var ok = false
+        connectionGuard.run(mac) {
+            ok = restoreDefaultCarrier(mac, name, origin)
+        }
+        return ok
+    }
+
+    /** 恢复默认载体（锁内、复查后）：绑定 → writeConfig(origin) → 读回验证 → 成功/失败通知。 */
+    private suspend fun restoreDefaultCarrier(
+        mac: String, name: String, origin: CodecConfig,
+    ): Boolean {
+        return try {
+            if (!restoreEnv.shellReady()) {
+                log("Shizuku 未运行，发一键修复通知")
+                restoreEnv.notifyFix("Shizuku 未运行")
+                return false
             }
+            if (!restoreEnv.hasPrivilege()) {
+                log("特权授权已被撤销，发引导修复通知")
+                restoreEnv.notifyFix("特权授权已被撤销")
+                return false
+            }
+            val service = restoreEnv.bind()
+            val res = withContext(Dispatchers.IO) { service.writeConfig(mac, origin.toJson()) }
+            val err = parseError(res)
+            if (err != null) {
+                log("恢复默认写入失败: $err")
+                restoreEnv.notify("恢复默认参数失败", "$name: $err")
+                return false
+            }
+            // 读回验证：与拉满同一套 matches 生效语义（codecType/rate/bits/cs1）
+            val actual = readState(service, mac)?.current
+            if (actual != null && ApplyPolicy.matches(origin, actual)) {
+                log("恢复默认成功 ✓ 读回=${actual.summary()}")
+                // Task 43：后悔药生效后旧的拉满目标作废，否则轮询立刻把默认参数误报成漂移
+                VerifiedTargetStore.clear(mac)
+                restoreEnv.notifyResultIfEnabled("已恢复默认参数", "$name → ${actual.summary()}")
+                true
+            } else {
+                log("恢复默认读回不一致: ${actual?.summary() ?: "读取失败"}")
+                restoreEnv.notify("恢复默认参数失败", "$name：读回与原始配置不一致")
+                false
+            }
+        } catch (t: Throwable) {
+            log("恢复默认参数失败: $t")
+            restoreEnv.notify("恢复默认参数失败", "$name: ${t.message}")
+            false
+        } finally {
+            restoreEnv.unbind()
         }
     }
 
@@ -441,6 +471,19 @@ class ApplyWorker(context: Context) {
     ) {
         val current: CodecConfig get() = presentation.current
     }
+
+    /** 恢复默认载体的环境接缝（Task B4，JVM 单测注入 fake；默认即生产实现，见 [restoreEnv]）。 */
+    internal class RestoreEnv(
+        val shellReady: suspend () -> Boolean,
+        val hasPrivilege: () -> Boolean,
+        val bind: suspend () -> ICodecService,
+        val unbind: () -> Unit,
+        val notifyFix: (String) -> Unit,
+        /** 直接发结果通知（失败路径，与生产 notifier.notifyResult 等价）。 */
+        val notify: (String, String) -> Unit,
+        /** 经 notifyResult 开关门控的结果通知（成功路径，与生产私有 notifyResult 等价）。 */
+        val notifyResultIfEnabled: suspend (String, String) -> Unit,
+    )
 
     companion object {
         private const val SHELL_WAIT_STEPS = 6          // 3s
