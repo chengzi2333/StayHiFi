@@ -63,6 +63,8 @@ enum class RootLogEventKind {
     ROOT_BIND_END,
     ROOT_HEALTH_END,
     PROVIDER_SWITCH_END,
+    /** Task D6：后台路径发现 Root 未就绪——按状态变化去重记录，绝不刷屏也绝不自动切换（§11.4.5/§11.6） */
+    BACKGROUND_REVALIDATION_NEEDED,
 }
 
 /**

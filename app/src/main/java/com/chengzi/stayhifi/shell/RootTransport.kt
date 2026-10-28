@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
@@ -218,6 +220,36 @@ class RootTransport(
     /** READY anchor 的当前 IPC 接口；仅当前进程 READY 时非空（供 RootShellProvider/lease 只读复用）。 */
     internal fun readyService(): ICodecService? =
         if (_state.value.status == RootStatus.READY) anchorCandidate?.service else null
+
+    // ── Task D6：Root IPC 串行（与 ApplyLock 职责分离，§11.3） ──
+
+    /** Root transport 的全部 IPC 经此独立协程 Mutex 串行，防并发 bind/重复回调/A2DP 初始化竞争。 */
+    private val ipcMutex = Mutex()
+    private val activeIpc = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 当前进行中的 Root IPC 数（供切换事务有界等待，Task D7 使用）。 */
+    val activeIpcCount: Int get() = activeIpc.get()
+
+    /**
+     * READY anchor 上的串行 IPC：进入前与锁内都复查 READY——anchor 断开（DISCONNECTED）
+     * 后不可复用，抛 NEEDS_FOREGROUND_REVALIDATION 引导前台重验（§11.4.5）。
+     */
+    suspend fun <T> withReadyAnchor(block: suspend (ICodecService) -> T): T {
+        if (_state.value.status != RootStatus.READY) {
+            throw RootAccessException(RootStatus.NEEDS_FOREGROUND_REVALIDATION,
+                "Root 未在当前进程就绪（status=${_state.value.status}），需前台重验")
+        }
+        return ipcMutex.withLock {
+            val service = readyService() ?: throw RootAccessException(
+                RootStatus.NEEDS_FOREGROUND_REVALIDATION, "anchor 已断开")
+            activeIpc.incrementAndGet()
+            try {
+                block(service)
+            } finally {
+                activeIpc.decrementAndGet()
+            }
+        }
+    }
 
     /**
      * 绑定 RootCodecService 并做 dumpDevices 健康检查（设计 §11.4.7-9）。
