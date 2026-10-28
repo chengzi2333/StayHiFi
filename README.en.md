@@ -27,11 +27,11 @@ StayHiFi takes that chore off your plate: the instant a headset connects, it wri
 
 ## Features
 
-- **Maxed the moment you connect**: any Bluetooth headset, zero per-device adaptation — the target parameters are derived on the fly for your headset × phone × ROM combination, and verified by reading the config back after writing; trigger merging and disconnect protection keep reconnects and playback starts steady
+- **Maxed the moment you connect**: the target parameters are derived on the fly from what the current connection actually supports, and verified by reading the config back after writing; trigger merging and disconnect protection keep reconnects and playback starts steady
 - **A status card that tells it straight**: "At this phone's maximum output quality" / "Not maxed out · tap to retry" / "Custom parameters active" / "Connected — authorize to continue" — no wishful claims
-- **Auto re-max on reconnect**: a foreground service listens for connection events — near-zero battery drain, no polling
+- **Auto re-max on reconnect**: a foreground service listens for connection events — event-driven, no idle polling
 - **Custom Quality**: codec / sample rate / bit depth / bitrate can be adjusted manually within what the current connection supports; if maxing out leaves you with no sound or artifacts, step a notch down or return to adaptive with one tap — greyed-out choices are simply what your phone or headset doesn't offer right now. A custom setup is labeled "Custom" and never masquerades as "maxed out" — the default auto-max rule stays unchanged
-- **Identity & live diagnostics**: verifies which codec your phone is actually running and shows the live transmitted bitrate; on some devices even a "fixed" bitrate stays adaptive, so trust the live readout
+- **Identity & live diagnostics**: verifies which codec your phone is actually running; on devices whose stack reports it, the card shows the live transmitted bitrate — and says so plainly when it can't be read. On some devices even a "fixed" bitrate stays adaptive, so trust the live readout
 - **Persistent silent notification + QS tile**: optional live parameter readout; the QS tile re-applies the max with one tap, or opens the app when nothing is connected
 - **iOS-style floating Dock navigation**: spring lens + jelly-physics motion, drag-tracking
 - **Record current parameters**: the entry lives on the Devices page — capture the current negotiated parameters once and archive them, with device model / Android version provenance; model names resolve offline (v1.2.2)
@@ -44,7 +44,7 @@ StayHiFi obtains shell-level privileges through **Shizuku or Stellar** (either o
 
 - It does **not** patch the system, unlock hidden codecs, or exceed the hardware-negotiated capability ceiling — Root only replaces the privilege channel; it does not raise the audio-quality ceiling
 - Root-channel device coverage is still being validated with external samples and is not yet a stable, supported configuration — feedback welcome
-- The system Bluetooth connection is decoupled from privileged reads: without authorization you can still see this phone's A2DP connection and headset name; detailed parameters and any writes require authorization
+- The system Bluetooth connection is decoupled from privileged reads: without Shizuku/Root set up (the normal BLUETOOTH_CONNECT permission still applies) you can still see this phone's A2DP connection and headset name; detailed parameters and any writes require the privileged authorization
 - The only feature-level external interaction is local IPC with Shizuku / Stellar / Root; the sole network request is the GitHub Releases version check
 
 ## Install
@@ -52,7 +52,7 @@ StayHiFi obtains shell-level privileges through **Shizuku or Stellar** (either o
 > ⚠️ The only official channel right now is **GitHub Releases** (CoolApk listing in progress). Do not install APKs from anywhere else.
 
 1. Set up privileges (pick one): install the **Shizuku** or **Stellar** manager and activate it per its instructions (wireless debugging / wired adb — no root required); devices that are already rooted can instead switch to the experimental Root channel inside the app
-2. Download the APK from [GitHub Releases](https://github.com/chengzi2333/StayHiFi/releases) — **one universal package covers all devices**, no need to pick an ABI variant; SHA-256 checksums and the signing-certificate fingerprint are attached to the release page, verify before installing
+2. Download the APK from [GitHub Releases](https://github.com/chengzi2333/StayHiFi/releases) — **a single APK — no ABI variant to pick**; SHA-256 checksums and the signing-certificate fingerprint are attached to the release page, verify before installing
 
 Requires: Android 10+.
 
@@ -63,7 +63,7 @@ Requires: Android 10+.
    - **Allow auto-launch** (system settings → app management)
    - **Add to battery whitelist** (disable battery optimization)
    - **Allow background high power usage + lock the recents card**: in Settings → Battery → background power management, allow this app; and in the recents view, pull the app card down and tap "lock" to prevent swipe-to-kill
-3. That's it. When a headset connects, parameters are maxed automatically; the home status card tells you live whether you've hit the ceiling. To fine-tune, use "Custom Quality" on the Home page to adjust within what the current connection supports, then step down or return to adaptive if anything sounds wrong. Without authorization you still see the connected headset's name; parameters are shown and written only after authorization
+3. That's it. When a headset connects, parameters are maxed automatically; the home status card tells you live whether you've hit the ceiling. To fine-tune, use "Custom Quality" on the Home page to adjust within what the current connection supports, then step down or return to adaptive if anything sounds wrong. Without the privileged authorization (the normal Bluetooth permission still applies) you still see the connected headset's name; parameters are shown and written only after authorization
 
 ## Uninstall
 
