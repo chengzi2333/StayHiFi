@@ -26,13 +26,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.CodecIdentity
 import com.chengzi.stayhifi.codec.ManualSelection
 import com.chengzi.stayhifi.codec.Masks
 
-/** 手动调参面板的数据面：当前生效配置 + 当前连接上报的 selectable 能力。 */
+/**
+ * 手动调参面板的数据面：当前生效配置 + 当前连接上报的 selectable 能力 +
+ * 系统已裁决身份（[identity] 只佐证当前 codec 的家族/显示名，如 OPD 的 LHDC V3
+ * caps 仅 48/96；跨 codec 无身份证据时 ManualSelection 保持保守，不裸猜）。
+ */
 data class ManualEditorInput(
     val current: CodecConfig,
     val selectable: List<CodecConfig>,
+    val identity: CodecIdentity? = null,
 )
 
 /**
@@ -52,6 +58,7 @@ fun ManualEditorSheet(
 ) {
     val current = input.current
     val selectable = input.selectable
+    val identity = input.identity
 
     // 编码器选项来自 selectable；当前 codec 未被上报时补在最前（live 配置本身是证据）
     val codecOptions = remember(selectable, current.codecType) {
@@ -63,10 +70,11 @@ fun ManualEditorSheet(
     var codec by remember { mutableIntStateOf(current.codecType) }
     var rate by remember { mutableIntStateOf(current.sampleRate) }
     var bits by remember { mutableIntStateOf(current.bitsPerSample) }
+    // 码率档恒为显式选中的展示档位：同 codec 保留当前档，跨 codec 默认该家族自适应档，
+    // 绝不让 cs1 静默落到档位表之外（Fix review）
     var qualityCs1 by remember {
         mutableStateOf(
-            ManualSelection.qualityOptions(current.codecType, selectable, current)
-                .firstOrNull { it.cs1 == current.cs1 }?.cs1,
+            ManualSelection.defaultQualityCs1(current.codecType, selectable, current, identity),
         )
     }
 
@@ -82,8 +90,7 @@ fun ManualEditorSheet(
         } else {
             ManualSelection.availableBits(next, rate, selectable).maxOrNull() ?: 0
         }
-        qualityCs1 = ManualSelection.qualityOptions(next, selectable, current)
-            .firstOrNull { it.cs1 == current.cs1 && next == current.codecType }?.cs1
+        qualityCs1 = ManualSelection.defaultQualityCs1(next, selectable, current, identity)
     }
 
     fun selectRate(next: Int) {
@@ -102,12 +109,12 @@ fun ManualEditorSheet(
         value in ManualSelection.availableBits(codec, rate, selectable) ||
             (codec == current.codecType && rate == current.sampleRate && value == current.bitsPerSample)
 
-    val qualityOptions = ManualSelection.qualityOptions(codec, selectable, current)
+    val qualityOptions = ManualSelection.qualityOptions(codec, selectable, current, identity)
     val target = ManualSelection.buildTarget(
         current = current, codecType = codec, rate = rate, bits = bits,
         qualityCs1 = qualityCs1, selectable = selectable,
     )
-    val adaptive = ManualSelection.adaptiveTarget(current, selectable)
+    val adaptive = ManualSelection.adaptiveTarget(current, selectable, identity)
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -134,7 +141,7 @@ fun ManualEditorSheet(
                         selected = codec == option,
                         enabled = !applying,
                         onClick = { selectCodec(option) },
-                        label = { Text(ManualSelection.codecLabel(option, selectable)) },
+                        label = { Text(ManualSelection.codecLabel(option, selectable, identity)) },
                     )
                 }
             }
@@ -183,9 +190,9 @@ fun ManualEditorSheet(
             Text(
                 text = if (target != null) {
                     val qualityLabel = qualityCs1?.let {
-                        Masks.qualityLabel(ManualSelection.familyOf(codec, selectable), it)
+                        Masks.qualityLabel(ManualSelection.familyOf(codec, selectable, identity), it)
                     }
-                    val base = ManualSelection.codecLabel(codec, selectable) +
+                    val base = ManualSelection.codecLabel(codec, selectable, identity) +
                         "·" + Masks.rateHz(rate) + "·" + Masks.bitsDepth(bits)
                     "将应用：" + if (qualityLabel != null) "$base·$qualityLabel" else base
                 } else {

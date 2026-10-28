@@ -210,8 +210,7 @@ class ManualSelectionTest {
     }
 
     @Test
-    fun adaptiveTargetReturnsWildcardWithFamilyAdaptiveCs1() {
-        val ldac = ManualSelection.adaptiveTarget(ldacCurrent, emptyList())
+    fun adaptiveTargetReturnsWildcardWithFamilyAdaptiveCs1() {        val ldac = ManualSelection.adaptiveTarget(ldacCurrent, emptyList())
         assertEquals(4, ldac.codecType)
         assertEquals(0, ldac.priority)
         assertEquals(0, ldac.sampleRate)
@@ -229,5 +228,96 @@ class ManualSelectionTest {
         val sbc = ManualSelection.adaptiveTarget(sbcCurrent, emptyList())
         assertEquals(0L, sbc.cs1)
         assertEquals(0, sbc.sampleRate)
+    }
+
+    // ── Fix review：系统身份（presentation.identity）佐证当前 codec 家族 ──
+
+    // OPD 样本：type=18，系统身份已识别 LHDC V3，但 caps=10（48+96）无 176/192 位
+    private val opdSelectable = listOf(caps(codecType = 18, rateMask = 10, bitsMask = 2))
+    private val opdCurrent = CodecDeviceFixtures.opdCurrent   // cs1=0x8006（500kbps 档）
+    private val opdIdentity = CodecIdentity(
+        nativeType = 18,
+        family = CodecFamily.LHDC,
+        displayName = "LHDC V3",
+        source = CodecIdentitySource.SYSTEM_TYPE,
+    )
+
+    @Test
+    fun systemIdentityUnlocksQualityLadderForCurrentCodec() {
+        // 无身份证据：caps 只有 48/96，保持保守（不裸认 vendor 编号）
+        assertTrue(ManualSelection.qualityOptions(18, opdSelectable, opdCurrent).isEmpty())
+        assertEquals("vendor(18)", ManualSelection.codecLabel(18, opdSelectable))
+        // 有系统身份：当前 codec 开放 LHDC 码率梯并显示精确身份名
+        val options = ManualSelection.qualityOptions(18, opdSelectable, opdCurrent, opdIdentity)
+        assertEquals(10, options.size)
+        assertEquals("LHDC V3", ManualSelection.codecLabel(18, opdSelectable, opdIdentity))
+        assertEquals(CodecFamily.LHDC, ManualSelection.familyOf(18, opdSelectable, opdIdentity))
+        // 同 codec 保留 current.cs1 形态：500kbps 档精确还原 0x8006，自适应 0x8009
+        assertEquals(0x8006L, options.first { it.label == "500kbps" }.cs1)
+        assertEquals(0x8009L, options.first { it.label == "自适应" }.cs1)
+        // 自适应出口同样使用身份佐证
+        assertEquals(0x8009L, ManualSelection.adaptiveTarget(opdCurrent, opdSelectable, opdIdentity).cs1)
+    }
+
+    @Test
+    fun identityNeverProvesOtherCodecTypes() {
+        // 身份只属于当前 codec：切到别的 vendor 编号仍走 caps 佐证，不借身份裸猜
+        val sbcIdentity = CodecIdentity(
+            nativeType = 0, family = CodecFamily.SBC,
+            displayName = "SBC", source = CodecIdentitySource.SYSTEM_TYPE,
+        )
+        val sbcCurrent = CodecConfig(0, 0, 2, 1, 2, 0L, 0L, 0L, 0L)
+        val selectable = opdSelectable + caps(codecType = 0, rateMask = 3, bitsMask = 1)
+        assertEquals(
+            CodecFamily.UNKNOWN,
+            ManualSelection.familyOf(18, listOf(caps(18, rateMask = 10)), sbcIdentity),
+        )
+        assertTrue(
+            ManualSelection.qualityOptions(18, selectable, sbcCurrent, sbcIdentity).isEmpty(),
+        )
+    }
+
+    // ── Fix review：切 codec 必须显式选中展示档位（跨 codec 默认自适应） ──
+
+    @Test
+    fun defaultQualityCs1AcrossCodecSelectsAdaptiveTier() {
+        val sbcCurrent = CodecConfig(0, 0, 2, 1, 2, 0L, 0L, 0L, 0L)
+        // LDAC：AOSP 自适应档 1003，绝不写不在档位表里的 0
+        assertEquals(
+            1003L,
+            ManualSelection.defaultQualityCs1(4, ldacSplitSelectable, sbcCurrent),
+        )
+        // LHDC：裸 0x8009（OPD 实证形态），带 magic，不是无 magic 的 0
+        assertEquals(
+            0x8009L,
+            ManualSelection.defaultQualityCs1(10, emptyList(), sbcCurrent),
+        )
+    }
+
+    @Test
+    fun defaultQualityCs1SameCodecKeepsCurrentTier() {
+        val ldac = CodecConfig(4, 0, 8, 1, 2, 1001L, 0L, 0L, 0L)
+        assertEquals(
+            1001L,
+            ManualSelection.defaultQualityCs1(4, ldacSplitSelectable, ldac),
+        )
+        // LHDC 同 codec：current 档位可识别时保留（含高位）
+        assertEquals(
+            50888712L,
+            ManualSelection.defaultQualityCs1(10, emptyList(), CodecDeviceFixtures.iqoo15Golden),
+        )
+        // 同 codec 但当前 cs1 不在档位表：回落自适应档（不写无法解释的原值）
+        val oddLdac = CodecConfig(4, 0, 8, 1, 2, 0L, 0L, 0L, 0L)
+        assertEquals(
+            1003L,
+            ManualSelection.defaultQualityCs1(4, ldacSplitSelectable, oddLdac),
+        )
+    }
+
+    @Test
+    fun defaultQualityCs1NullForLadderlessCodec() {
+        val sbcCurrent = CodecConfig(0, 0, 2, 1, 2, 0L, 0L, 0L, 0L)
+        assertNull(ManualSelection.defaultQualityCs1(0, emptyList(), sbcCurrent))
+        assertNull(ManualSelection.defaultQualityCs1(1, emptyList(), sbcCurrent))
     }
 }

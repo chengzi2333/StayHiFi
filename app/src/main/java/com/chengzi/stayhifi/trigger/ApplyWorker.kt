@@ -377,7 +377,11 @@ class ApplyWorker(context: Context) {
                     displayName = Masks.codecName(target.codecType),
                     source = CodecIdentitySource.UNKNOWN,
                 )
-            if (writeVerified(lease, mac, target, identity)) {
+            // 手动显式档位（rate/bits 非 0）必须严格校验 cs1：applied 只证明
+            // codecType/rate/bits，用户明确选的码率档不能被栈静默换掉；
+            // 恢复自适应等通配目标（rate/bits=0）保持宽松语义，不被严格校验锁死。
+            val requireExactCs1 = target.sampleRate != 0 && target.bitsPerSample != 0
+            if (writeVerified(lease, mac, target, identity, requireExactCs1)) {
                 log("手动应用成功 ✓ ${summary(target, identity)}")
                 VerifiedTargetStore.record(mac, target)
                 true
@@ -453,9 +457,16 @@ class ApplyWorker(context: Context) {
         }
     }
 
-    /** writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。 */
+    /**
+     * writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。
+     * [requireExactCs1]（手动显式档位专用，自动路径恒 false 不改语义）：
+     * 服务端 applied 只证明 codecType/rate/bits，cs1 必须由 final 读回证明——
+     * final 缺失（服务端给不出读回证据）或 final 与目标不符（栈静默落档）都判未生效，
+     * 绝不把别的码率档冒充成用户所选档位。
+     */
     private suspend fun writeVerified(
         lease: ProviderLease, mac: String, target: CodecConfig, identity: CodecIdentity,
+        requireExactCs1: Boolean = false,
     ): Boolean {
         repeat(OUTER_RETRIES) { attempt ->
             val res = lease.withService { svc ->
@@ -471,13 +482,24 @@ class ApplyWorker(context: Context) {
                     // applied 是服务端按 codecType+rate+bits 语义判定的，直接采信；
                     // final 仅做交叉验证（栈可能规范化 priority/cs1~cs4 等字段）
                     if (final != null && !ApplyPolicy.matches(target, final)) {
-                        log("applied=true 但 final=${summary(final, identity)} 三项与目标不符（以 applied 为准）")
+                        if (requireExactCs1) {
+                            log(
+                                "读回落档: final=${summary(final, identity)} " +
+                                    "与手动目标 ${summary(target, identity)} 不符，判定未生效"
+                            )
+                        } else {
+                            log("applied=true 但 final=${summary(final, identity)} 三项与目标不符（以 applied 为准）")
+                            return true
+                        }
+                    } else if (final == null && requireExactCs1) {
+                        log("读回缺失 final，无法确认手动码率档已生效，按未生效处理")
                     } else {
                         log("读回一致 ✓ final=${final?.let { summary(it, identity) }}")
+                        return true
                     }
-                    return true
+                } else {
+                    log("读回不一致: ${final?.let { summary(it, identity) } ?: "无 final 字段"}")
                 }
-                log("读回不一致: ${final?.let { summary(it, identity) } ?: "无 final 字段"}")
             }
             if (attempt < OUTER_RETRIES - 1) {
                 delay(RETRY_DELAY_MS)

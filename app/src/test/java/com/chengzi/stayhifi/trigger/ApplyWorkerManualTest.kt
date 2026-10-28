@@ -55,7 +55,10 @@ class ApplyWorkerManualTest {
     }
 
     private class FakeCodecService(
-        private val writeResult: String = """{"applied":true}""",
+        // 默认如实读回：final 原样回显写入值（模拟栈精确生效）；applied=false 则恒拒
+        private val writeResponder: (String?) -> String = { configJson ->
+            """{"applied":true,"final":${configJson ?: "{}"}}"""
+        },
     ) : ICodecService {
         val writeCalls = AtomicInteger()
         val writtenConfigs = Collections.synchronizedList(mutableListOf<String>())
@@ -66,7 +69,7 @@ class ApplyWorkerManualTest {
             writeCalls.incrementAndGet()
             writtenConfigs += configJson ?: ""
             onBindScopeWrite?.invoke()
-            return writeResult
+            return writeResponder(configJson)
         }
         override fun dumpBtState(): String = """{"dump":""}"""
         override fun destroy() = Unit
@@ -218,7 +221,7 @@ class ApplyWorkerManualTest {
 
     @Test
     fun manualApplyReturnsFalseWhenReadbackRejects() = runTest {
-        val h = harness(FakeCodecService(writeResult = """{"applied":false}"""))
+        val h = harness(FakeCodecService(writeResponder = { """{"applied":false}""" }))
         advanceUntilIdle()
         h.raw.emit("shizuku")
         advanceUntilIdle()
@@ -233,8 +236,71 @@ class ApplyWorkerManualTest {
     }
 
     @Test
-    fun manualApplySkipsSilentlyOnColdRoot() = runTest {
-        val h = harness(FakeCodecService())
+    fun manualApplyRejectsWhenReadbackLandsOnDifferentQualityTier() = runTest {
+        // 服务端 applied=true 只证明 codecType/rate/bits；final 的 cs1 落在别的码率档
+        // （用户明确选了 330kbps=1002，栈给了 990kbps=1000）→ 严格校验判定未生效：
+        // 按既有口径重试 3 次、返回 false、不记 VerifiedTargetStore（不得静默换档冒充成功）
+        val h = harness(
+            FakeCodecService(writeResponder = { configJson ->
+                val written = CodecConfig.fromJson(configJson!!)
+                """{"applied":true,"final":${written.copy(cs1 = 1000L).toJson()}}"""
+            }),
+        )
+        advanceUntilIdle()
+        h.raw.emit("shizuku")
+        advanceUntilIdle()
+
+        val target = CodecConfig(4, 1_000_000, 8, 1, 2, 1002L, 0L, 0L, 0L)
+        val ok = worker(h, LocalA2dpState.CONNECTED, mutableListOf())
+            .applyManual(mac, "buds", target)
+
+        assertFalse(ok)
+        assertEquals(3, h.service.writeCalls.get())
+        assertNull("落档读回不得成为漂移基准", VerifiedTargetStore.targetFor(mac))
+        assertFalse(ApplyLock.mutex.isLocked)
+    }
+
+    @Test
+    fun manualApplyRejectsWhenReadbackHasNoFinal() = runTest {
+        // applied=true 但服务端给不出 final：无法证明精确码率档已生效，
+        // 最小安全处理 = 不宣称成功、不记 VerifiedTargetStore，只按未生效结束
+        val h = harness(FakeCodecService(writeResponder = { """{"applied":true}""" }))
+        advanceUntilIdle()
+        h.raw.emit("shizuku")
+        advanceUntilIdle()
+
+        val ok = worker(h, LocalA2dpState.CONNECTED, mutableListOf())
+            .applyManual(mac, "buds", CodecConfig(4, 1_000_000, 8, 1, 2, 1002L, 0L, 0L, 0L))
+
+        assertFalse(ok)
+        assertNull(VerifiedTargetStore.targetFor(mac))
+    }
+
+    @Test
+    fun adaptiveWildcardTargetIsNotLockedByStrictCs1Check() = runTest {
+        // 恢复自适应是通配目标（rate/bits=0）：栈重协商后 cs1/档位由栈决定
+        // （final 落在 990kbps 而非请求的自适应 1003），严格校验不得锁死该出口——
+        // applied=true 按既有语义采信并记 VerifiedTargetStore
+        val h = harness(
+            FakeCodecService(writeResponder = {
+                """{"applied":true,"final":${CodecConfig(4, 0, 8, 2, 2, 1000L, 0L, 0L, 0L).toJson()}}"""
+            }),
+        )
+        advanceUntilIdle()
+        h.raw.emit("shizuku")
+        advanceUntilIdle()
+
+        val adaptive = CodecConfig(4, 0, 0, 0, 0, 1003L, 0L, 0L, 0L)   // adaptiveTarget 形状
+        val ok = worker(h, LocalA2dpState.CONNECTED, mutableListOf())
+            .applyManual(mac, "buds", adaptive)
+
+        assertTrue(ok)
+        assertEquals(adaptive, VerifiedTargetStore.targetFor(mac))
+        assertFalse(ApplyLock.mutex.isLocked)
+    }
+
+    @Test
+    fun manualApplySkipsSilentlyOnColdRoot() = runTest {        val h = harness(FakeCodecService())
         advanceUntilIdle()
         h.raw.emit("root")   // 持久选择 Root 但本进程从未前台验证（冷 Root）
         advanceUntilIdle()

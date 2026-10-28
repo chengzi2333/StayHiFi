@@ -35,16 +35,33 @@ object ManualSelection {
     fun codecOptions(selectable: List<CodecConfig>): List<Int> =
         selectable.map { it.codecType }.distinct()
 
-    /** 编码器显示名，与首页身份佐证同口径（caps 或集佐证 vendor LHDC）。 */
-    fun codecLabel(codecType: Int, selectable: List<CodecConfig>): String =
-        Masks.codecName(codecType, Masks.capsRateMask(codecType, selectable))
+    /**
+     * 编码器显示名：当前 codec 优先用系统已裁决身份（如 "LHDC V3"，与首页同源）；
+     * 其余 codec 走 caps 或集佐证版。身份只属于其 nativeType，绝不借给它 codec 裸猜。
+     */
+    fun codecLabel(
+        codecType: Int,
+        selectable: List<CodecConfig>,
+        identity: CodecIdentity? = null,
+    ): String =
+        if (identity != null && codecType == identity.nativeType) identity.displayName
+        else Masks.codecName(codecType, Masks.capsRateMask(codecType, selectable))
 
     /**
      * 码率档家族判定：LDAC 为 AOSP 公共编号；LHDC V5（10）有真机实证；
      * 厂商段（0x10..0x1F）必须 caps 含 176.4/192k 位才认 LHDC——与
      * [Masks.codecName] 佐证版同一证据标准，不裸认厂商编号。
+     * Fix review：[identity] 为当前 codec 的系统已裁决身份（如 OPD 的 LHDC V3，
+     * caps 仅 48/96），可佐证当前 codec 归入 LDAC/LHDC 家族——身份只作增量佐证
+     * （只升不认的情况回落既有规则），且只对 identity.nativeType 生效。
      */
-    fun familyOf(codecType: Int, selectable: List<CodecConfig>): CodecFamily = when {
+    fun familyOf(
+        codecType: Int,
+        selectable: List<CodecConfig>,
+        identity: CodecIdentity? = null,
+    ): CodecFamily = when {
+        identity != null && codecType == identity.nativeType &&
+            identity.family in IDENTITY_PROVEN_FAMILIES -> identity.family
         codecType == LDAC_CODEC_TYPE -> CodecFamily.LDAC
         codecType == LHDC_VIVO_CODEC_TYPE -> CodecFamily.LHDC
         codecLabel(codecType, selectable) == "LHDC" -> CodecFamily.LHDC
@@ -85,7 +102,8 @@ object ManualSelection {
         codecType: Int,
         selectable: List<CodecConfig>,
         current: CodecConfig,
-    ): List<QualityOption> = when (familyOf(codecType, selectable)) {
+        identity: CodecIdentity? = null,
+    ): List<QualityOption> = when (familyOf(codecType, selectable, identity)) {
         CodecFamily.LDAC -> LDAC_QUALITY_VALUES.map { value ->
             QualityOption(Masks.qualityLabel(CodecFamily.LDAC, value) ?: value.toString(), value)
         }
@@ -149,13 +167,37 @@ object ManualSelection {
     }
 
     /**
+     * 码率档默认选中（Fix review：切 codec 后必须显式选中一个展示档位，
+     * 不得让 cs1 落到档位表之外）：同 codec 保留当前档（不可识别则回落自适应），
+     * 跨 codec 选该家族自适应档（两族阶梯末位恒为自适应）；无梯家族返回 null
+     * （UI 无展示档位，buildTarget 按同 codec 继承 / 跨 codec 置 0 的既有规则）。
+     */
+    fun defaultQualityCs1(
+        codecType: Int,
+        selectable: List<CodecConfig>,
+        current: CodecConfig,
+        identity: CodecIdentity? = null,
+    ): Long? {
+        val options = qualityOptions(codecType, selectable, current, identity)
+        if (options.isEmpty()) return null
+        if (codecType == current.codecType) {
+            options.firstOrNull { it.cs1 == current.cs1 }?.let { return it.cs1 }
+        }
+        return options.last().cs1
+    }
+
+    /**
      * 恢复系统自适应：rate/bits/channel 全通配（0=协议栈自选），priority=0
      * （CODEC_PRIORITY_DEFAULT），cs1 取已知家族自适应档（LDAC=1003、
      * LHDC=保留高位的 9 档），未知家族保持 current.cs1 不臆造。
      * 目标不含具体档位，天然不违反同条目证明规则。
      */
-    fun adaptiveTarget(current: CodecConfig, selectable: List<CodecConfig>): CodecConfig {
-        val cs1 = when (familyOf(current.codecType, selectable)) {
+    fun adaptiveTarget(
+        current: CodecConfig,
+        selectable: List<CodecConfig>,
+        identity: CodecIdentity? = null,
+    ): CodecConfig {
+        val cs1 = when (familyOf(current.codecType, selectable, identity)) {
             CodecFamily.LDAC -> LDAC_QUALITY_ADAPTIVE
             CodecFamily.LHDC -> lhdcQualityCs1(current.cs1, LHDC_QUALITY_ADAPTIVE_INDEX)
             else -> current.cs1
@@ -184,6 +226,8 @@ object ManualSelection {
     private const val CHANNEL_STEREO = 2
     private val VALID_CHANNELS = setOf(CHANNEL_MONO, CHANNEL_STEREO)
     private val LDAC_QUALITY_VALUES = listOf(1000L, 1001L, 1002L, 1003L)
+    /** 身份佐证只接纳码率梯相关家族（LDAC/LHDC），其余家族不因此获得档位。 */
+    private val IDENTITY_PROVEN_FAMILIES = setOf(CodecFamily.LDAC, CodecFamily.LHDC)
     /** 与拉满写入同一 priority 语义（最高偏好），读回判定不看 priority。 */
     private const val MANUAL_PRIORITY = 1_000_000
 }

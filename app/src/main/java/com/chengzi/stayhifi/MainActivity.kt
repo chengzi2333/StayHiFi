@@ -1708,7 +1708,11 @@ class MainActivity : ComponentActivity() {
                             fullBars = fullBars,
                             targetStatus = targetAssessment.status,
                             manualActive = manualActive,
-                            manualEditor = ManualEditorInput(current, selectable),
+                            // 系统已裁决身份随数据面进弹层：佐证当前 codec 家族/显示名
+                            // （OPD 这类 LHDC V3 caps 仅 48/96 的自救场景）
+                            manualEditor = ManualEditorInput(
+                                current, selectable, presentation.identity,
+                            ),
                         )
                         connectedMac = mac
                         connectedName = name
