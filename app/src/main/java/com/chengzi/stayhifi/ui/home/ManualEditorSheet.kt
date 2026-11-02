@@ -39,7 +39,18 @@ data class ManualEditorInput(
     val current: CodecConfig,
     val selectable: List<CodecConfig>,
     val identity: CodecIdentity? = null,
-)
+    /** 当前会话已被系统读回明确拒绝的完整组合；其他组合仍可尝试。 */
+    val rejectedTargets: Set<CodecConfig> = emptySet(),
+    /** 持久偏好仅作编辑器初值；current 仍是当前连接的真实读回。 */
+    val preferredTarget: CodecConfig? = null,
+) {
+    fun isRejected(target: CodecConfig?): Boolean = target != null && target in rejectedTargets
+
+    fun editorTarget(): CodecConfig = preferredTarget ?: current
+
+    fun withRejectedTargets(targets: Set<CodecConfig>): ManualEditorInput =
+        copy(rejectedTargets = targets)
+}
 
 /**
  * 「自定义音质」底部弹层：编码器/采样率/位深/码率四参数手调。
@@ -59,6 +70,7 @@ fun ManualEditorSheet(
     val current = input.current
     val selectable = input.selectable
     val identity = input.identity
+    val editorTarget = input.editorTarget()
 
     // 编码器选项来自 selectable；当前 codec 未被上报时补在最前（live 配置本身是证据）
     val codecOptions = remember(selectable, current.codecType) {
@@ -67,14 +79,14 @@ fun ManualEditorSheet(
         else listOf(current.codecType) + fromSelectable
     }
 
-    var codec by remember { mutableIntStateOf(current.codecType) }
-    var rate by remember { mutableIntStateOf(current.sampleRate) }
-    var bits by remember { mutableIntStateOf(current.bitsPerSample) }
+    var codec by remember { mutableIntStateOf(editorTarget.codecType) }
+    var rate by remember { mutableIntStateOf(editorTarget.sampleRate) }
+    var bits by remember { mutableIntStateOf(editorTarget.bitsPerSample) }
     // 码率档恒为显式选中的展示档位：同 codec 保留当前档，跨 codec 默认该家族自适应档，
     // 绝不让 cs1 静默落到档位表之外（Fix review）
     var qualityCs1 by remember {
         mutableStateOf(
-            ManualSelection.defaultQualityCs1(current.codecType, selectable, current, identity),
+            ManualSelection.defaultQualityCs1(editorTarget.codecType, selectable, editorTarget, identity),
         )
     }
 
@@ -115,6 +127,7 @@ fun ManualEditorSheet(
         qualityCs1 = qualityCs1, selectable = selectable,
     )
     val adaptive = ManualSelection.adaptiveTarget(current, selectable, identity)
+    val targetRejected = input.isRejected(target)
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -188,21 +201,23 @@ fun ManualEditorSheet(
             }
 
             Text(
-                text = if (target != null) {
-                    val qualityLabel = qualityCs1?.let {
-                        Masks.qualityLabel(ManualSelection.familyOf(codec, selectable, identity), it)
+                text = when {
+                    targetRejected -> "当前连接未接受该组合，参数未变。请换档或恢复自适应"
+                    target != null -> {
+                        val qualityLabel = qualityCs1?.let {
+                            Masks.qualityLabel(ManualSelection.familyOf(codec, selectable, identity), it)
+                        }
+                        val base = ManualSelection.codecLabel(codec, selectable, identity) +
+                            "·" + Masks.rateHz(rate) + "·" + Masks.bitsDepth(bits)
+                        "将应用：" + if (qualityLabel != null) "$base·$qualityLabel" else base
                     }
-                    val base = ManualSelection.codecLabel(codec, selectable, identity) +
-                        "·" + Masks.rateHz(rate) + "·" + Masks.bitsDepth(bits)
-                    "将应用：" + if (qualityLabel != null) "$base·$qualityLabel" else base
-                } else {
-                    "当前组合未被连接能力证明，无法应用"
+                    else -> "当前组合未被连接能力证明，无法应用"
                 },
                 style = MaterialTheme.typography.bodySmall,
-                color = if (target != null) {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                } else {
+                color = if (targetRejected || target == null) {
                     MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
 
@@ -221,7 +236,7 @@ fun ManualEditorSheet(
                 }
                 Button(
                     onClick = { target?.let(onApply) },
-                    enabled = !applying && target != null,
+                    enabled = !applying && target != null && !targetRejected,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(if (applying) "应用中…" else "应用")

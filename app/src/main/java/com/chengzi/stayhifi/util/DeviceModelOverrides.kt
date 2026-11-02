@@ -12,4 +12,11 @@ internal val DEVICE_MODEL_OVERRIDES: Map<String, String> = mapOf(
     // NX741J：用户提供的纠正（spec §2.2/§10.2）。现有 Google 目录只到
     // "nubia Z80"，无公开数据确认 Ultra 后缀——这是人工纠正，不代表 Google 口径。
     "NX741J" to "nubia Z80 Ultra",
+    // 荣耀 Magic9 系列（2026-09-28 发布）：Google 设备清单滞后未收录
+    // （2026-10-28 实测线上 CSV 仅到 Magic9 Lite+），型号对应关系来自荣耀官网
+    // 与入网信息（MLY=Molly 标准版，MLM=超能版，WKL=Twinkle Pro Max）。
+    "MLY-AN00" to "HONOR Magic9",
+    "MLM-AN00" to "HONOR Magic9 超能版",
+    "WKL-AN20" to "HONOR Magic9 Pro Max",
+    "WKL-AN80" to "HONOR Magic9 Pro Max",
 )

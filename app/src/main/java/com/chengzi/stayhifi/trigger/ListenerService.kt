@@ -21,6 +21,8 @@ import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.data.SettingsRepository
+import com.chengzi.stayhifi.device.LocalHeadsetResult
+import com.chengzi.stayhifi.device.LocalHeadsetSource
 import com.chengzi.stayhifi.notify.Notifier
 import com.chengzi.stayhifi.shell.ProviderCoordinator
 import com.chengzi.stayhifi.shell.ProviderKind
@@ -64,6 +66,7 @@ class ListenerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var settings: SettingsRepository
     private lateinit var notifier: Notifier
+    private val localHeadsetSource by lazy { LocalHeadsetSource(this) }
 
     /**
      * Task D8：进程级 [ProviderCoordinator]（lease/probe 统一入口，设计 §11.3）。
@@ -286,6 +289,32 @@ class ListenerService : Service() {
             return
         }
         try {
+            // Root/ROM 组合可能 connectedDevices=[]，但本机普通 proxy 已能给出真实 MAC。
+            // 优先走与首页相同的本机来源，避免耳机先于 App 连接时被 Root 空枚举卡死。
+            val localDevices = localHeadsetSource.connectedHeadsets()
+            when {
+                !localDevices.isNullOrEmpty() -> {
+                    // 与旧载体枚举一致：启动补触发覆盖全部已连接 A2DP 设备，不能只处理 first。
+                    for (headset in localDevices) {
+                        LogStore.log("启动补触发：发现本机已连接设备 ${headset.name} (${headset.mac})，提交统一触发入口")
+                        try {
+                            ApplyTriggers.run(
+                                this@ListenerService, headset.mac, headset.name,
+                                force = false, source = TriggerSource.STARTUP,
+                            )
+                        } catch (t: Throwable) {
+                            LogStore.log("启动补触发 ApplyWorker 未捕获异常: $t")
+                        }
+                    }
+                    return
+                }
+                localDevices?.isEmpty() == true -> {
+                    // getProfileConnectionState 与 proxy 枚举来自两个 API；本样本已证明
+                    // 二者可能矛盾。空列表不能直接抵消系统 CONNECTED，继续走载体复核。
+                    LogStore.log("启动补触发：本机设备列表为空，与系统 A2DP 状态不一致，改用载体复核")
+                }
+                else -> Unit // 本机读不到才回退旧特权枚举
+            }
             val devices = withTimeoutOrNull(CARRIER_READ_TIMEOUT_MS) {
                 val lease = coordinator.acquire(
                     ProviderOwner("listener-startup"), ProviderSource.LISTENER)

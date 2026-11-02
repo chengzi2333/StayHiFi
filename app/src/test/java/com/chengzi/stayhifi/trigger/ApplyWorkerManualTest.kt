@@ -72,6 +72,7 @@ class ApplyWorkerManualTest {
             return writeResponder(configJson)
         }
         override fun dumpBtState(): String = """{"dump":""}"""
+        override fun dumpRealtimeDiagnostics(codecName: String?): String = com.chengzi.stayhifi.shell.EMPTY_REALTIME_DUMP
         override fun destroy() = Unit
         override fun asBinder(): IBinder? = null
     }
@@ -273,6 +274,42 @@ class ApplyWorkerManualTest {
             .applyManual(mac, "buds", CodecConfig(4, 1_000_000, 8, 1, 2, 1002L, 0L, 0L, 0L))
 
         assertFalse(ok)
+        assertNull(VerifiedTargetStore.targetFor(mac))
+    }
+
+    @Test
+    fun stackReadbackMismatchReturnsRejected() = runTest {
+        val h = harness(
+            FakeCodecService(writeResponder = { configJson ->
+                val written = CodecConfig.fromJson(configJson!!)
+                """{"applied":true,"final":${written.copy(cs1 = 0x8009L).toJson()}}"""
+            }),
+        )
+        advanceUntilIdle()
+        h.raw.emit("shizuku")
+        advanceUntilIdle()
+        val target = CodecConfig(19, 1_000_000, 32, 2, 2, 0x8007L, 0L, 0L, 0L)
+
+        val result = worker(h, LocalA2dpState.CONNECTED, mutableListOf())
+            .applyManualDetailed(mac, "Enco X3", target)
+
+        assertEquals(ManualApplyResult.REJECTED_BY_STACK, result)
+        assertEquals(3, h.service.writeCalls.get())
+        assertNull(VerifiedTargetStore.targetFor(mac))
+    }
+
+    @Test
+    fun missingFinalDoesNotClaimStackRejected() = runTest {
+        val h = harness(FakeCodecService(writeResponder = { """{"applied":true}""" }))
+        advanceUntilIdle()
+        h.raw.emit("shizuku")
+        advanceUntilIdle()
+        val target = CodecConfig(19, 1_000_000, 32, 2, 2, 0x8007L, 0L, 0L, 0L)
+
+        val result = worker(h, LocalA2dpState.CONNECTED, mutableListOf())
+            .applyManualDetailed(mac, "Enco X3", target)
+
+        assertEquals(ManualApplyResult.FAILED, result)
         assertNull(VerifiedTargetStore.targetFor(mac))
     }
 

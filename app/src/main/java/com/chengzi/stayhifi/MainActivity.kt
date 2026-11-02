@@ -60,17 +60,21 @@ import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
 import com.chengzi.stayhifi.codec.DeviceProfile
 import com.chengzi.stayhifi.codec.DiagnosticSource
 import com.chengzi.stayhifi.codec.DiagnosticTrigger
+import com.chengzi.stayhifi.codec.ManualRejectionStore
 import com.chengzi.stayhifi.codec.Masks
+import com.chengzi.stayhifi.codec.PlaybackDiagnosticsController
 import com.chengzi.stayhifi.codec.RealtimeDisplay
 import com.chengzi.stayhifi.codec.VendorDiagnosticContext
 import com.chengzi.stayhifi.codec.VendorDiagnosticMetadata
 import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.codec.VendorDiagnosticGate
 import com.chengzi.stayhifi.codec.VendorStackDiagnosticRecorder
+import com.chengzi.stayhifi.data.ApplyMode
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.device.ConnectionPresentation
 import com.chengzi.stayhifi.device.LocalHeadset
+import com.chengzi.stayhifi.device.LocalHeadsetDiagnosticLogger
 import com.chengzi.stayhifi.device.LocalHeadsetResult
 import com.chengzi.stayhifi.device.LocalHeadsetSource
 import com.chengzi.stayhifi.notify.QsTileService
@@ -85,6 +89,7 @@ import com.chengzi.stayhifi.shell.RootVerificationResult
 import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyTriggers
 import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.ManualApplyResult
 import com.chengzi.stayhifi.trigger.TriggerSource
 import com.chengzi.stayhifi.trigger.TargetAssessment
 import com.chengzi.stayhifi.trigger.HeadsetEvents
@@ -94,6 +99,7 @@ import com.chengzi.stayhifi.ui.devices.DevicesScreen
 import com.chengzi.stayhifi.ui.devices.DevicesUiState
 import com.chengzi.stayhifi.ui.devices.DeviceItemUi
 import com.chengzi.stayhifi.ui.home.HomeAction
+import com.chengzi.stayhifi.ui.home.HomeConnectionMigration
 import com.chengzi.stayhifi.ui.home.HomeScreen
 import com.chengzi.stayhifi.ui.home.HomeStateMerge
 import com.chengzi.stayhifi.ui.home.HomeUiState
@@ -207,6 +213,7 @@ class MainActivity : ComponentActivity() {
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
     // v1.2.2：本机 A2DP 设备来源（普通系统 API，无需特权）——连接事实的第一裁决来源。
     private val localHeadsetSource by lazy { LocalHeadsetSource(this) }
+    private val localHeadsetDiagnostics = LocalHeadsetDiagnosticLogger { LogStore.log(it) }
 
     // ---- Onboarding 状态 ----
     private var onboardingState by mutableStateOf(OnboardingUiState())
@@ -235,6 +242,8 @@ class MainActivity : ComponentActivity() {
      * 任何路径都不据此跨重连重放手动配置，自动拉满默认目标不受影响。
      */
     private var manualSession: Pair<String, CodecConfig>? = null
+    /** 只保留当前连接会话的栈明确拒绝组合；普通失败绝不写入。 */
+    private val manualRejections = ManualRejectionStore()
 
     // ---- 底部导航 / 日志页（Task 6） ----
     private var selectedTab by mutableStateOf(0)
@@ -870,6 +879,7 @@ class MainActivity : ComponentActivity() {
         when (action) {
             LogsAction.Copy -> copyLogs()
             LogsAction.Clear -> {
+                (application as StayHiFiApp).playbackDiagnostics.clear()
                 LogStore.clear()
                 resetVendorDiagnostics()
                 ApplyWorker.resetVendorDiagnostics()
@@ -934,7 +944,10 @@ class MainActivity : ComponentActivity() {
         drainSuppressedDiagnosticCount()
         // Task D12：快照前 flush Root gate，被抑制的重复计数随 suppressedCount 带出（§11.6）。
         rootTransport.logger.flushSuppressed()
-        val sanitized = feedbackLogSanitizer.sanitize(LogStore.snapshot())
+        val sanitized = feedbackLogSanitizer.sanitize(
+            LogStore.snapshot(),
+            (application as StayHiFiApp).playbackDiagnostics.store.snapshot(),
+        )
         if (sanitized.isEmpty()) {
             Toast.makeText(this, "暂无日志可复制", Toast.LENGTH_SHORT).show()
             return
@@ -1145,8 +1158,8 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * v1.2.2 修复：Connect 页「刷新」——本机 API 先判连接（BluetoothManager A2DP，
-     * 无需特权），特权 dump/read/presentation 只作参数增强；未授权、空列表、
+     * v1.2.2.1 修复：Connect 页「刷新」——本机 BluetoothAdapter A2DP proxy 先判连接
+     * （无需特权），特权 dump/read/presentation 只作参数增强；未授权、空列表、
      * read error、解析失败都不能覆盖本机已连接。本机读不到（UNKNOWN 不等于断开）
      * 才回退旧特权全路径。
      */
@@ -1154,6 +1167,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 val local = withContext(Dispatchers.IO) { localHeadsetSource.current() }
+                localHeadsetDiagnostics.log(local)
                 when (local) {
                     is LocalHeadsetResult.Connected -> onLocalHeadsetConnected(local.headset)
                     LocalHeadsetResult.Disconnected -> {
@@ -1468,22 +1482,49 @@ class MainActivity : ComponentActivity() {
     private fun onApplyManual(target: CodecConfig, adaptive: Boolean) {
         val mac = connectedMac ?: return
         val name = connectedName
+        val session = manualRejections.generation
         homeState = homeState.copy(applying = true)
         lifecycleScope.launch {
             try {
-                val ok = ApplyWorker(this@MainActivity).applyManual(mac, name, target)
-                if (ok) {
-                    manualSession = if (adaptive) null else (mac to target)
-                    LogStore.log(
-                        if (adaptive) "已恢复系统自适应: ${name ?: mac}"
-                        else "自定义音质已应用: ${name ?: mac} → ${target.summary()}",
-                    )
-                } else {
-                    LogStore.log("自定义音质应用失败: ${name ?: mac} → ${target.summary()}")
-                    Toast.makeText(
-                        this@MainActivity, "应用失败，详见日志页", Toast.LENGTH_SHORT,
-                    ).show()
+                val result = ApplyWorker(this@MainActivity).applyManualDetailed(mac, name, target)
+                if (!manualRejections.isCurrent(session)) {
+                    LogStore.log("自定义结果属于旧连接会话，忽略状态写回: ${name ?: mac}")
+                    return@launch
                 }
+                when (result) {
+                    ManualApplyResult.APPLIED -> {
+                        manualSession = if (adaptive) null else (mac to target)
+                        if (adaptive) {
+                            (application as StayHiFiApp).applyPreferences.setSystemAdaptive(mac)
+                        } else {
+                            (application as StayHiFiApp).applyPreferences.setCustom(mac, target)
+                        }
+                        if (adaptive) manualRejections.clear(mac)
+                        else manualRejections.remove(mac, target)
+                        LogStore.log(
+                            if (adaptive) "已恢复系统自适应: ${name ?: mac}"
+                            else "自定义音质已应用: ${name ?: mac} → ${target.summary()}",
+                        )
+                    }
+                    ManualApplyResult.REJECTED_BY_STACK -> {
+                        (application as StayHiFiApp).applyPreferences.setSystemAdaptive(mac, target)
+                        manualRejections.record(mac, target)
+                        LogStore.log("当前连接未接受自定义组合: ${name ?: mac} → ${target.summary()}")
+                        Toast.makeText(
+                            this@MainActivity,
+                            "当前连接未接受该组合，参数未变。请换档或恢复自适应",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    ManualApplyResult.FAILED -> {
+                        LogStore.log("自定义音质应用失败: ${name ?: mac} → ${target.summary()}")
+                        Toast.makeText(
+                            this@MainActivity, "应用失败，详见日志页", Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
+                // 立即更新编辑器快照；不能等下一次成功的特权 readHomeState 才禁止重复提交。
+                syncManualRejections(mac)
             } catch (t: Throwable) {
                 LogStore.log("自定义音质应用失败: $t")
                 Toast.makeText(
@@ -1545,7 +1586,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var refreshGeneration = 0L
 
     /**
-     * v1.2.2 修复：本机普通 API（BluetoothManager A2DP connectedDevices）先做连接事实裁决，
+     * v1.2.2.1 修复：本机普通 API（BluetoothAdapter A2DP proxy）先做连接事实裁决，
      * 特权 dump/read 只作参数增强——特权未就绪/读取失败不再把系统蓝牙已连接误判为「未连接」。
      *  - Connected              → refreshHomeConnected：先落耳机名，再尽力增强参数；
      *  - Disconnected           → 本机确认无 A2DP 连接：清空连接态，廉价 probe 顺带维护红条事实；
@@ -1555,6 +1596,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             val gen = ++refreshGeneration
             val local = withContext(Dispatchers.IO) { localHeadsetSource.current() }
+            localHeadsetDiagnostics.log(local)
             if (gen != refreshGeneration) return@launch
             when (local) {
                 is LocalHeadsetResult.Connected -> refreshHomeConnected(gen, local.headset)
@@ -1568,6 +1610,7 @@ class MainActivity : ComponentActivity() {
                     )
                     connectedMac = null
                     connectedName = null
+                    resetHomeConnectionSession()
                     // 未连接时没有 3s 轮询，廉价 probe 仅维护红条事实（不记未授权日志）。
                     val check = withContext(Dispatchers.IO) {
                         coordinator.probeSelected(ProviderSource.SETTINGS)
@@ -1589,13 +1632,8 @@ class MainActivity : ComponentActivity() {
      */
     private suspend fun refreshHomeConnected(gen: Long, headset: LocalHeadset) {
         if (gen != refreshGeneration) return
-        // 设备变化（换机/同名不同 MAC/首次连接）立即作废旧参数并清手动会话——
-        // 新设备读回完成前不得展示上一台参数，也不得让 Apply/自定义对其可用。
-        val merged = HomeStateMerge.onLocalConnected(homeState, headset, connectedMac)
-        homeState = merged.state
-        if (merged.deviceChanged) manualSession = null
-        connectedMac = headset.mac
-        connectedName = headset.name
+        // 本机与特权回退共用同一连接迁移入口，任何换机都同时作废旧手动状态与代次。
+        beginHomeConnection(headset)
         // Task D9：只读 probe 判定当前选择是否可 bind（Root=READY 复查，
         // Shizuku=pingBinder/checkSelfPermission），绝不 requestPermission/openShell。
         val check = withContext(Dispatchers.IO) {
@@ -1667,6 +1705,7 @@ class MainActivity : ComponentActivity() {
                 )
                 connectedMac = null
                 connectedName = null
+                resetHomeConnectionSession()
                 return
             }
             // 未授权（running 但未 granted）：保持原行为——先消红条，去重日志后跳过读取
@@ -1718,6 +1757,7 @@ class MainActivity : ComponentActivity() {
                     }
                     val mac = arr.getJSONObject(0).getString("mac")
                     val name = arr.getJSONObject(0).getString("name")
+                    beginHomeConnection(LocalHeadset(name = name, mac = mac))
                     readHomeState(gen, lease, svc, mac, name)
                 }
             } finally {
@@ -1741,6 +1781,34 @@ class MainActivity : ComponentActivity() {
         )
         connectedMac = null
         connectedName = null
+        resetHomeConnectionSession()
+    }
+
+    /** 本机/特权路径共用：设备变化时同时清理 UI 旧参数、手动会话与连接代次。 */
+    private fun beginHomeConnection(headset: LocalHeadset) {
+        val merged = HomeConnectionMigration.migrate(
+            state = homeState,
+            headset = headset,
+            connectedMac = connectedMac,
+            resetSession = ::resetHomeConnectionSession,
+        )
+        homeState = merged.state
+        connectedMac = headset.mac
+        connectedName = headset.name
+    }
+
+    /** 断连/换机会话边界；clearAll 同时递增代次，使旧异步结果无法写回。 */
+    private fun resetHomeConnectionSession() {
+        manualSession = null
+        manualRejections.clearAll()
+    }
+
+    /** 手动结果返回当帧即同步拒绝快照，慢读回/读回失败也不会留下重复提交窗口。 */
+    private fun syncManualRejections(mac: String) {
+        val editor = homeState.manualEditor ?: return
+        homeState = homeState.copy(
+            manualEditor = editor.withRejectedTargets(manualRejections.forMac(mac)),
+        )
     }
 
     /**
@@ -1827,6 +1895,14 @@ class MainActivity : ComponentActivity() {
         val capsMask = Masks.capsRateMask(current.codecType, selectable)
         val codecName = presentation.identity.displayName
         val isMusicActive = audioManager.isMusicActive
+        val diagnostics = (application as StayHiFiApp).playbackDiagnostics
+        if (isMusicActive) {
+            diagnostics.onPlaybackSignal(
+                PlaybackDiagnosticsController.CaptureSignature(mac, current, lease.generation),
+            )
+        } else {
+            diagnostics.onPlaybackStopped()
+        }
         var realtime = BtStateParser.realtimeDisplay(isMusicActive, state = null)
         // 保留本次 dump 原文与 parsed state/result，未知 vendor 编码器诊断复用同一次返回，不再开 dumpsys。
         var btDump: String? = null
@@ -1935,9 +2011,12 @@ class MainActivity : ComponentActivity() {
         if (gen != refreshGeneration || !lease.isCurrent()) return
         // 自定义音质会话：读回与手动目标一致才保持「自定义」展示；
         // 不一致（重连/系统改回/重新拉满）即失效，绝不跨重连重放。
+        val preference = (application as StayHiFiApp).applyPreferences.get(mac)
+        val preferredActive = preference.mode == ApplyMode.CUSTOM &&
+            preference.lastTarget?.let { ApplyPolicy.matches(it, current) } == true
         val manual = manualSession
-        val manualActive = manual != null && manual.first == mac &&
-            ApplyPolicy.matches(manual.second, current)
+        val manualActive = preferredActive || (manual != null && manual.first == mac &&
+            ApplyPolicy.matches(manual.second, current))
         if (manual != null && !manualActive) manualSession = null
         homeState = homeState.copy(
             headsetName = name,
@@ -1955,7 +2034,14 @@ class MainActivity : ComponentActivity() {
             // 系统已裁决身份随数据面进弹层：佐证当前 codec 家族/显示名
             // （OPD 这类 LHDC V3 caps 仅 48/96 的自救场景）
             manualEditor = ManualEditorInput(
-                current, selectable, presentation.identity,
+                current = current,
+                selectable = selectable,
+                identity = presentation.identity,
+                rejectedTargets = manualRejections.forMac(mac),
+                preferredTarget = preference.lastTarget?.takeIf { target ->
+                    target.codecType == current.codecType ||
+                        selectable.any { it.codecType == target.codecType }
+                },
             ),
             // v1.2.2：读回成功即参数可用（Apply/自定义恢复可用）。
             paramsAvailable = true,
@@ -1971,6 +2057,7 @@ class MainActivity : ComponentActivity() {
         homeState = homeState.copy(applying = true)
         lifecycleScope.launch {
             try {
+                (application as StayHiFiApp).applyPreferences.setAutoMax(mac)
                 // 对抗审查 I2：手动入口传 force=true，不被 autoApply=false 静默拦截
                 ApplyTriggers.run(
                     this@MainActivity, mac, name,

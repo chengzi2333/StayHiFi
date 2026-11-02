@@ -1,6 +1,7 @@
 package com.chengzi.stayhifi.trigger
 
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.Negotiation
 
 /**
@@ -74,16 +75,18 @@ object ApplyPolicy {
             val supporting = compatible.filter { it.sampleRate and rate == rate && it.bitsPerSample > 0 }
             if (supporting.isEmpty()) continue
             val bits = supporting.maxOf { highestBit(it.bitsPerSample) }
-            val target = current.copy(
+            val legacyTarget = current.copy(
                 priority = 1_000_000,
                 sampleRate = rate,
                 bitsPerSample = bits,
                 cs1 = BEST_CS1[current.codecType] ?: current.cs1,
             )
+            val target = raisedLhdcTarget(legacyTarget, selectable) ?: legacyTarget
+            val legacyCandidates = Negotiation.descending(legacyTarget, selectable)
             return TargetAssessment(
                 TargetAssessment.Status.COMPLETE,
                 target,
-                Negotiation.descending(target, selectable),
+                if (target == legacyTarget) legacyCandidates else listOf(target) + legacyCandidates,
             )
         }
         val degradedTarget = deriveTarget(current, selectable)
@@ -92,6 +95,21 @@ object ApplyPolicy {
             degradedTarget,
             Negotiation.descending(degradedTarget),
         )
+    }
+
+    /** 仅新提升的固定 LHDC 档要求严格 cs1 读回；自适应与既有目标保持原语义。 */
+    fun isRaisedLhdcQuality(
+        current: CodecConfig,
+        candidate: CodecConfig,
+        selectable: List<CodecConfig>,
+    ): Boolean = current.cs1 != LHDC_BEST_CS1 &&
+        candidate.cs1 == LHDC_BEST_CS1 && raisedLhdcTarget(current, selectable) != null
+
+    private fun raisedLhdcTarget(current: CodecConfig, selectable: List<CodecConfig>): CodecConfig? {
+        if (BEST_CS1[current.codecType] != null || current.cs1 == LHDC_ADAPTIVE_CS1) return null
+        val capsMask = Masks.capsRateMask(current.codecType, selectable)
+        if (Masks.qualityLabel(current.codecType, current.cs1, capsMask) == null) return null
+        return current.copy(cs1 = LHDC_BEST_CS1)
     }
 
     /**
@@ -107,6 +125,8 @@ object ApplyPolicy {
     private const val LDAC_QUALITY_HIGH = 1000L
     private const val LHDC_VIVO_CODEC_TYPE = 10
     private const val LHDC_VIVO_BEST_CS1 = 50888712L
+    private const val LHDC_BEST_CS1 = 0x8008L
+    private const val LHDC_ADAPTIVE_CS1 = 0x8009L
 
     /** 各编码器已知最佳 cs1 档位表。 */
     private val BEST_CS1 = mapOf(

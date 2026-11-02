@@ -66,6 +66,7 @@ class RootTransportBindTest {
         override fun readConfig(mac: String?): String = "{}"
         override fun writeConfig(mac: String?, configJson: String?): String = "{}"
         override fun dumpBtState(): String = "{}"
+        override fun dumpRealtimeDiagnostics(codecName: String?): String = com.chengzi.stayhifi.shell.EMPTY_REALTIME_DUMP
         override fun destroy() = Unit
         override fun asBinder(): IBinder? = null
     }

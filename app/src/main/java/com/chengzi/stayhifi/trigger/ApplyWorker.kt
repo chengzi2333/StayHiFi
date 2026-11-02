@@ -28,6 +28,7 @@ import com.chengzi.stayhifi.codec.VendorDiagnosticMetadata
 import com.chengzi.stayhifi.codec.VendorDiagnostics
 import com.chengzi.stayhifi.codec.VendorDiagnosticGate
 import com.chengzi.stayhifi.codec.VendorStackDiagnosticRecorder
+import com.chengzi.stayhifi.data.ApplyPreferences
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.notify.Notifier
@@ -42,6 +43,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+
+/** 手动写入结果：只有有效 final 与显式目标不符才构成栈拒绝证据。 */
+enum class ManualApplyResult { APPLIED, REJECTED_BY_STACK, FAILED }
 
 /**
  * 自动拉满执行器（设计 §4.3 的 goAsync 流程）：
@@ -80,6 +84,7 @@ class ApplyWorker(context: Context) {
      * 任何 provider（设计 §11.3/§11.4.5）。
      */
     internal var coordinator: ProviderCoordinator? = null
+    internal var applyPreferences: ApplyPreferences? = null
 
     /**
      * 生产恒非 null（Application 即 StayHiFiApp）；null 只出现在未注入 Coordinator 的
@@ -177,7 +182,7 @@ class ApplyWorker(context: Context) {
         if (ApplyLock.mutex.isLocked) {
             log("等待上一次拉满完成…")
         }
-        connectionGuard.run(target) {
+        connectionGuard.run(target, awaitA2dp = true) {
             runWithLease(target, name, force)
         }
     }
@@ -300,7 +305,7 @@ class ApplyWorker(context: Context) {
             if (!force && profile != null && !profile.autoApply) {
                 log("已有档案但 autoApply=false，跳过写入")
             } else {
-                applyDerived(
+                applyPreferredOrAuto(
                     lease, mac, name, settled.current, settled.selectable,
                     settled.presentation.identity,
                 )
@@ -317,54 +322,66 @@ class ApplyWorker(context: Context) {
      * 首页「自定义音质」写入口径：与自动拉满同走 [connectionGuard] 入口锁 +
      * 锁后断连复查 + [applyGate] lease（Root 路径落在 RootTransport IPC Mutex 内）。
      * 目标由调用方按 [com.chengzi.stayhifi.codec.ManualSelection] 同条目证明规则构造，
-     * 本方法原样透传不改写用户选择；不写档案、不改 autoApply、不触碰自动拉满
-     * 默认目标，手动配置也不持久化（不跨重连重放）。
+     * 本方法原样透传不改写用户选择；不写档案、不改 autoApply。成功偏好由 MainActivity
+     * 持久化为 CUSTOM，明确拒绝则记为 SYSTEM_ADAPTIVE 并保留目标供手动重试。
      *
      * 读回验证沿用 [writeVerified] 语义（codecType/rate/bits 一致为准，cs1 被栈
      * 规范化只告警）。成功目标记入 [VerifiedTargetStore]——它同样是已验证生效
      * 目标，否则 30s 轮询会把用户主动降档误报成「系统改回参数」；失败不记。
      * 冷 Root/通道不可用非交互跳过：只记日志返回 false（前台 UI 给反馈）。
      */
-    suspend fun applyManual(mac: String, name: String?, target: CodecConfig): Boolean {
+    suspend fun applyManual(mac: String, name: String?, target: CodecConfig): Boolean =
+        applyManualDetailed(mac, name, target) == ManualApplyResult.APPLIED
+
+    /** 首页专用详细结果；现有 Boolean 调用方继续只关心是否生效。 */
+    suspend fun applyManualDetailed(
+        mac: String,
+        name: String?,
+        target: CodecConfig,
+    ): ManualApplyResult {
         log("手动应用自定义音质: ${name ?: "?"} ($mac) → ${target.summary()}")
-        var ok = false
+        var result = ManualApplyResult.FAILED
         connectionGuard.run(mac) {
-            ok = manualWithLease(mac, name, target)
+            result = manualWithLease(mac, name, target)
         }
-        return ok
+        return result
     }
 
     /** 与 [runWithLease] 同一入口契约：锁后才 acquire，lease finally close，冷 Root 非交互跳过。 */
-    private suspend fun manualWithLease(mac: String, name: String?, target: CodecConfig): Boolean {
+    private suspend fun manualWithLease(
+        mac: String,
+        name: String?,
+        target: CodecConfig,
+    ): ManualApplyResult {
         val coordinator = requireCoordinator() ?: run {
             log("ProviderCoordinator 不可用，跳过手动应用")
-            return false
+            return ManualApplyResult.FAILED
         }
         return try {
-            var applied = false
+            var result = ManualApplyResult.FAILED
             applyGate.withLease(
                 coordinator, ProviderOwner("apply-manual"), ProviderSource.APPLY,
             ) { lease ->
-                applied = manualLocked(mac, name, target, lease)
+                result = manualLocked(mac, name, target, lease)
             }
-            applied
+            result
         } catch (e: ProviderAccessException) {
             log("特权通道不可用（${e.reason}），手动应用跳过，需前台确认通道状态")
-            false
+            ManualApplyResult.FAILED
         }
     }
 
     private suspend fun manualLocked(
         mac: String, name: String?, target: CodecConfig, lease: ProviderLease,
-    ): Boolean {
+    ): ManualApplyResult {
         return try {
             if (!waitForShell(lease)) {
                 log("Shizuku 未运行，手动应用跳过")
-                return false
+                return ManualApplyResult.FAILED
             }
             if (!hasPrivilege(lease)) {
                 log("特权授权已被撤销，手动应用跳过")
-                return false
+                return ManualApplyResult.FAILED
             }
             // 写前读一次 current：既作 origin 回填（后悔药数据源）又供日志身份；
             // 读失败只跳过回填/退回旧摘要，不阻断用户显式发起的写入。
@@ -381,17 +398,57 @@ class ApplyWorker(context: Context) {
             // codecType/rate/bits，用户明确选的码率档不能被栈静默换掉；
             // 恢复自适应等通配目标（rate/bits=0）保持宽松语义，不被严格校验锁死。
             val requireExactCs1 = target.sampleRate != 0 && target.bitsPerSample != 0
-            if (writeVerified(lease, mac, target, identity, requireExactCs1)) {
-                log("手动应用成功 ✓ ${summary(target, identity)}")
-                VerifiedTargetStore.record(mac, target)
-                true
-            } else {
-                log("手动应用失败: 读回与目标不一致 ${summary(target, identity)}")
-                false
+            val result = writeVerifiedDetailed(lease, mac, target, identity, requireExactCs1)
+            when (result) {
+                ManualApplyResult.APPLIED -> {
+                    log("手动应用成功 ✓ ${summary(target, identity)}")
+                    VerifiedTargetStore.record(mac, target)
+                }
+                ManualApplyResult.REJECTED_BY_STACK ->
+                    log("手动应用失败: 当前连接未接受目标 ${summary(target, identity)}")
+                ManualApplyResult.FAILED ->
+                    log("手动应用失败: 读回与目标不一致 ${summary(target, identity)}")
             }
+            result
         } catch (t: Throwable) {
             log("手动应用失败: $t")
-            false
+            ManualApplyResult.FAILED
+        }
+    }
+
+    /** 持久策略优先于自动拉满；只有明确栈拒绝才持久回退系统自适应。 */
+    private suspend fun applyPreferredOrAuto(
+        lease: ProviderLease, mac: String, name: String?,
+        current: CodecConfig, selectable: List<CodecConfig>, identity: CodecIdentity,
+    ) {
+        val store = applyPreferences ?: (appContext as? StayHiFiApp)?.applyPreferences
+        if (store == null) {
+            applyDerived(lease, mac, name, current, selectable, identity)
+            return
+        }
+        val result = PreferredApplyRunner(store).run(
+            mac = mac,
+            current = current,
+            applyAuto = { applyDerived(lease, mac, name, current, selectable, identity) },
+            applyCustom = { target -> manualLocked(mac, name, target, lease) },
+        )
+        when (result) {
+            PreferredApplyResult.SKIP_ADAPTIVE ->
+                log("设备已记住系统自适应，跳过自动拉满: mac=$mac")
+            PreferredApplyResult.CUSTOM_ALREADY_ALIGNED -> {
+                log("当前配置已符合自定义偏好，跳过重复写入")
+                VerifiedTargetStore.record(mac, current)
+                notifyResult("自定义已恢复", "${name ?: mac} → ${summary(current, identity)}")
+            }
+            PreferredApplyResult.CUSTOM_APPLIED ->
+                notifyResult("自定义已恢复", "${name ?: mac} 已恢复自定义参数")
+            PreferredApplyResult.CUSTOM_REJECTED -> {
+                log("自定义恢复被拒，已记住系统自适应: mac=$mac")
+                notifyResult("已回退系统自适应", "${name ?: mac}：当前连接未接受自定义组合")
+            }
+            PreferredApplyResult.CUSTOM_FAILED ->
+                log("自定义恢复失败，保留偏好并跳过自动拉满: mac=$mac")
+            PreferredApplyResult.AUTO_MAX -> Unit
         }
     }
 
@@ -412,7 +469,8 @@ class ApplyWorker(context: Context) {
             beforeFirstWrite = { recordOriginConfig(mac, current) },
             writeVerified = { candidate ->
                 log("写入候选: ${summary(candidate, identity)}")
-                val verified = writeVerified(lease, mac, candidate, identity)
+                val requireExactCs1 = ApplyPolicy.isRaisedLhdcQuality(current, candidate, selectable)
+                val verified = writeVerified(lease, mac, candidate, identity, requireExactCs1)
                 if (!verified) {
                     log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
                 }
@@ -422,7 +480,7 @@ class ApplyWorker(context: Context) {
         when (result) {
             is ApplyRunResult.AlreadyAligned -> {
                 val candidate = result.candidate
-                if (assessment.status == TargetAssessment.Status.COMPLETE) {
+                if (assessment.status == TargetAssessment.Status.COMPLETE && candidate == assessment.target) {
                     log("当前已是本机最高 ${summary(candidate, identity)}，跳过写入")
                     notifyResult("音质已拉满", "${name ?: mac} 已是本机最高音质输出")
                 } else {
@@ -435,7 +493,7 @@ class ApplyWorker(context: Context) {
             }
             is ApplyRunResult.Applied -> {
                 val candidate = result.candidate
-                if (assessment.status == TargetAssessment.Status.COMPLETE) {
+                if (assessment.status == TargetAssessment.Status.COMPLETE && candidate == assessment.target) {
                     notifyResult("音质拉满成功", "${name ?: mac} → ${summary(candidate, identity)}")
                 } else {
                     notifyResult("目标已确认", "${name ?: mac} 当前目标已确认（能力未完整）")
@@ -467,7 +525,15 @@ class ApplyWorker(context: Context) {
     private suspend fun writeVerified(
         lease: ProviderLease, mac: String, target: CodecConfig, identity: CodecIdentity,
         requireExactCs1: Boolean = false,
-    ): Boolean {
+    ): Boolean = writeVerifiedDetailed(lease, mac, target, identity, requireExactCs1) ==
+        ManualApplyResult.APPLIED
+
+    /** 手动详细结果：只有 final 明确存在且不匹配才记栈拒绝；缺 final/错误仍属普通失败。 */
+    private suspend fun writeVerifiedDetailed(
+        lease: ProviderLease, mac: String, target: CodecConfig, identity: CodecIdentity,
+        requireExactCs1: Boolean = false,
+    ): ManualApplyResult {
+        var sawStackRejection = false
         repeat(OUTER_RETRIES) { attempt ->
             val res = lease.withService { svc ->
                 withContext(Dispatchers.IO) { svc.writeConfig(mac, target.toJson()) }
@@ -483,21 +549,25 @@ class ApplyWorker(context: Context) {
                     // final 仅做交叉验证（栈可能规范化 priority/cs1~cs4 等字段）
                     if (final != null && !ApplyPolicy.matches(target, final)) {
                         if (requireExactCs1) {
+                            sawStackRejection = true
                             log(
                                 "读回落档: final=${summary(final, identity)} " +
                                     "与手动目标 ${summary(target, identity)} 不符，判定未生效"
                             )
                         } else {
                             log("applied=true 但 final=${summary(final, identity)} 三项与目标不符（以 applied 为准）")
-                            return true
+                            return ManualApplyResult.APPLIED
                         }
                     } else if (final == null && requireExactCs1) {
                         log("读回缺失 final，无法确认手动码率档已生效，按未生效处理")
                     } else {
                         log("读回一致 ✓ final=${final?.let { summary(it, identity) }}")
-                        return true
+                        return ManualApplyResult.APPLIED
                     }
                 } else {
+                    if (requireExactCs1 && final != null && !ApplyPolicy.matches(target, final)) {
+                        sawStackRejection = true
+                    }
                     log("读回不一致: ${final?.let { summary(it, identity) } ?: "无 final 字段"}")
                 }
             }
@@ -505,7 +575,7 @@ class ApplyWorker(context: Context) {
                 delay(RETRY_DELAY_MS)
             }
         }
-        return false
+        return if (sawStackRejection) ManualApplyResult.REJECTED_BY_STACK else ManualApplyResult.FAILED
     }
 
     /**

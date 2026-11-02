@@ -39,6 +39,17 @@ class DeviceNameResolverTest {
     )
 
     @Test
+    fun test_honorMagic9Overrides_exactMatch() {
+        // 目录未收录的新机（Google 清单滞后）由人工 override 兜底，精确匹配。
+        assertEquals("HONOR Magic9", resolver("MLY-AN00").marketModel())
+        assertEquals("HONOR Magic9 超能版", resolver("MLM-AN00").marketModel())
+        assertEquals("HONOR Magic9 Pro Max", resolver("WKL-AN20").marketModel())
+        assertEquals("HONOR Magic9 Pro Max", resolver("WKL-AN80").marketModel())
+        // 相近型号不得误中。
+        assertEquals("MLY-AN10", resolver("MLY-AN10").marketModel())
+    }
+
+    @Test
     fun test_override_beatsPropertyAndCatalog() {
         val catalog = readyCatalog(mapOf("NX741J" to "nubia Z80", "PHZ110" to "OPPO Find X7"))
         assertEquals(

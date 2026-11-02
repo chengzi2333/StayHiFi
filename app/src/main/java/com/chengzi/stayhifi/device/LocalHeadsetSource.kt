@@ -1,11 +1,8 @@
 package com.chengzi.stayhifi.device
 
-import android.annotation.SuppressLint
-import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
 import android.content.Context
 
-/** 本机 A2DP 已连接耳机（BluetoothManager 普通 API 读取，不依赖特权通道）。 */
+/** 本机 A2DP 已连接耳机（普通 A2DP proxy API 读取，不依赖特权通道）。 */
 data class LocalHeadset(val name: String, val mac: String)
 
 /**
@@ -21,30 +18,50 @@ sealed interface LocalHeadsetResult {
     data object Unknown : LocalHeadsetResult
 }
 
+/** 只在本机读取类别变化时记录，不输出耳机名/MAC，也不让轮询刷满 200 行日志。 */
+internal class LocalHeadsetDiagnosticLogger(
+    private val sink: (String) -> Unit,
+) {
+    private var lastLabel: String? = null
+
+    fun log(result: LocalHeadsetResult) {
+        val label = when (result) {
+            is LocalHeadsetResult.Connected -> "CONNECTED"
+            LocalHeadsetResult.Disconnected -> "DISCONNECTED"
+            LocalHeadsetResult.SecurityBlocked -> "SECURITY_BLOCKED"
+            LocalHeadsetResult.Unknown -> "UNKNOWN"
+        }
+        if (label == lastLabel) return
+        lastLabel = label
+        sink("本机 A2DP 读取: $label")
+    }
+}
+
 /** 本机蓝牙设备的最小只读面（解耦 android.bluetooth.BluetoothDevice，供纯函数测试）。 */
 internal data class RawBtDevice(val name: String?, val address: String)
 
 /**
- * v1.2.2 修复：本机设备来源。BluetoothManager.getConnectedDevices(A2DP) 是普通系统 API
- * （仅需 BLUETOOTH_CONNECT 运行时权限），不依赖特权载体——特权通道未就绪时，
- * 系统蓝牙已连接也不再被误判为「未连接」。权限缺失如实映射 [LocalHeadsetResult.SecurityBlocked]，
- * 绝不伪造连接。
+ * v1.2.2.1 修复：本机设备来源改用 BluetoothAdapter.getProfileProxy(A2DP)。
+ * v1.2.2 错用的 BluetoothManager.getConnectedDevices 只支持 GATT/GATT_SERVER，
+ * 会在 A2DP 上抛 IllegalArgumentException 并被归为 Unknown，导致解耦路径失效。
+ * 正确 proxy 路径仅需 BLUETOOTH_CONNECT，不依赖 Root/Shizuku；权限缺失仍如实映射。
  */
-class LocalHeadsetSource(context: Context) {
+class LocalHeadsetSource internal constructor(
+    private val query: LocalA2dpDeviceQuery,
+) {
 
-    private val manager: BluetoothManager? = try {
-        context.applicationContext.getSystemService(BluetoothManager::class.java)
-    } catch (t: Throwable) {
+    constructor(context: Context) : this(androidA2dpDeviceQuery(context))
+
+    fun current(): LocalHeadsetResult = classify(query::connectedDevices)
+
+    /** 启动补触发需要遍历全部本机 A2DP 设备；首页单设备展示仍使用 [current]。 */
+    internal fun connectedHeadsets(): List<LocalHeadset>? = try {
+        query.connectedDevices()?.map { device ->
+            LocalHeadset(name = device.name ?: device.address, mac = device.address)
+        }
+    } catch (_: Throwable) {
         null
     }
-
-    // SecurityException（BLUETOOTH_CONNECT 未授权）按设计单独映射，与 CodecService 同款抑制。
-    @SuppressLint("MissingPermission")
-    private val query: () -> List<RawBtDevice>? = {
-        manager?.getConnectedDevices(BluetoothProfile.A2DP)?.map { RawBtDevice(it.name, it.address) }
-    }
-
-    fun current(): LocalHeadsetResult = classify(query)
 
     internal companion object {
         /**

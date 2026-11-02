@@ -16,6 +16,7 @@ import android.util.Log
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
+import com.chengzi.stayhifi.codec.RealtimeDiagnosticDump
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -100,7 +101,7 @@ class CodecService : ICodecService.Stub() {
         val a2dp = getA2dp()
         val dev = findDevice(a2dp, mac)
         if (dev == null) {
-            error("找不到目标设备 $mac")
+            error("找不到目标设备 $mac serviceUid=${Process.myUid()} bluetooth=${bluetoothState()} a2dpProxy=${a2dpProxyState()}")
         } else {
             // Task 2：分阶段反射读取；codecStatus/current 为 null 或反射异常时
             // 仍返回含 current:null、各阶段状态与 errors 的 snapshot，绝不用 !! 崩掉。
@@ -129,7 +130,7 @@ class CodecService : ICodecService.Stub() {
         val a2dp = getA2dp()
         val dev = findDevice(a2dp, mac)
         if (dev == null) {
-            error("找不到目标设备 $mac")
+            error("找不到目标设备 $mac serviceUid=${Process.myUid()} bluetooth=${bluetoothState()} a2dpProxy=${a2dpProxyState()}")
         } else {
             val cfg = buildConfig(
                 target.codecType, target.priority, target.sampleRate,
@@ -192,6 +193,22 @@ class CodecService : ICodecService.Stub() {
         }.toString()
     } catch (t: Throwable) {
         errorJson("dumpBtState", t)
+    }
+
+    override fun dumpRealtimeDiagnostics(codecName: String): String = try {
+        val dump = RealtimeDumpRunner().run(codecName)
+        fun source(source: RealtimeDiagnosticDump.Source) = buildJsonObject {
+            put("status", source.status.name.lowercase())
+            put("content", source.content)
+            source.error?.let { put("error", it) }
+        }
+        buildJsonObject {
+            put("bluetooth", source(dump.bluetooth))
+            put("audio", source(dump.audio))
+            put("audioFlinger", source(dump.audioFlinger))
+        }.toString()
+    } catch (t: Throwable) {
+        errorJson("dumpRealtimeDiagnostics", t)
     }
 
     /**
@@ -401,13 +418,12 @@ class CodecService : ICodecService.Stub() {
     @SuppressLint("MissingPermission")
     private fun findDevice(a2dp: BluetoothA2dp, mac: String?): BluetoothDevice? {
         val devices = a2dp.connectedDevices
-        if (mac == null || mac.trim().isEmpty()) {
-            return if (devices.isEmpty()) null else devices[0]
-        }
-        for (d in devices) {
-            if (d.address.equals(mac.trim(), ignoreCase = true)) return d
-        }
-        return null
+        return CodecDeviceLocator.select(
+            mac = mac,
+            connectedDevices = devices,
+            addressOf = { it.address },
+            remoteDevice = { target -> mAdapter?.getRemoteDevice(target) },
+        )
     }
 
     private fun currentConfig(a2dp: BluetoothA2dp, dev: BluetoothDevice): CodecConfig {

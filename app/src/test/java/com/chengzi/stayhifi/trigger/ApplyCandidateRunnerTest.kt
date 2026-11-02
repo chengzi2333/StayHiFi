@@ -117,4 +117,25 @@ class ApplyCandidateRunnerTest {
         assertEquals(2, writeCalls)
         assertEquals(1, originCalls)
     }
+
+    @Test
+    fun raisedLhdcQualityFallsBackToLegacyCandidateWhenStrictlyRejected() = runBlocking {
+        val current = CodecConfig(19, 8004, 2, 2, 2, 0x8004, 0, 0, 0)
+        val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0, cs3 = 1)
+        val assessment = ApplyPolicy.assessTarget(current, listOf(capability))
+        val writes = mutableListOf<CodecConfig>()
+
+        val result = runner.run(
+            current = current,
+            assessment = assessment,
+            beforeFirstWrite = {},
+            writeVerified = { candidate ->
+                writes += candidate
+                !ApplyPolicy.isRaisedLhdcQuality(current, candidate, listOf(capability))
+            },
+        )
+
+        assertEquals(ApplyRunResult.Applied(assessment.candidates[1]), result)
+        assertEquals(listOf(0x8008L, 0x8004L), writes.map { it.cs1 })
+    }
 }
