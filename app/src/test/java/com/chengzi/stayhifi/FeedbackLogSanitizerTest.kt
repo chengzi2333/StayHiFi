@@ -179,4 +179,58 @@ class FeedbackLogSanitizerTest {
         assertTrue(out.contains("mac=device1"))
         assertFalse(out.contains(macA))
     }
+
+    @Test
+    fun startupLocalHeadsetLineAlsoAliasesTheBareDeviceName() {
+        val out = sanitizer.sanitize(
+            listOf(
+                "[12:00:01] 启动补触发：发现本机已连接设备 $nameA ($macA)，提交统一触发入口",
+                "[12:00:02] 自定义音质已应用: $nameA → LHDC V5",
+            ),
+        )
+
+        assertFalse(out.contains(nameA))
+        assertTrue(out.contains("自定义音质已应用: device1"))
+    }
+
+    @Test
+    fun diagnosticLinesShareDeviceAliasesAcrossBothSections() {
+        val out = sanitizer.sanitize(
+            listOf("[12:00:01] 已连接: $nameA ($macA)"),
+            listOf("bdaddr=$macA", "notification for $nameA"),
+        )
+
+        assertTrue(out.contains("bdaddr=device1"))
+        assertTrue(out.contains("notification for device1"))
+        assertFalse(out.contains(macA))
+        assertFalse(out.contains(nameA))
+    }
+
+    @Test
+    fun diagnosticAndNormalLinesShareTheExistingTwoHundredLineBudget() {
+        val normal = (1..200).map { "normal-$it" }
+        val diagnostic = (1..65).map { "diagnostic-$it" }
+
+        val out = sanitizer.sanitize(normal, diagnostic)
+        val report = "header\n$out"
+
+        assertEquals(200, report.lines().size)
+        assertTrue(out.startsWith("normal-62"))
+        assertTrue(out.contains("diagnostic-65"))
+        assertFalse(out.contains("diagnostic-1\n"))
+    }
+
+    @Test
+    fun diagnosticFragmentsRejectPackagesProcessesAndPaths() {
+        val out = sanitizer.sanitize(
+            emptyList(),
+            listOf(
+                "process=com.example.music",
+                "path=/data/user/0/com.example.music/cache",
+                "sampleRate=48000",
+            ),
+        )
+
+        assertEquals("sampleRate=48000", out)
+    }
 }

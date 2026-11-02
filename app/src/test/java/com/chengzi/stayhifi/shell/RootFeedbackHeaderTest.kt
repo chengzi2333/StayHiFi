@@ -176,6 +176,23 @@ class RootFeedbackHeaderTest {
         assertTrue(report.contains("日志行 250"))
     }
 
+    @Test
+    fun diagnosticReportStillStaysOneHeaderPlusAtMost199Lines() {
+        val logs = (1..200).map { "普通日志 $it" }
+        val diagnostic = (1..65).map { "诊断片段 $it" }
+        val sanitized = FeedbackLogSanitizer().sanitize(logs, diagnostic)
+        val header = RootFeedbackFields.header(
+            selectedProvider = ProviderKind.ROOT,
+            activeProvider = ProviderKind.SHIZUKU,
+            root = failureSnapshot(),
+        ) + " " + RootFeedbackFields.template()
+        val report = "$header\n$sanitized"
+
+        assertEquals(200, report.split("\n").size)
+        assertTrue(report.contains("普通日志 200"))
+        assertTrue(report.contains("诊断片段 65"))
+    }
+
     // ─────────────────────────── flush / reset ───────────────────────────
 
     @Test

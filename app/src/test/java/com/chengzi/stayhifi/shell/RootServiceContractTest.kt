@@ -30,8 +30,8 @@ class RootServiceContractTest {
             .map { it.name }
             .toSet()
         assertEquals(
-            "ICodecService 方法集合必须严格等于五方法",
-            setOf("dumpDevices", "readConfig", "writeConfig", "dumpBtState", "destroy"),
+            "ICodecService 方法集合必须严格等于六方法",
+            setOf("dumpDevices", "readConfig", "writeConfig", "dumpBtState", "dumpRealtimeDiagnostics", "destroy"),
             names,
         )
     }

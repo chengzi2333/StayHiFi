@@ -40,6 +40,7 @@ class FeedbackLogSanitizer {
         "QS 磁贴触发拉满: ",
         "收到 ACL_CONNECTED: ",
         "启动补触发：发现已连接设备 ",
+        "启动补触发：发现本机已连接设备 ",
         "检测到参数漂移: ",
         "录制向导抓到: ",
         "已保存录制档案: ",
@@ -57,17 +58,25 @@ class FeedbackLogSanitizer {
      * 空输入返回空字符串；每次调用都是独立报告，映射不沿用。
      */
     @Synchronized
-    fun sanitize(lines: List<String>): String {
+    fun sanitize(lines: List<String>): String = sanitize(lines, emptyList())
+
+    /** 普通日志与诊断附录共用别名；有诊断时总量仍保持 199 行。 */
+    @Synchronized
+    fun sanitize(lines: List<String>, diagnosticLines: List<String>): String {
         macAliases.clear()
         nameAliases.clear()
-        if (lines.isEmpty()) return ""
-        val window = if (lines.size > windowSize) {
-            lines.subList(lines.size - windowSize, lines.size)
-        } else {
-            lines
-        }
-        window.forEach { discover(it) }
-        return window.joinToString("\n") { sanitizeLine(it) }
+        val diagnostic = diagnosticLines
+            .filter { line -> DIAGNOSTIC_BLOCKED_MARKERS.none { line.contains(it, ignoreCase = true) } }
+            .takeLast(DIAGNOSTIC_WINDOW_SIZE)
+        val normalWindow = if (diagnostic.isEmpty()) windowSize else NORMAL_WITH_DIAGNOSTIC_WINDOW
+        val normal = lines.takeLast(normalWindow)
+        if (normal.isEmpty() && diagnostic.isEmpty()) return ""
+        (normal + diagnostic).forEach { discover(it) }
+        return listOf(normal, diagnostic)
+            .filter { it.isNotEmpty() }
+            .joinToString("\n") { section ->
+                section.joinToString("\n") { line -> sanitizeLine(line) }
+            }
     }
 
     /** 仅清内存状态：不写真机日志、不持久化。清空按钮与跨报告隔离共用。 */
@@ -164,5 +173,10 @@ class FeedbackLogSanitizer {
     companion object {
         /** 设备名长度上限：超过视为异常/堆栈文本，不建立名称关联。 */
         private const val MAX_NAME_CHARS = 120
+        private const val NORMAL_WITH_DIAGNOSTIC_WINDOW = 139
+        private const val DIAGNOSTIC_WINDOW_SIZE = 60
+        private val DIAGNOSTIC_BLOCKED_MARKERS = listOf(
+            "name:", "package", "process", "path=", "/data/", "/storage/",
+        )
     }
 }

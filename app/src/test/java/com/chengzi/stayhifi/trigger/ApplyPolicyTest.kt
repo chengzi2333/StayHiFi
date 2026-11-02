@@ -95,6 +95,39 @@ class ApplyPolicyTest {
     }
 
     @Test
+    fun fixedVendorLhdcOffers1000ThenLegacyCandidate() {
+        val current = CodecConfig(19, 8004, 2, 2, 2, 0x8004, 0, 0, 0)
+        val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0)
+
+        val assessment = ApplyPolicy.assessTarget(current, listOf(capability))
+
+        assertEquals(0x8008L, assessment.target?.cs1)
+        assertEquals(0x8004L, assessment.candidates[1].cs1)
+        assertTrue(ApplyPolicy.isRaisedLhdcQuality(current, assessment.target!!, listOf(capability)))
+    }
+
+    @Test
+    fun adaptiveVendorLhdcDoesNotForceFixedTier() {
+        val current = CodecConfig(19, 8004, 2, 2, 2, 0x8009, 0, 0, 0)
+        val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0)
+
+        val assessment = ApplyPolicy.assessTarget(current, listOf(capability))
+
+        assertEquals(0x8009L, assessment.target?.cs1)
+        assertFalse(assessment.candidates.any { it.cs1 == 0x8008L })
+    }
+
+    @Test
+    fun unverifiedVendorDoesNotRaiseQuality() {
+        val current = CodecConfig(19, 8004, 2, 2, 2, 0x8004, 0, 0, 0)
+        val capability = current.copy(sampleRate = 2, bitsPerSample = 7, cs1 = 0)
+
+        val assessment = ApplyPolicy.assessTarget(current, listOf(capability))
+
+        assertEquals(0x8004L, assessment.target?.cs1)
+    }
+
+    @Test
     fun deriveTargetKeepsCodecFieldsFromCurrent() {
         // Task 27：codecType/channelMode/cs2~cs4 继承 current；cs1 由档位表接管（codecType=10 → 黄金值，巧合同值）
         val current = golden.copy(sampleRate = 2, priority = 0)

@@ -5,13 +5,18 @@ import android.content.ContextWrapper
 import android.os.IBinder
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.codec.CodecConfig
+import com.chengzi.stayhifi.device.RawBtDevice
 import java.lang.reflect.Proxy
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -57,7 +62,26 @@ class ApplyConnectionGuardTest {
         }
 
         override fun dumpBtState(): String = """{"dump":""}"""
+        override fun dumpRealtimeDiagnostics(codecName: String?): String = com.chengzi.stayhifi.shell.EMPTY_REALTIME_DUMP
         override fun destroy() = Unit
+    }
+
+    @Test
+    fun cancellationDuringProbeIsNotConvertedToUnknownAndDoesNotRunCarrier() {
+        val guard = ApplyConnectionGuard(
+            lock = Mutex(),
+            probe = FakeProbe(LocalA2dpState.UNKNOWN, CancellationException("cancelled")),
+            log = {},
+        )
+        var carrierCalls = 0
+
+        try {
+            runBlocking { guard.run("mac") { carrierCalls++ } }
+            fail("CancellationException 必须继续抛出")
+        } catch (_: CancellationException) {
+        }
+
+        assertEquals(0, carrierCalls)
     }
 
     /**
@@ -162,6 +186,102 @@ class ApplyConnectionGuardTest {
             LocalA2dpState.UNKNOWN,
             LocalBluetoothA2dpProbe.stateOf(null, "AA:BB:CC:DD:EE:FF"),
         )
+    }
+
+    @Test
+    fun blockingA2dpProbeRunsOffTheCallerThread() = runBlocking {
+        val caller = Thread.currentThread()
+        var probeThread: Thread? = null
+        val probe = LocalA2dpProbe {
+            probeThread = Thread.currentThread()
+            LocalA2dpState.CONNECTED
+        }
+        val guard = ApplyConnectionGuard(Mutex(), probe) {}
+
+        assertTrue(guard.run("AA:BB") {})
+
+        assertNotEquals(caller, probeThread)
+    }
+
+    @Test
+    fun a2dpProbeMatchesEveryDeviceFromTheSameProxyQuery() {
+        val probe = LocalBluetoothA2dpProbe {
+            listOf(
+                RawBtDevice(name = "First", address = "AA:BB:CC:DD:EE:01"),
+                RawBtDevice(name = "Second", address = "AA:BB:CC:DD:EE:02"),
+            )
+        }
+
+        assertEquals(LocalA2dpState.CONNECTED, probe.state("aa:bb:cc:dd:ee:02"))
+    }
+
+    @Test
+    fun aclBeforeA2dpAttachWaitsForDeviceAndRunsCarrier() = runTest {
+        var probeCalls = 0
+        val probe = LocalA2dpProbe {
+            probeCalls++
+            if (probeCalls < 3) LocalA2dpState.DISCONNECTED else LocalA2dpState.CONNECTED
+        }
+        val guard = ApplyConnectionGuard(Mutex(), probe) {}.also {
+            it.probeDispatcher = StandardTestDispatcher(testScheduler)
+        }
+        var carrierCalls = 0
+
+        assertTrue(
+            guard.run("AA:BB", awaitA2dp = true) { carrierCalls++ },
+        )
+
+        assertEquals(3, probeCalls)
+        assertEquals(1, carrierCalls)
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun a2dpUnreadableAfterAttachWindowFallsBackToProviderConfirmation() = runTest {
+        var probeCalls = 0
+        val probe = LocalA2dpProbe {
+            probeCalls++
+            LocalA2dpState.DISCONNECTED
+        }
+        val logs = mutableListOf<String>()
+        val guard = ApplyConnectionGuard(Mutex(), probe, logs::add).also {
+            it.probeDispatcher = StandardTestDispatcher(testScheduler)
+            it.nowMillis = { testScheduler.currentTime }
+        }
+        var carrierCalls = 0
+
+        assertTrue(guard.run("AA:BB", awaitA2dp = true) { carrierCalls++ })
+
+        assertEquals(11, probeCalls) // 首次复查 + 每 500ms 一次，最多等待 5s
+        assertEquals(1, carrierCalls)
+        assertEquals(
+            listOf(
+                "等待本机 A2DP 就绪: mac=AA:BB",
+                "本机 A2DP 5s 内未确认，按原设备等待链处理: mac=AA:BB",
+            ),
+            logs,
+        )
+    }
+
+    @Test
+    fun a2dpWaitBudgetIncludesTimeSpentInsideProbe() = runTest {
+        var now = 0L
+        var probeCalls = 0
+        val probe = LocalA2dpProbe {
+            probeCalls++
+            now += 2_000L // 模拟慢 proxy：每次调用本身消耗 2s
+            LocalA2dpState.DISCONNECTED
+        }
+        val guard = ApplyConnectionGuard(Mutex(), probe) {}.also {
+            it.probeDispatcher = StandardTestDispatcher(testScheduler)
+            it.nowMillis = { now }
+        }
+
+        assertTrue(guard.run("AA:BB", awaitA2dp = true) {})
+
+        // 旧 delay-only 循环会固定查 11 次（约 22s）；真实时间预算应在第三次慢查询后停止。
+        assertEquals(3, probeCalls)
+        assertEquals(6_000L, now)
     }
 
     @Test

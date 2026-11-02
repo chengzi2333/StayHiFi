@@ -19,5 +19,8 @@ interface ICodecService {
     // 返回 JSON {dump:"..."}，失败 {error:"..."}；解析在 app 侧 BtStateParser。
     String dumpBtState();
 
+    // 播放诊断：一次返回 bluetooth/audio/audioFlinger 三源的有界 JSON，各自独立报告状态。
+    String dumpRealtimeDiagnostics(String codecName);
+
     void destroy();
 }

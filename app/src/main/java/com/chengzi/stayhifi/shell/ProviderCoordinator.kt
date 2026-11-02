@@ -21,7 +21,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** 探测/日志来源（设计 §11.6）。 */
-enum class ProviderSource { ONBOARDING, SETTINGS, BOOT, LISTENER, QS, APPLY }
+enum class ProviderSource { ONBOARDING, SETTINGS, BOOT, LISTENER, QS, APPLY, DIAGNOSTIC }
 
 /**
  * 通道选择的只读存储面（设计 §11.3）：[rawSelection] 异步恢复持久值，

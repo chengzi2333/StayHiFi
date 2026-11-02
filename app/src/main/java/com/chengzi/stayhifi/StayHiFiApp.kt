@@ -3,11 +3,25 @@ package com.chengzi.stayhifi
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
+import com.chengzi.stayhifi.codec.CodecSnapshotPresenter
+import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
+import com.chengzi.stayhifi.codec.PlaybackDiagnosticsController
+import com.chengzi.stayhifi.codec.PlaybackDiagnosticsStore
+import com.chengzi.stayhifi.codec.RealtimeDiagnosticDump
+import com.chengzi.stayhifi.device.LocalHeadsetResult
+import com.chengzi.stayhifi.device.LocalHeadsetSource
+import com.chengzi.stayhifi.data.ApplyPreferenceStore
 import com.chengzi.stayhifi.data.ProfileRepository
 import com.chengzi.stayhifi.data.SettingsRepository
 import com.chengzi.stayhifi.shell.LibsuRootBackend
 import com.chengzi.stayhifi.shell.ProviderCoordinator
+import com.chengzi.stayhifi.shell.ProviderOwner
+import com.chengzi.stayhifi.shell.ProviderSource
 import com.chengzi.stayhifi.shell.RootLogContext
 import com.chengzi.stayhifi.shell.RootTransport
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
@@ -20,6 +34,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
 /**
  * 应用入口：autoEnabled=true 时常驻拉起 [ListenerService]。
@@ -35,6 +50,14 @@ class StayHiFiApp : Application() {
     /** Task D7：进程级特权通道协调器；构造即在注入 scope 异步首读持久选择，不阻塞主线程。 */
     lateinit var providerCoordinator: ProviderCoordinator
         private set
+
+    lateinit var playbackDiagnostics: PlaybackDiagnosticsController
+        private set
+
+    lateinit var applyPreferences: ApplyPreferenceStore
+        private set
+
+    private var playbackCallback: AudioManager.AudioPlaybackCallback? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -83,6 +106,10 @@ class StayHiFiApp : Application() {
             rootStatusSource = ProviderCoordinator.RootStatusSource { rootTransport.grantedState() },
             rootTransport = rootTransport,
         )
+        if (Application.getProcessName() == packageName) {
+            applyPreferences = ApplyPreferenceStore.create(this)
+            initializePlaybackDiagnostics(appScope)
+        }
         // 对抗审查 C2：权限被撤（隐私恐慌后常见）时 startForeground 会抛 SecurityException
         // 连带进程崩溃死循环。拉起前先查 BLUETOOTH_CONNECT，runBlocking 整体兜底 try/catch。
         try {
@@ -101,4 +128,88 @@ class StayHiFiApp : Application() {
             LogStore.log("应用启动拉起 ListenerService 失败: $t")
         }
     }
+
+    private fun initializePlaybackDiagnostics(scope: CoroutineScope) {
+        val audioManager = getSystemService(AudioManager::class.java)
+        val localHeadsets = LocalHeadsetSource(this)
+        playbackDiagnostics = PlaybackDiagnosticsController(
+            scope = scope,
+            store = PlaybackDiagnosticsStore(),
+            resolveConnection = {
+                val local = withContext(Dispatchers.IO) { localHeadsets.current() }
+                if (local is LocalHeadsetResult.Connected) {
+                    PlaybackDiagnosticsController.Connection(
+                        mac = local.headset.mac,
+                        providerGeneration = providerCoordinator.currentGeneration(),
+                    )
+                } else {
+                    null
+                }
+            },
+            openCapture = { connection -> openPlaybackCapture(connection) },
+        )
+        val callback = object : AudioManager.AudioPlaybackCallback() {
+            override fun onPlaybackConfigChanged(configurations: List<AudioPlaybackConfiguration>) {
+                if (audioManager.isMusicActive) {
+                    playbackDiagnostics.onPlaybackSignal()
+                } else {
+                    playbackDiagnostics.onPlaybackStopped()
+                }
+            }
+        }
+        playbackCallback = callback
+        audioManager.registerAudioPlaybackCallback(callback, Handler(Looper.getMainLooper()))
+    }
+
+    private suspend fun openPlaybackCapture(
+        connection: PlaybackDiagnosticsController.Connection,
+    ): PlaybackDiagnosticsController.Capture? {
+        val probe = providerCoordinator.probeSelected(ProviderSource.DIAGNOSTIC)
+        if (!probe.isRunning || !probe.hasPermission) return null
+        val lease = providerCoordinator.acquire(
+            ProviderOwner("playback-diagnostics"),
+            ProviderSource.DIAGNOSTIC,
+        )
+        try {
+            val initial = lease.withService { svc ->
+                withContext(Dispatchers.IO) {
+                    readPlaybackCaptureState(svc.readConfig(connection.mac), connection.mac, lease.generation)
+                }
+            }
+            return object : PlaybackDiagnosticsController.Capture {
+                override var signature = initial.signature
+
+                override suspend fun sample(index: Int): RealtimeDiagnosticDump = lease.withService { svc ->
+                    withContext(Dispatchers.IO) {
+                        val latest = readPlaybackCaptureState(svc.readConfig(connection.mac), connection.mac, lease.generation)
+                        signature = latest.signature
+                        RealtimeDiagnosticDump.parse(svc.dumpRealtimeDiagnostics(latest.codecName))
+                    }
+                }
+
+                override fun close() = lease.close()
+            }
+        } catch (t: Throwable) {
+            lease.close()
+            throw t
+        }
+    }
+
+    private fun readPlaybackCaptureState(raw: String, mac: String, generation: Long): PlaybackCaptureState {
+        val presentation = CodecSnapshotPresenter.present(CodecStateSnapshotJson.parse(raw))
+            ?: throw IllegalStateException("readConfig returned no current codec")
+        return PlaybackCaptureState(
+            signature = PlaybackDiagnosticsController.CaptureSignature(
+                mac = mac,
+                current = presentation.current,
+                providerGeneration = generation,
+            ),
+            codecName = presentation.identity.displayName,
+        )
+    }
+
+    private data class PlaybackCaptureState(
+        val signature: PlaybackDiagnosticsController.CaptureSignature,
+        val codecName: String,
+    )
 }

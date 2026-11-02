@@ -76,6 +76,7 @@ class BackgroundProviderContractTest {
             return writeResult
         }
         override fun dumpBtState(): String = """{"dump":""}"""
+        override fun dumpRealtimeDiagnostics(codecName: String?): String = com.chengzi.stayhifi.shell.EMPTY_REALTIME_DUMP
         override fun destroy() = Unit
         override fun asBinder(): IBinder? = null
     }
@@ -200,7 +201,7 @@ class BackgroundProviderContractTest {
         assertEquals(RootStatus.READY, h.transport.state.value.status)
     }
 
-    private fun recordingWorker(
+    private fun TestScope.recordingWorker(
         h: Harness,
         probeState: LocalA2dpState,
         events: MutableList<String>,
@@ -210,7 +211,9 @@ class BackgroundProviderContractTest {
         worker.connectionGuard = ApplyConnectionGuard(
             ApplyLock.mutex,
             FakeProbe(probeState) { events += "probe locked=${ApplyLock.mutex.isLocked}" },
-        ) { }
+        ) { }.also {
+            it.probeDispatcher = StandardTestDispatcher(testScheduler)
+        }
         worker.coordinator = h.coordinator
         return worker
     }

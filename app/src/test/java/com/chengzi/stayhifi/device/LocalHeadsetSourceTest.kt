@@ -11,6 +11,18 @@ import org.junit.Test
 class LocalHeadsetSourceTest {
 
     @Test
+    fun currentReadsDevicesFromA2dpProxyQuery() {
+        val source = LocalHeadsetSource {
+            listOf(RawBtDevice(name = "OPPO Enco X3", address = "38:F8:89:01:23:45"))
+        }
+
+        assertEquals(
+            LocalHeadsetResult.Connected(LocalHeadset("OPPO Enco X3", "38:F8:89:01:23:45")),
+            source.current(),
+        )
+    }
+
+    @Test
     fun emptyListMeansConfirmedDisconnected() {
         assertEquals(
             LocalHeadsetResult.Disconnected,
@@ -70,6 +82,24 @@ class LocalHeadsetSourceTest {
         assertEquals(
             LocalHeadsetResult.Unknown,
             LocalHeadsetSource.classify { throw IllegalStateException("binder died") },
+        )
+    }
+
+    @Test
+    fun connectedHeadsetsReturnsEveryDeviceForStartupRetrigger() {
+        val source = LocalHeadsetSource {
+            listOf(
+                RawBtDevice(name = "First", address = "AA:BB:CC:DD:EE:01"),
+                RawBtDevice(name = null, address = "AA:BB:CC:DD:EE:02"),
+            )
+        }
+
+        assertEquals(
+            listOf(
+                LocalHeadset("First", "AA:BB:CC:DD:EE:01"),
+                LocalHeadset("AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:02"),
+            ),
+            source.connectedHeadsets(),
         )
     }
 }

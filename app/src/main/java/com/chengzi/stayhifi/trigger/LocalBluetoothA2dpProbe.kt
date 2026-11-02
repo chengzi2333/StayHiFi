@@ -1,10 +1,8 @@
 package com.chengzi.stayhifi.trigger
 
-import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
 import android.content.Context
-
-import android.annotation.SuppressLint
+import com.chengzi.stayhifi.device.LocalA2dpDeviceQuery
+import com.chengzi.stayhifi.device.androidA2dpDeviceQuery
 
 /**
  * 本机 A2DP 链路状态（Task B4 锁后复查）。
@@ -17,23 +15,19 @@ fun interface LocalA2dpProbe {
 }
 
 /**
- * 只做本机 API 地址匹配：[BluetoothManager] 的 A2DP connectedDevices 与目标 MAC
- * 忽略大小写比对。不创建 BluetoothA2dp proxy、不增加等待或轮询。
+ * 只做本机 A2DP proxy 地址匹配：与首页共用正确的设备查询路径，目标 MAC
+ * 忽略大小写比对。单次 proxy 等待有界，不增加轮询。
  * SecurityException（如 BLUETOOTH_CONNECT 未授权）或任何读取异常 → UNKNOWN，
  * 由调用方按旧路径兼容执行。
  */
-class LocalBluetoothA2dpProbe(context: Context) : LocalA2dpProbe {
+class LocalBluetoothA2dpProbe internal constructor(
+    private val query: LocalA2dpDeviceQuery,
+) : LocalA2dpProbe {
 
-    private val manager: BluetoothManager? = try {
-        context.applicationContext.getSystemService(BluetoothManager::class.java)
-    } catch (t: Throwable) {
-        null
-    }
+    constructor(context: Context) : this(androidA2dpDeviceQuery(context))
 
-    // SecurityException（BLUETOOTH_CONNECT 未授权）按设计落 UNKNOWN，与 CodecService 同款抑制。
-    @SuppressLint("MissingPermission")
     override fun state(mac: String): LocalA2dpState = try {
-        stateOf(manager?.getConnectedDevices(BluetoothProfile.A2DP)?.map { it.address }, mac)
+        stateOf(query.connectedDevices()?.map { it.address }, mac)
     } catch (t: Throwable) {
         LocalA2dpState.UNKNOWN
     }
