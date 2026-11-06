@@ -63,6 +63,7 @@ import com.chengzi.stayhifi.codec.DiagnosticTrigger
 import com.chengzi.stayhifi.codec.ManualRejectionStore
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.PlaybackDiagnosticsController
+import com.chengzi.stayhifi.codec.QualityGapDiagnosticGate
 import com.chengzi.stayhifi.codec.RealtimeDisplay
 import com.chengzi.stayhifi.codec.VendorDiagnosticContext
 import com.chengzi.stayhifi.codec.VendorDiagnosticMetadata
@@ -2018,6 +2019,17 @@ class MainActivity : ComponentActivity() {
         val manualActive = preferredActive || (manual != null && manual.first == mac &&
             ApplyPolicy.matches(manual.second, current))
         if (manual != null && !manualActive) manualSession = null
+        // v1.2.4 问题#4：码率格「—」取证。无档位概念族与未收录档位值分因记录，
+        // 每进程按 mac+codecType(+cs1) 去重；不改动任何展示行为（用户裁决本期只加日志）。
+        QualityGapDiagnosticGate.reasonToLog(mac, presentation)?.let { reason ->
+            LogStore.log(
+                "码率档位诊断: mac=$mac 编码器=${presentation.identity.displayName} " +
+                    "family=${presentation.identity.family} codecType=${current.codecType} " +
+                    "cs1=${current.cs1}(0x${current.cs1.toString(16).uppercase()}) " +
+                    "source=${presentation.identity.source} " +
+                    "原因=${if (reason == QualityGapDiagnosticGate.Reason.UNRECOGNIZED_QUALITY_VALUE) "档位值未收录" else "该编码器无码率档位"}"
+            )
+        }
         homeState = homeState.copy(
             headsetName = name,
             // 仅泛称身份可由唯一无歧义段补精确版本；精确身份不被旧段名降级。

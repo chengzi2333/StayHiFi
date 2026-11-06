@@ -398,7 +398,9 @@ private fun RealtimeSection(state: HomeUiState) {
             // STACK_REPORTS_IDLE 不显示该指引，其余状态保留调度解释。
             // UX 收敛：解释行压成一句人话，研究结论（vivo 栈实测等）只留日志/反馈报告。
             text = if (state.realtimeDisplay == RealtimeDisplay.NO_DATA) {
-                "读取不到时可到 设置 › 运行日志 复制日志反馈"
+                // v1.2.4 问题#1 口径：明说原因（栈未回报）而非含糊的「读取不到」，
+                // 不断言「多数品牌」等未取证范围。
+                "该机型系统未回报传输码率，可到 设置 › 运行日志 复制日志反馈"
             } else {
                 "部分机型固定档仍会自适应，以实际传输为准"
             },
