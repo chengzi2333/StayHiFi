@@ -138,4 +138,28 @@ class ApplyCandidateRunnerTest {
         assertEquals(ApplyRunResult.Applied(assessment.candidates[1]), result)
         assertEquals(listOf(0x8008L, 0x8004L), writes.map { it.cs1 })
     }
+
+    @Test
+    fun failedWriteCannotShortCircuitLaterCandidateAgainstStaleCurrent() = runBlocking {
+        val high = current.copy(sampleRate = 32)
+        val assessment = TargetAssessment(
+            TargetAssessment.Status.COMPLETE,
+            target = high,
+            candidates = listOf(high, current),
+        )
+        val writes = mutableListOf<CodecConfig>()
+
+        val result = runner.run(
+            current = current,
+            assessment = assessment,
+            beforeFirstWrite = {},
+            writeVerified = { candidate ->
+                writes += candidate
+                writes.size == 2
+            },
+        )
+
+        assertEquals(ApplyRunResult.Applied(current), result)
+        assertEquals(listOf(high, current), writes)
+    }
 }

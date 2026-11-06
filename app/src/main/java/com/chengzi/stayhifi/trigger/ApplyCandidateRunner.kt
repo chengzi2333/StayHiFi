@@ -23,7 +23,9 @@ class ApplyCandidateRunner {
         }
         var originRecorded = false
         for (candidate in assessment.candidates) {
-            if (ApplyPolicy.matches(candidate, current)) {
+            // 只有尚未写入时，最初 current 才能证明 AlreadyAligned；一旦尝试过写入，
+            // 后续候选必须重新写读，不能拿写前快照冒充当前状态。
+            if (!originRecorded && ApplyPolicy.matches(candidate, current)) {
                 return ApplyRunResult.AlreadyAligned(candidate)
             }
             if (!originRecorded) {
