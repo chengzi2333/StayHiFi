@@ -80,6 +80,7 @@ class ListenerService : Service() {
     private var notifyPersistent = false
 
     private var pollJob: Job? = null
+    private val notificationRefreshGate = NotificationRefreshGate()
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -271,8 +272,8 @@ class ListenerService : Service() {
      *
      * 幂等：已是最高 → Task 36 早退分支（仍建档）；未拉满 → 正常写入+建档。
      * 载体未就绪/未授权/超时/空列表 → 记一句跳过原因，不报错不崩；
-     * 载体调用整体包 withTimeoutOrNull（同 readConnectedSummary 的
-     * CARRIER_READ_TIMEOUT_MS），防 vivo 冻结 codec 进程的永久阻塞（Task 31 教训）。
+     * 载体调用使用 withTimeoutOrNull 处理可协作取消的等待；它已经阻塞的 Binder
+     * transact 不保证能被中断，不能把超时当作物理调用已经结束。
      * 日志以「启动补触发」前缀区分信号源，便于浸泡排查。
      *
      * Task D8：载体访问走 Coordinator——本机 A2DP 预检先于一切 provider 首读；
@@ -400,14 +401,17 @@ class ListenerService : Service() {
      */
     private suspend fun refreshNotification() {
         if (!notifyPersistent) return
-        val content = readConnectedSummary() ?: TEXT_WAITING
-        runCatching {
-            ServiceCompat.startForeground(
-                this, ID_LISTENER,
-                notifier.persistentNotification(content),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-            )
-        }.onFailure { LogStore.log("常驻通知刷新失败: $it") }
+        val ran = notificationRefreshGate.run {
+            val content = readConnectedSummary() ?: TEXT_WAITING
+            runCatching {
+                ServiceCompat.startForeground(
+                    this@ListenerService, ID_LISTENER,
+                    notifier.persistentNotification(content),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+                )
+            }.onFailure { LogStore.log("常驻通知刷新失败: $it") }
+        }
+        if (!ran) LogStore.log("常驻通知上一轮仍在执行，合并本轮；未新增读取或通知更新")
     }
 
     /**
@@ -418,7 +422,9 @@ class ListenerService : Service() {
      * 超时，但 dumpDevices/readConfig 没有）——轮询循环自此停摆，通知参数永久停留。
      * 两道防线：
      * 1. 先用本机蓝牙 API 判 A2DP 连接态，断连判定零载体依赖、秒级返回；
-     * 2. 载体读取整体包 withTimeoutOrNull，单轮冻结最多卡 8s，循环不死。
+     * 2. 载体读取使用 withTimeoutOrNull 处理可协作取消的等待；该超时不保证中断
+     *    已阻塞的 Binder transact。NotificationRefreshGate 在旧调用物理返回前合并新刷新，
+     *    避免继续排队放大占用，但不宣称底层冻结已被消除。
      *
      * Task D8：载体访问走 Coordinator lease（finally close）；冷 Root 未就绪只去重
      * 登记 NEEDS_FOREGROUND_REVALIDATION 并按读不到处理，绝不弹授权/回退 Shizuku。
@@ -465,7 +471,7 @@ class ListenerService : Service() {
                     lease.close()
                 }
             } ?: run {
-                LogStore.log("常驻通知读取参数超时（载体进程可能被系统冻结），本轮按读不到处理")
+                LogStore.log("常驻通知协程读取等待超时；底层 Binder 可能仍在阻塞，本轮按读不到处理")
                 null
             }
         } catch (t: Throwable) {
