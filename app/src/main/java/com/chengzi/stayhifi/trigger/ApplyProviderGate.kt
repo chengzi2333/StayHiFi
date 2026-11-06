@@ -1,5 +1,6 @@
 package com.chengzi.stayhifi.trigger
 
+import com.chengzi.stayhifi.shell.ProviderAccessException
 import com.chengzi.stayhifi.shell.ProviderCoordinator
 import com.chengzi.stayhifi.shell.ProviderLease
 import com.chengzi.stayhifi.shell.ProviderOwner
@@ -17,7 +18,10 @@ import kotlinx.coroutines.sync.withLock
  * lease 在 finally 关闭；SWITCHING 期间 acquire 拒绝（ProviderAccessReason.SWITCHING），
  * 异常向上传播、锁照常释放。与 B4 ApplyConnectionGuard 的锁内断连复查正交、可叠加。
  */
-class ApplyProviderGate(private val lock: Mutex = ApplyLock.mutex) {
+class ApplyProviderGate(
+    private val lock: Mutex = ApplyLock.mutex,
+    private val log: (String) -> Unit = {},
+) {
 
     suspend fun <T> withLease(
         coordinator: ProviderCoordinator,
@@ -25,11 +29,25 @@ class ApplyProviderGate(private val lock: Mutex = ApplyLock.mutex) {
         source: ProviderSource,
         block: suspend (ProviderLease) -> T,
     ): T = lock.withLock {
-        val lease = coordinator.acquire(owner, source)
+        log("event=provider_gate_lock owner=${owner.id} source=$source")
+        val lease = try {
+            coordinator.acquire(owner, source)
+        } catch (e: ProviderAccessException) {
+            log(
+                "event=provider_gate_rejected owner=${owner.id} source=$source " +
+                    "reason=${e.reason}"
+            )
+            throw e
+        }
+        log(
+            "event=provider_gate_granted owner=${owner.id} source=$source " +
+                "kind=${lease.kind} generation=${lease.generation}"
+        )
         try {
             block(lease)
         } finally {
             lease.close()
+            log("event=provider_gate_closed owner=${owner.id} source=$source")
         }
     }
 }

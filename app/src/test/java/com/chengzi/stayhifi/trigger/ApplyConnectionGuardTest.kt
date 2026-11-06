@@ -143,7 +143,7 @@ class ApplyConnectionGuardTest {
         assertTrue(guard.run("AA:BB") { carrierCalls++ })
 
         assertEquals(1, carrierCalls)
-        assertTrue(logs.isEmpty())
+        assertEquals(listOf("连接守卫放行: state=CONNECTED mac=AA:BB"), logs)
     }
 
     @Test
@@ -156,7 +156,10 @@ class ApplyConnectionGuardTest {
         assertTrue(guard.run("AA:BB") { carrierCalls++ })
 
         assertEquals(1, carrierCalls)
-        assertEquals(listOf("本机 A2DP 状态不可用，按旧路径执行: mac=AA:BB"), logs)
+        assertEquals(
+            listOf("本机 A2DP 状态不可用，按旧路径执行: state=UNKNOWN mac=AA:BB"),
+            logs,
+        )
     }
 
     @Test
@@ -169,7 +172,10 @@ class ApplyConnectionGuardTest {
         assertTrue(guard.run("AA:BB") { carrierCalls++ })
 
         assertEquals(1, carrierCalls)
-        assertEquals(listOf("本机 A2DP 状态不可用，按旧路径执行: mac=AA:BB"), logs)
+        assertEquals(
+            listOf("本机 A2DP 状态不可用，按旧路径执行: state=UNKNOWN mac=AA:BB"),
+            logs,
+        )
     }
 
     @Test
@@ -257,7 +263,7 @@ class ApplyConnectionGuardTest {
         assertEquals(
             listOf(
                 "等待本机 A2DP 就绪: mac=AA:BB",
-                "本机 A2DP 5s 内未确认，按原设备等待链处理: mac=AA:BB",
+                "本机 A2DP 5s 内未确认，按原设备等待链处理: state=DISCONNECTED mac=AA:BB",
             ),
             logs,
         )

@@ -243,9 +243,9 @@ class ListenerService : Service() {
             LogStore.log("ListenerService 读取设备地址/名称需要 BLUETOOTH_CONNECT: $se")
             return
         }
+        LogStore.log("ListenerService 收到 ACL_CONNECTED: ${name ?: "?"} ($mac)")
         scope.launch {
             HeadsetEvents.bump()
-            refreshNotification()
             try {
                 ApplyTriggers.run(
                     this@ListenerService, mac, name,
@@ -254,7 +254,7 @@ class ListenerService : Service() {
             } catch (t: Throwable) {
                 LogStore.log("ListenerService 触发 ApplyWorker 未捕获异常: $t")
             }
-            // 写入成功后立即刷新一次通知正文
+            // 触发已返回（不代表写入或播放成功），再读取参数刷新通知。
             HeadsetEvents.bump()
             refreshNotification()
         }
@@ -280,9 +280,18 @@ class ListenerService : Service() {
      * NEEDS_FOREGROUND_REVALIDATION，绝不弹授权、不回退 Shizuku（§11.4.5）。
      */
     private suspend fun retriggerIfAlreadyConnected() {
-        if (!isA2dpConnectedLocally()) return
-        val coordinator = coordinator ?: return
+        val locallyConnected = isA2dpConnectedLocally()
+        LogStore.log("启动补触发预检: localA2dpConnected=$locallyConnected")
+        if (!locallyConnected) return
+        val coordinator = coordinator ?: run {
+            LogStore.log("启动补触发：ProviderCoordinator 不可用，跳过")
+            return
+        }
         val probe = coordinator.probeSelected(ProviderSource.LISTENER)
+        LogStore.log(
+            "启动补触发载体探测: kind=${probe.kind} isRunning=${probe.isRunning} " +
+                "hasPermission=${probe.hasPermission}"
+        )
         if (!probe.isRunning || !probe.hasPermission) {
             if (probe.kind == ProviderKind.ROOT) coordinator.noteBackground(ProviderSource.LISTENER)
             LogStore.log("启动补触发：载体未就绪或未授权，跳过")

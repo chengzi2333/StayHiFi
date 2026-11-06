@@ -16,6 +16,17 @@ class TriggerGate(
         internal val token: Long,
     )
 
+    enum class RejectionReason { ACTIVE, COMPLETED_WINDOW }
+
+    sealed interface Acquisition {
+        data class Granted(val permit: Permit) : Acquisition
+        data class Rejected(
+            val reason: RejectionReason,
+            val elapsedMillis: Long? = null,
+            val remainingMillis: Long? = null,
+        ) : Acquisition
+    }
+
     private data class State(
         var activeToken: Long? = null,
         var completedAt: Long? = null,
@@ -25,24 +36,34 @@ class TriggerGate(
     private val states = mutableMapOf<String, State>()
     private var nextToken = 0L
 
+    fun tryAcquire(mac: String, force: Boolean = false): Permit? =
+        (acquire(mac, force) as? Acquisition.Granted)?.permit
+
     @Synchronized
-    fun tryAcquire(mac: String, force: Boolean = false): Permit? {
+    fun acquire(mac: String, force: Boolean = false): Acquisition {
         val key = normalize(mac)
         val existing = states[key]
-        if (existing?.activeToken != null) return null
+        if (existing?.activeToken != null) {
+            return Acquisition.Rejected(RejectionReason.ACTIVE)
+        }
         val now = nowMillis()
         val completedAt = existing?.completedAt
         if (!force && existing?.disconnected != true && completedAt != null &&
             now >= completedAt && now - completedAt < windowMillis
         ) {
-            return null
+            val elapsed = now - completedAt
+            return Acquisition.Rejected(
+                RejectionReason.COMPLETED_WINDOW,
+                elapsedMillis = elapsed,
+                remainingMillis = windowMillis - elapsed,
+            )
         }
         val state = existing ?: State().also { states[key] = it }
         state.disconnected = false
         state.completedAt = null
         val token = ++nextToken
         state.activeToken = token
-        return Permit(key, token)
+        return Acquisition.Granted(Permit(key, token))
     }
 
     @Synchronized

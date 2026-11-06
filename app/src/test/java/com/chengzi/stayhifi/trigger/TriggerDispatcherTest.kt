@@ -13,7 +13,7 @@ import org.junit.Test
 class TriggerDispatcherTest {
 
     @Test
-    fun automaticSourcesShareOneWindowAndLogOnlyMergeFacts() = runBlocking {
+    fun automaticSourcesShareOneWindowAndLogMergeFacts() = runBlocking {
         var calls = 0
         val logs = mutableListOf<String>()
         val dispatcher = TriggerDispatcher(
@@ -27,11 +27,57 @@ class TriggerDispatcherTest {
         assertFalse(dispatcher.dispatch("aa:bb", "one", false, TriggerSource.STARTUP))
 
         assertEquals(1, calls)
-        assertEquals(2, logs.size)
-        assertTrue(logs[0].contains("LISTENER_SERVICE"))
-        assertTrue(logs[0].contains("AA:BB"))
-        assertTrue(logs[0].contains("已合并"))
+        val mergeLogs = logs.filter { it.contains("重复触发已合并") }
+        assertEquals(2, mergeLogs.size)
+        assertTrue(mergeLogs[0].contains("LISTENER_SERVICE"))
+        assertTrue(mergeLogs[0].contains("AA:BB"))
+        assertTrue(mergeLogs.all { it.contains("reason=COMPLETED_WINDOW") })
         assertFalse(logs.any { it.contains("已阻止错误写入") })
+    }
+
+    @Test
+    fun grantReturnAndCooldownExposeTheirActualDecisions() = runBlocking {
+        val logs = mutableListOf<String>()
+        val dispatcher = TriggerDispatcher(
+            TriggerGate(nowMillis = { 0L }),
+            runner = TriggerRunner { _, _, _ -> },
+            log = logs::add,
+        )
+
+        assertTrue(dispatcher.dispatch("AA", null, false, TriggerSource.STARTUP))
+        assertFalse(dispatcher.dispatch("AA", null, false, TriggerSource.LISTENER_SERVICE))
+
+        assertTrue(logs.any {
+            it.contains("trigger_decision decision=GRANTED") &&
+                it.contains("source=STARTUP") && it.contains("force=false")
+        })
+        assertTrue(logs.any {
+            it.contains("trigger_decision decision=REJECTED reason=COMPLETED_WINDOW") &&
+                it.contains("remainingMs=10000")
+        })
+        assertTrue(logs.any { it.contains("trigger_runner event=RETURNED") })
+        assertFalse(logs.any { it.contains("trigger_runner event=RETURNED") && it.contains("成功") })
+    }
+
+    @Test
+    fun runnerExceptionIsLoggedRethrownAndPermitReleased() = runBlocking {
+        val logs = mutableListOf<String>()
+        val dispatcher = TriggerDispatcher(
+            TriggerGate(nowMillis = { 0L }),
+            runner = TriggerRunner { _, _, _ -> throw IllegalStateException("boom") },
+            log = logs::add,
+        )
+
+        val error = runCatching {
+            dispatcher.dispatch("AA", null, false, TriggerSource.STARTUP)
+        }.exceptionOrNull()
+
+        assertTrue(error is IllegalStateException)
+        assertTrue(logs.any {
+            it.contains("trigger_runner event=EXCEPTION") &&
+                it.contains("error=IllegalStateException")
+        })
+        assertTrue(logs.any { it.contains("trigger_gate event=RELEASED") })
     }
 
     @Test
@@ -72,6 +118,7 @@ class TriggerDispatcherTest {
         var calls = 0
         val started = CompletableDeferred<Unit>()
         val finish = CompletableDeferred<Unit>()
+        val logs = mutableListOf<String>()
         val dispatcher = TriggerDispatcher(
             TriggerGate(nowMillis = { now }),
             runner = TriggerRunner { _, _, _ ->
@@ -79,6 +126,7 @@ class TriggerDispatcherTest {
                 started.complete(Unit)
                 finish.await()
             },
+            log = logs::add,
         )
         val active = async {
             dispatcher.dispatch("AA", null, false, TriggerSource.LISTENER_SERVICE)
@@ -88,6 +136,10 @@ class TriggerDispatcherTest {
         now = 20_000L
         assertFalse(dispatcher.dispatch("AA", null, false, TriggerSource.CONNECTION_RECEIVER))
         assertEquals(1, calls)
+        assertTrue(logs.any {
+            it.contains("trigger_decision decision=REJECTED reason=ACTIVE") &&
+                it.contains("source=CONNECTION_RECEIVER")
+        })
 
         finish.complete(Unit)
         assertTrue(active.await())

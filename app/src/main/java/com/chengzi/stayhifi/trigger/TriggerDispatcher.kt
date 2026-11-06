@@ -26,15 +26,35 @@ class TriggerDispatcher(
         force: Boolean,
         source: TriggerSource,
     ): Boolean {
-        val permit = gate.tryAcquire(mac, force) ?: run {
-            log("重复触发已合并: source=$source mac=${mac.trim().uppercase(Locale.ROOT)}")
-            return false
-        }
-        return try {
-            runner.run(mac, name, force)
-            true
-        } finally {
-            gate.release(permit)
+        val key = mac.trim().uppercase(Locale.ROOT)
+        when (val acquisition = gate.acquire(key, force)) {
+            is TriggerGate.Acquisition.Rejected -> {
+                log(
+                    "重复触发已合并: trigger_decision decision=REJECTED " +
+                        "reason=${acquisition.reason} source=$source mac=$key force=$force " +
+                        "elapsedMs=${acquisition.elapsedMillis ?: "—"} " +
+                        "remainingMs=${acquisition.remainingMillis ?: "—"}"
+                )
+                return false
+            }
+            is TriggerGate.Acquisition.Granted -> {
+                val permit = acquisition.permit
+                return try {
+                    log("触发闸放行: trigger_decision decision=GRANTED source=$source mac=$key force=$force")
+                    runner.run(mac, name, force)
+                    log("trigger_runner event=RETURNED source=$source mac=$key")
+                    true
+                } catch (t: Throwable) {
+                    log(
+                        "trigger_runner event=EXCEPTION source=$source mac=$key " +
+                            "error=${t.javaClass.simpleName}"
+                    )
+                    throw t
+                } finally {
+                    gate.release(permit)
+                    log("trigger_gate event=RELEASED source=$source mac=$key")
+                }
+            }
         }
     }
 }

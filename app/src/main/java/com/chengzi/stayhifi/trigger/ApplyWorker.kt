@@ -99,7 +99,7 @@ class ApplyWorker(context: Context) {
      * 首读/acquire），故闸门持实例内锁，只固定「锁后 acquire → withService IPC →
      * finally close」顺序，避免与外层全局锁重入死锁；跨入口互斥仍由外层全局锁保证。
      */
-    internal var applyGate: ApplyProviderGate = ApplyProviderGate(Mutex())
+    internal var applyGate: ApplyProviderGate = ApplyProviderGate(Mutex()) { message -> log(message) }
 
     /**
      * Task D8：restoreEnv 默认实现桥接的当前 lease（仅在 restoreWithLease 的 gate
