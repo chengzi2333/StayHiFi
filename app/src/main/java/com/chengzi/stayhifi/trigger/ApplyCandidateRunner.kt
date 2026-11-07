@@ -6,6 +6,8 @@ import com.chengzi.stayhifi.codec.CodecConfig
 sealed interface ApplyRunResult {
     data class AlreadyAligned(val candidate: CodecConfig) : ApplyRunResult
     data class Applied(val candidate: CodecConfig) : ApplyRunResult
+    data class Recovered(val origin: CodecConfig) : ApplyRunResult
+    data class RecoveryFailed(val origin: CodecConfig) : ApplyRunResult
     data object Exhausted : ApplyRunResult
     data object IncompleteCurrent : ApplyRunResult
 }
@@ -17,6 +19,7 @@ class ApplyCandidateRunner {
         assessment: TargetAssessment,
         beforeFirstWrite: () -> Unit,
         writeVerified: suspend (CodecConfig) -> Boolean,
+        restoreOriginOnce: (suspend () -> Boolean)? = null,
     ): ApplyRunResult {
         if (assessment.status == TargetAssessment.Status.INCOMPLETE_CURRENT) {
             return ApplyRunResult.IncompleteCurrent
@@ -36,6 +39,11 @@ class ApplyCandidateRunner {
                 return ApplyRunResult.Applied(candidate)
             }
         }
-        return ApplyRunResult.Exhausted
+        if (!originRecorded || restoreOriginOnce == null) return ApplyRunResult.Exhausted
+        return if (restoreOriginOnce()) {
+            ApplyRunResult.Recovered(current)
+        } else {
+            ApplyRunResult.RecoveryFailed(current)
+        }
     }
 }

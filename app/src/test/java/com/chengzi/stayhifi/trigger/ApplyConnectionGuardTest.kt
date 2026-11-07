@@ -67,6 +67,19 @@ class ApplyConnectionGuardTest {
     }
 
     @Test
+    fun terminalProbeDistinguishesDisconnectedFromUnknown() = runTest {
+        val disconnected = ApplyConnectionGuard(
+            Mutex(), FakeProbe(LocalA2dpState.DISCONNECTED), {},
+        ).also { it.probeDispatcher = StandardTestDispatcher(testScheduler) }
+        val unknown = ApplyConnectionGuard(
+            Mutex(), FakeProbe(LocalA2dpState.UNKNOWN), {},
+        ).also { it.probeDispatcher = StandardTestDispatcher(testScheduler) }
+
+        assertEquals(LocalA2dpState.DISCONNECTED, disconnected.currentState("AA:BB"))
+        assertEquals(LocalA2dpState.UNKNOWN, unknown.currentState("AA:BB"))
+    }
+
+    @Test
     fun cancellationDuringProbeIsNotConvertedToUnknownAndDoesNotRunCarrier() {
         val guard = ApplyConnectionGuard(
             lock = Mutex(),

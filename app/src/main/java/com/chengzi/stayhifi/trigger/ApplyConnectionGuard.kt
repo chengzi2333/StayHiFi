@@ -78,6 +78,9 @@ class ApplyConnectionGuard(
         }
     }
 
+    /** 终态失败时读取一次本机状态；不伪装 UNKNOWN 为已连接或已断开。 */
+    internal suspend fun currentState(mac: String): LocalA2dpState = probeState(mac)
+
     /** 仅连接触发使用：deadline 包含慢 probe；UNKNOWN 立即交回原回退。 */
     private suspend fun probeUntilA2dp(mac: String, startedAt: Long): LocalA2dpState {
         while (nowMillis() - startedAt < A2DP_ATTACH_TIMEOUT_MS) {
