@@ -21,7 +21,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** 探测/日志来源（设计 §11.6）。 */
-enum class ProviderSource { ONBOARDING, SETTINGS, BOOT, LISTENER, QS, APPLY, DIAGNOSTIC }
+enum class ProviderSource { ONBOARDING, SETTINGS, BOOT, LISTENER, QS, APPLY, DIAGNOSTIC, APP_FOREGROUND }
 
 /**
  * 通道选择的只读存储面（设计 §11.3）：[rawSelection] 异步恢复持久值，
@@ -343,12 +343,49 @@ class ProviderCoordinator(
 
     // ─────────────────────────── Task D7：有界切换事务（§11.3） ───────────────────────────
 
+    /** 自动恢复与手动验证共用互斥：candidate 未提交前，另一入口不得提前返回或重复提交。 */
+    private val rootVerificationMutex = Mutex()
+
+    /** 进程级自动恢复额度：首次 onStart 即认领，失败/离页也不形成自动重试循环。 */
+    private val appForegroundRestoreClaimed = AtomicBoolean(false)
+
     /**
-     * 前台 Root 验证+提交（教程/设置点击）：auth（单飞）→ bind+健康检查 → commit。
+     * App 可见前台每进程最多自动恢复一次冷 Root；Boot/Listener/QS/ApplyWorker 不调用此入口。
+     * 首读完成前零 Root IO；互斥内复查 ROOT + UNVERIFIED，避免手动验证后补发自动尝试。
+     * 返回 null 表示选择/状态不满足或自动额度已使用；非空结果仍走完整 candidate→commit 流程。
+     */
+    suspend fun restoreRootFromAppForeground(owner: ProviderOwner): RootVerificationResult? {
+        if (!appForegroundRestoreClaimed.compareAndSet(false, true)) return null
+        if (awaitSelection() != ProviderKind.ROOT) return null
+        return rootVerificationMutex.withLock {
+            val transport = rootTransport ?: return@withLock null
+            if (awaitSelection() != ProviderKind.ROOT ||
+                transport.state.value.status != RootStatus.UNVERIFIED || _switching.value) {
+                return@withLock null
+            }
+            verifyRootFromForegroundExclusive(owner, ProviderSource.APP_FOREGROUND)
+        }
+    }
+
+    /**
+     * 前台 Root 验证+提交（教程/设置点击或冷进程自动恢复）：auth（单飞）→ bind+健康检查 → commit。
      * candidate 只有在三者全部成功后才进入 commit；失败/取消只清 candidate，绝不写盘。
      * 已选 Root 且 READY 时幂等返回 Committed；SWITCHING 期间拒绝（ALREADY_SWITCHING）。
      */
     suspend fun verifyRootFromForeground(
+        owner: ProviderOwner,
+        source: ProviderSource,
+    ): RootVerificationResult {
+        if (_switching.value) {
+            return RootVerificationResult.NotCommitted(SwitchFailureReason.ALREADY_SWITCHING)
+        }
+        return rootVerificationMutex.withLock {
+            verifyRootFromForegroundExclusive(owner, source)
+        }
+    }
+
+    /** 调用方必须持有 [rootVerificationMutex]；覆盖自动/手动共用同一物理验证与提交。 */
+    private suspend fun verifyRootFromForegroundExclusive(
         owner: ProviderOwner,
         source: ProviderSource,
     ): RootVerificationResult {
@@ -379,10 +416,14 @@ class ProviderCoordinator(
             transport.releaseCandidate(candidate)
             return RootVerificationResult.Failed(e.status, e.message)
         }
-        return when (val r = commitSwitch(ProviderKind.ROOT, candidate, source)) {
-            is CommitOutcome.Success -> RootVerificationResult.Committed(r.generation)
-            is CommitOutcome.Aborted ->
-                RootVerificationResult.NotCommitted(r.reason, r.needsRevalidation)
+        return try {
+            when (val r = commitSwitch(ProviderKind.ROOT, candidate, source)) {
+                is CommitOutcome.Success -> RootVerificationResult.Committed(r.generation)
+                is CommitOutcome.Aborted ->
+                    RootVerificationResult.NotCommitted(r.reason, r.needsRevalidation)
+            }
+        } catch (e: RootAccessException) {
+            RootVerificationResult.Failed(e.status, e.message)
         }
     }
 
@@ -391,15 +432,23 @@ class ProviderCoordinator(
      * 已是 Shizuku 时幂等返回，不重复写盘。
      */
     suspend fun switchToShizuku(owner: ProviderOwner, source: ProviderSource): ProviderSwitchResult {
-        val current = awaitSelection()
-        if (current == ProviderKind.SHIZUKU) {
-            return ProviderSwitchResult.Committed(ProviderKind.SHIZUKU, currentGeneration())
+        // 先作废再排队：BINDING 中的 candidate 也会在健康归还/提交前看到失效，不能迟到写回 Root。
+        rootTransport?.invalidateAttemptsOf(owner)
+        if (_switching.value) {
+            return ProviderSwitchResult.NotCommitted(SwitchFailureReason.ALREADY_SWITCHING)
         }
-        return when (val r = commitSwitch(ProviderKind.SHIZUKU, candidate = null, source)) {
-            is CommitOutcome.Success ->
-                ProviderSwitchResult.Committed(ProviderKind.SHIZUKU, r.generation)
-            is CommitOutcome.Aborted ->
-                ProviderSwitchResult.NotCommitted(r.reason, r.needsRevalidation)
+        return rootVerificationMutex.withLock {
+            val current = awaitSelection()
+            if (current == ProviderKind.SHIZUKU) {
+                ProviderSwitchResult.Committed(ProviderKind.SHIZUKU, currentGeneration())
+            } else {
+                when (val r = commitSwitch(ProviderKind.SHIZUKU, candidate = null, source)) {
+                    is CommitOutcome.Success ->
+                        ProviderSwitchResult.Committed(ProviderKind.SHIZUKU, r.generation)
+                    is CommitOutcome.Aborted ->
+                        ProviderSwitchResult.NotCommitted(r.reason, r.needsRevalidation)
+                }
+            }
         }
     }
 
@@ -429,12 +478,14 @@ class ProviderCoordinator(
         source: ProviderSource,
     ): CommitOutcome {
         if (!switchMutex.tryLock()) {
+            rollbackCandidateAnchor(candidate)
             return CommitOutcome.Aborted(SwitchFailureReason.ALREADY_SWITCHING,
-                needsRevalidation = false)
+                needsRevalidation = needsRevalidation())
         }
         val previousWatermark = staleWatermark
         var invalidated = false
         try {
+            ensureCandidateCommittable(candidate, source)
             _switching.value = true
             var persistFailure: Throwable? = null
             val completed = withTimeoutOrNull(SWITCH_TIMEOUT_MS) {
@@ -442,6 +493,8 @@ class ProviderCoordinator(
                 while (applyLock.isLocked || (rootTransport?.activeIpcCount ?: 0) > 0) {
                     delay(DRAIN_POLL_MS)
                 }
+                // 等待锁期间可能已取消/改选；任何代次作废、解绑或写盘前再次拒绝迟到 candidate。
+                ensureCandidateCommittable(candidate, source)
                 // 作废旧代次：旧 lease 立即 STALE，事务期间不得再发起 IPC
                 staleWatermark = generation
                 invalidated = true
@@ -501,6 +554,23 @@ class ProviderCoordinator(
         } finally {
             _switching.value = false
             switchMutex.unlock()
+        }
+    }
+
+    /**
+     * candidate 在提交前必须仍对应当前有效 attempt；自动恢复还要求持久选择保持 ROOT。
+     * 已提升的 anchor 立即回滚，随后以授权事实失败返回，绝不把迟到结果写成新选择。
+     */
+    private suspend fun ensureCandidateCommittable(candidate: RootCandidate?, source: ProviderSource) {
+        if (candidate == null) return
+        val valid = rootTransport?.isCandidateCurrent(candidate) == true &&
+            (source != ProviderSource.APP_FOREGROUND || _selectedProvider.value == ProviderKind.ROOT)
+        if (!valid) {
+            rollbackCandidateAnchor(candidate)
+            throw RootAccessException(
+                RootStatus.UNVERIFIED,
+                "candidate attempt ${candidate.attemptId} 已失效或自动恢复选择已变化",
+            )
         }
     }
 

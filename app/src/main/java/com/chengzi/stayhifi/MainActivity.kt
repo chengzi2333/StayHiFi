@@ -342,6 +342,28 @@ class MainActivity : ComponentActivity() {
         LogStore.log("Root 修复入口：打开设置页 Root 区")
     }
 
+    override fun onStart() {
+        super.onStart()
+        // v1.2.4：仅在可见前台恢复冷 Root；Coordinator 保证每进程一次，失败不自动重试。
+        lifecycleScope.launch {
+            try {
+                when (val r = coordinator.restoreRootFromAppForeground(activityOwner)) {
+                    null -> Unit
+                    is RootVerificationResult.Committed ->
+                        LogStore.log("Root 前台自动恢复已提交（generation=${r.generation}）")
+                    is RootVerificationResult.Failed ->
+                        LogStore.log("Root 前台自动恢复失败: ${r.status} ${r.message ?: ""}")
+                    is RootVerificationResult.NotCommitted ->
+                        LogStore.log("Root 前台自动恢复未提交: ${r.reason}")
+                }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                LogStore.log("Root 前台自动恢复异常: $t")
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         // 首次读完成前不触发任何 IPC
