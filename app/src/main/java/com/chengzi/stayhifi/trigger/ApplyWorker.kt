@@ -503,7 +503,12 @@ class ApplyWorker(context: Context) {
             is ApplyRunResult.Applied -> {
                 val candidate = result.candidate
                 if (assessment.status == TargetAssessment.Status.COMPLETE && candidate == assessment.target) {
-                    notifyResult("音质拉满成功", "${name ?: mac} → ${summary(candidate, identity)}")
+                    // v1.2.4 问题#6（用户拍板）：协商成功≠播放稳定且程序无法检测无声/杂音，
+                    // 成功通知附带自救出口：恢复原参数或自定义调低档位。
+                    notifyResult(
+                        "音质拉满成功",
+                        "${name ?: mac} → ${summary(candidate, identity)}\n播放异常：设备页可恢复原参数，或自定义音质调低档位",
+                    )
                 } else {
                     notifyResult("目标已确认", "${name ?: mac} 当前目标已确认（能力未完整）")
                 }
