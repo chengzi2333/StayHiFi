@@ -25,4 +25,19 @@ object RealtimeDisplayFormatter {
             }
         }
     }
+
+    /**
+     * v1.2.4 分层说明（用户拍板）：NO_DATA 的解释行按证据分级，全部指向设置页说明；
+     * UNKNOWN（无 dump/歧义）保留反馈引导。文案逐字固定于此，UI 不自拼装。
+     */
+    fun noDataHint(reason: RealtimeNoDataReason): String = when (reason) {
+        RealtimeNoDataReason.OFFLOAD_DSP ->
+            "该机 DSP 硬件解码，系统自身看不到码流 · 详见 设置 › 实际传输说明"
+        RealtimeNoDataReason.SECTION_EMPTY ->
+            "该机型系统未回报传输数据 · 详见 设置 › 实际传输说明"
+        RealtimeNoDataReason.NO_SECTION ->
+            "该机型系统不提供传输数据回报 · 详见 设置 › 实际传输说明"
+        RealtimeNoDataReason.UNKNOWN ->
+            "该机型系统未回报传输码率，可到 设置 › 运行日志 复制日志反馈"
+    }
 }

@@ -6,6 +6,8 @@ import com.chengzi.stayhifi.codec.CodecConfig
 sealed interface ApplyRunResult {
     data class AlreadyAligned(val candidate: CodecConfig) : ApplyRunResult
     data class Applied(val candidate: CodecConfig) : ApplyRunResult
+    data class Recovered(val origin: CodecConfig) : ApplyRunResult
+    data class RecoveryFailed(val origin: CodecConfig) : ApplyRunResult
     data object Exhausted : ApplyRunResult
     data object IncompleteCurrent : ApplyRunResult
 }
@@ -17,13 +19,16 @@ class ApplyCandidateRunner {
         assessment: TargetAssessment,
         beforeFirstWrite: () -> Unit,
         writeVerified: suspend (CodecConfig) -> Boolean,
+        restoreOriginOnce: (suspend () -> Boolean)? = null,
     ): ApplyRunResult {
         if (assessment.status == TargetAssessment.Status.INCOMPLETE_CURRENT) {
             return ApplyRunResult.IncompleteCurrent
         }
         var originRecorded = false
         for (candidate in assessment.candidates) {
-            if (ApplyPolicy.matches(candidate, current)) {
+            // 只有尚未写入时，最初 current 才能证明 AlreadyAligned；一旦尝试过写入，
+            // 后续候选必须重新写读，不能拿写前快照冒充当前状态。
+            if (!originRecorded && ApplyPolicy.matches(candidate, current)) {
                 return ApplyRunResult.AlreadyAligned(candidate)
             }
             if (!originRecorded) {
@@ -34,6 +39,11 @@ class ApplyCandidateRunner {
                 return ApplyRunResult.Applied(candidate)
             }
         }
-        return ApplyRunResult.Exhausted
+        if (!originRecorded || restoreOriginOnce == null) return ApplyRunResult.Exhausted
+        return if (restoreOriginOnce()) {
+            ApplyRunResult.Recovered(current)
+        } else {
+            ApplyRunResult.RecoveryFailed(current)
+        }
     }
 }

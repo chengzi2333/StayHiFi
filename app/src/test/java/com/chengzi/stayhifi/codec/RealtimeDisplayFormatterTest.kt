@@ -74,4 +74,36 @@ class RealtimeDisplayFormatterTest {
         assertFalse(RealtimeState(RealtimeDisplay.NO_DATA).notStreaming)
         assertFalse(RealtimeState(RealtimeDisplay.STACK_REPORTS_IDLE).notStreaming)
     }
+
+    @Test
+    fun noDataHintOffloadDspExplainsHardwareOffload() {
+        assertEquals(
+            "该机 DSP 硬件解码，系统自身看不到码流 · 详见 设置 › 实际传输说明",
+            RealtimeDisplayFormatter.noDataHint(RealtimeNoDataReason.OFFLOAD_DSP),
+        )
+    }
+
+    @Test
+    fun noDataHintSectionEmptySaysStackReportedNothing() {
+        assertEquals(
+            "该机型系统未回报传输数据 · 详见 设置 › 实际传输说明",
+            RealtimeDisplayFormatter.noDataHint(RealtimeNoDataReason.SECTION_EMPTY),
+        )
+    }
+
+    @Test
+    fun noDataHintNoSectionSaysNoSupport() {
+        assertEquals(
+            "该机型系统不提供传输数据回报 · 详见 设置 › 实际传输说明",
+            RealtimeDisplayFormatter.noDataHint(RealtimeNoDataReason.NO_SECTION),
+        )
+    }
+
+    @Test
+    fun noDataHintUnknownKeepsFeedbackGuidance() {
+        assertEquals(
+            "该机型系统未回报传输码率，可到 设置 › 运行日志 复制日志反馈",
+            RealtimeDisplayFormatter.noDataHint(RealtimeNoDataReason.UNKNOWN),
+        )
+    }
 }

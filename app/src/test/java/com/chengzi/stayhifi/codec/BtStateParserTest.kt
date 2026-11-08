@@ -492,4 +492,59 @@ class BtStateParserTest {
         assertNull(display.bitrateKbps)
         assertNull(display.qualityMode)
     }
+
+    // v1.2.4 问题#1 分层说明：NO_DATA 的三种证据态 + DSP 卸载线索
+    // ColorOS 17 真机取证片段（2026-11-08 Find X8 Ultra PKJ110，LHDC V5 播放中）
+    private val colorOsLhdcEmptyDump = """
+        A2DP LHDC V5 State:
+          Priority: 1000000
+          Config: Rate=192000 Bits=24 Mode=STEREO
+          LHDC quality mode                                       : {}
+          LHDC transmission bitrate (Kbps)                        : {}
+        AF playback codec config:
+        	Codec location: ADSP 
+    """.trimIndent()
+
+    @Test
+    fun noDataReasonOffloadDspWhenCodecLocationAdsp() {
+        val result = BtStateParser.parseResult(
+            colorOsLhdcEmptyDump,
+            CodecIdentity(19, CodecFamily.LHDC, "LHDC V5", source = CodecIdentitySource.SYSTEM_TYPE),
+        )
+        assertEquals(BtStateParseStatus.NO_BITRATE, result.status)
+        val rt = BtStateParser.realtimeDisplay(true, result, colorOsLhdcEmptyDump)
+        assertEquals(RealtimeDisplay.NO_DATA, rt.display)
+        assertEquals(RealtimeNoDataReason.OFFLOAD_DSP, rt.noDataReason)
+    }
+
+    @Test
+    fun noDataReasonSectionEmptyWithoutOffloadEvidence() {
+        val dump = colorOsLhdcEmptyDump.replace("Codec location: ADSP", "Codec location: HOST")
+        val result = BtStateParser.parseResult(
+            dump,
+            CodecIdentity(19, CodecFamily.LHDC, "LHDC V5", source = CodecIdentitySource.SYSTEM_TYPE),
+        )
+        val rt = BtStateParser.realtimeDisplay(true, result, dump)
+        assertEquals(RealtimeNoDataReason.SECTION_EMPTY, rt.noDataReason)
+    }
+
+    @Test
+    fun noDataReasonNoSectionWhenCodecSectionMissing() {
+        val result = BtStateParser.parseResult(
+            aacDump,
+            CodecIdentity(4, CodecFamily.LDAC, "LDAC", source = CodecIdentitySource.SYSTEM_TYPE),
+        )
+        assertEquals(BtStateParseStatus.NO_SECTION, result.status)
+        val rt = BtStateParser.realtimeDisplay(true, result, aacDump)
+        assertEquals(RealtimeNoDataReason.NO_SECTION, rt.noDataReason)
+    }
+
+    @Test
+    fun noDataReasonUnknownWhenDumpUnavailable() {
+        val rt = BtStateParser.realtimeDisplay(true, BtStateParseResult(BtStateParseStatus.NO_BITRATE), null)
+        assertEquals(RealtimeNoDataReason.SECTION_EMPTY, rt.noDataReason)
+        // 旧入口（无 dump 参数）永不伪造原因
+        val legacy = BtStateParser.realtimeDisplay(true, BtStateParseResult(BtStateParseStatus.AMBIGUOUS_SECTION))
+        assertEquals(RealtimeNoDataReason.UNKNOWN, legacy.noDataReason)
+    }
 }

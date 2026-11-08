@@ -32,6 +32,8 @@ class Notifier(private val context: Context) {
             .setSmallIcon(android.R.drawable.stat_sys_headset)
             .setContentTitle(title)
             .setContentText(content)
+            // v1.2.4：内容可含自救引导第二行，折叠态单行、展开态全文。
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setAutoCancel(true)
             .build()
         notify(ID_RESULT, n)

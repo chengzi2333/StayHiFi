@@ -99,7 +99,7 @@ class ApplyWorker(context: Context) {
      * 首读/acquire），故闸门持实例内锁，只固定「锁后 acquire → withService IPC →
      * finally close」顺序，避免与外层全局锁重入死锁；跨入口互斥仍由外层全局锁保证。
      */
-    internal var applyGate: ApplyProviderGate = ApplyProviderGate(Mutex())
+    internal var applyGate: ApplyProviderGate = ApplyProviderGate(Mutex()) { message -> log(message) }
 
     /**
      * Task D8：restoreEnv 默认实现桥接的当前 lease（仅在 restoreWithLease 的 gate
@@ -457,7 +457,9 @@ class ApplyWorker(context: Context) {
         lease: ProviderLease, mac: String, name: String?,
         current: CodecConfig, selectable: List<CodecConfig>, identity: CodecIdentity,
     ) {
-        val assessment = ApplyPolicy.assessTarget(current, selectable)
+        // v1.2.4：本机已探测定档的 LHDC 设备以定档结果为探测上限，避免每次触发全量重探。
+        val ceiling = LhdcQualityCeilingStore.ceilingFor(mac, current.codecType)
+        val assessment = ApplyPolicy.assessTarget(current, selectable, lhdcQualityCeiling = ceiling)
         when (assessment.status) {
             TargetAssessment.Status.COMPLETE -> log("派生本机最高目标")
             TargetAssessment.Status.CAPABILITY_DEGRADED -> log("能力未完整暴露，按兼容目标重试")
@@ -472,9 +474,18 @@ class ApplyWorker(context: Context) {
                 val requireExactCs1 = ApplyPolicy.isRaisedLhdcQuality(current, candidate, selectable)
                 val verified = writeVerified(lease, mac, candidate, identity, requireExactCs1)
                 if (!verified) {
-                    log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
+                    log("候选 ${summary(candidate, identity)} 未通过写入/读回验证，降档重试")
                 }
                 verified
+            },
+            restoreOriginOnce = {
+                val localState = connectionGuard.currentState(mac)
+                val reason = when (localState) {
+                    LocalA2dpState.DISCONNECTED -> "DISCONNECTED"
+                    LocalA2dpState.UNKNOWN -> "UNKNOWN"
+                    LocalA2dpState.CONNECTED -> "READBACK_FAILED"
+                }
+                recoverOriginWithSingleWrite(lease, mac, current, identity, reason)
             },
         )
         when (result) {
@@ -493,8 +504,20 @@ class ApplyWorker(context: Context) {
             }
             is ApplyRunResult.Applied -> {
                 val candidate = result.candidate
+                // 探测在跑（目标是 LHDC 固定档）才记录定档；被栈降级接受的档位、
+                // 以及固定档全被拒后写回的自适应兜底，同样是定档结论——
+                // 后续自动触发以它为上限，不再重复探更高档。
+                if (assessment.target?.let { ApplyPolicy.isRaisedLhdcQuality(current, it, selectable) } == true) {
+                    LhdcQualityCeilingStore.record(mac, current.codecType, candidate.cs1)
+                    log("LHDC 码率定档: mac=$mac 定档 cs1=${candidate.cs1}(0x${candidate.cs1.toString(16).uppercase()})，后续自动触发不再重探更高档")
+                }
                 if (assessment.status == TargetAssessment.Status.COMPLETE && candidate == assessment.target) {
-                    notifyResult("音质拉满成功", "${name ?: mac} → ${summary(candidate, identity)}")
+                    // v1.2.4 问题#6（用户拍板）：协商成功≠播放稳定且程序无法检测无声/杂音，
+                    // 成功通知附带自救出口：恢复原参数或自定义调低档位。
+                    notifyResult(
+                        "音质拉满成功",
+                        "${name ?: mac} → ${summary(candidate, identity)}\n播放异常：设备页可恢复原参数，或自定义音质调低档位",
+                    )
                 } else {
                     notifyResult("目标已确认", "${name ?: mac} 当前目标已确认（能力未完整）")
                 }
@@ -509,6 +532,24 @@ class ApplyWorker(context: Context) {
                 log("所有候选均失败")
                 notifier.notifyResult("音质拉满失败", "${name ?: mac}：所有候选读回不一致")
             }
+            is ApplyRunResult.Recovered -> {
+                // 固定档全被拒、已恢复写前配置：定档为原 cs1（含自适应），不再重探。
+                if (assessment.target?.let { ApplyPolicy.isRaisedLhdcQuality(current, it, selectable) } == true) {
+                    LhdcQualityCeilingStore.record(mac, current.codecType, result.origin.cs1)
+                    log("LHDC 码率定档: mac=$mac 固定档全被拒，定档回原 cs1=${result.origin.cs1}(0x${result.origin.cs1.toString(16).uppercase()})")
+                }
+                VerifiedTargetStore.record(mac, result.origin)
+                notifyResult(
+                    "拉满未完成，已恢复写前参数",
+                    "${name ?: mac} → ${summary(result.origin, identity)}",
+                )
+            }
+            is ApplyRunResult.RecoveryFailed -> {
+                notifier.notifyResult(
+                    "音质拉满失败",
+                    "${name ?: mac}：候选与写前配置恢复均未通过读回验证",
+                )
+            }
             ApplyRunResult.IncompleteCurrent -> {
                 log("参数不完整 · 暂无法判定，跳过写入: mac=$mac current=${current.toJson()}")
             }
@@ -516,8 +557,42 @@ class ApplyWorker(context: Context) {
     }
 
     /**
+     * 明确失败守卫：所有候选写读失败后，仅恢复写前配置一次（会触发一次重协商）。
+     * 只覆盖断连/读回等明确失败；isMusicActive 无法区分正常暂停与无声/杂音，
+     * 因此本守卫不宣称检测或修复“协商成功但播放异常”。
+     */
+    private suspend fun recoverOriginWithSingleWrite(
+        lease: ProviderLease,
+        mac: String,
+        origin: CodecConfig,
+        identity: CodecIdentity,
+        reason: String,
+    ): Boolean {
+        log(
+            "候选均失败，恢复写前配置一次: reason=$reason mac=$mac " +
+                "target=${summary(origin, identity)}；恢复将触发一次重协商"
+        )
+        val res = lease.withService { svc ->
+            withContext(Dispatchers.IO) { svc.writeConfig(mac, origin.toJson()) }
+        }
+        val error = parseError(res)
+        val final = parseFinal(res)
+        val recovered = error == null && parseApplied(res) && final != null &&
+            ApplyPolicy.matches(origin, final)
+        if (recovered) {
+            log("写前配置已恢复 ✓ reason=$reason final=${summary(final!!, identity)}")
+        } else {
+            log(
+                "写前配置恢复失败: reason=$reason error=${error ?: "—"} " +
+                    "final=${final?.let { summary(it, identity) } ?: "—"}"
+            )
+        }
+        return recovered
+    }
+
+    /**
      * writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。
-     * [requireExactCs1]（手动显式档位专用，自动路径恒 false 不改语义）：
+     * [requireExactCs1]（手动显式档位与 LHDC 固定档逐级探测使用）：
      * 服务端 applied 只证明 codecType/rate/bits，cs1 必须由 final 读回证明——
      * final 缺失（服务端给不出读回证据）或 final 与目标不符（栈静默落档）都判未生效，
      * 绝不把别的码率档冒充成用户所选档位。
@@ -715,6 +790,8 @@ class ApplyWorker(context: Context) {
             log("恢复默认成功 ✓ 读回=${actual.summary()}")
             // Task 43：后悔药生效后旧的拉满目标作废，否则轮询立刻把默认参数误报成漂移
             VerifiedTargetStore.clear(mac)
+            // 定档记忆一并作废：恢复默认后下次拉满应重新全量探测
+            LhdcQualityCeilingStore.clear(mac)
             restoreEnv.notifyResultIfEnabled("已恢复默认参数", "$name → ${actual.summary()}")
             true
         } else {

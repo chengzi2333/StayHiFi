@@ -54,11 +54,12 @@ class ApplyConnectionGuard(
         }
         when (state) {
             LocalA2dpState.CONNECTED -> {
+                log("连接守卫放行: state=CONNECTED mac=$mac")
                 carrierBlock()
                 true
             }
             LocalA2dpState.UNKNOWN -> {
-                log("本机 A2DP 状态不可用，按旧路径执行: mac=$mac")
+                log("本机 A2DP 状态不可用，按旧路径执行: state=UNKNOWN mac=$mac")
                 carrierBlock()
                 true
             }
@@ -66,7 +67,7 @@ class ApplyConnectionGuard(
                 if (awaitA2dp) {
                     // 新日志已证明存在「系统 A2DP 已连接、载体/本机列表为空」的 ROM 路径。
                     // 此处只放行原有 readConfig 确认链；没有有效 current 仍不会写入。
-                    log("本机 A2DP 5s 内未确认，按原设备等待链处理: mac=$mac")
+                    log("本机 A2DP 5s 内未确认，按原设备等待链处理: state=DISCONNECTED mac=$mac")
                     carrierBlock()
                     true
                 } else {
@@ -76,6 +77,9 @@ class ApplyConnectionGuard(
             }
         }
     }
+
+    /** 终态失败时读取一次本机状态；不伪装 UNKNOWN 为已连接或已断开。 */
+    internal suspend fun currentState(mac: String): LocalA2dpState = probeState(mac)
 
     /** 仅连接触发使用：deadline 包含慢 probe；UNKNOWN 立即交回原回退。 */
     private suspend fun probeUntilA2dp(mac: String, startedAt: Long): LocalA2dpState {

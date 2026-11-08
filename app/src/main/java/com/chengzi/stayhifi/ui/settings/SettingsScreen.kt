@@ -115,6 +115,8 @@ fun SettingsScreen(
 ) {
     // 「特权方式」二级页为纯 UI 态；修复入口（rootOpenSeq 自增）自动打开。
     var providerPageOpen by remember { mutableStateOf(false) }
+    // v1.2.4：「实际传输说明」二级页同为纯 UI 态
+    var realtimeInfoOpen by remember { mutableStateOf(false) }
     LaunchedEffect(state.rootOpenSeq) {
         if (state.rootOpenSeq > 0) providerPageOpen = true
     }
@@ -141,11 +143,18 @@ fun SettingsScreen(
                 onBack = { providerPageOpen = false },
                 modifier = Modifier.padding(innerPadding),
             )
+        } else if (realtimeInfoOpen) {
+            BackHandler { realtimeInfoOpen = false }
+            RealtimeInfoPage(
+                onBack = { realtimeInfoOpen = false },
+                modifier = Modifier.padding(innerPadding),
+            )
         } else {
             MainSettingsList(
                 state = state,
                 onAction = onAction,
                 onOpenProviderPage = { providerPageOpen = true },
+                onOpenRealtimeInfo = { realtimeInfoOpen = true },
                 modifier = Modifier.padding(innerPadding),
             )
         }
@@ -157,6 +166,7 @@ private fun MainSettingsList(
     state: SettingsUiState,
     onAction: (SettingsAction) -> Unit,
     onOpenProviderPage: () -> Unit,
+    onOpenRealtimeInfo: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -237,6 +247,15 @@ private fun MainSettingsList(
         }
 
         SectionTitle("关于")
+        // v1.2.4 分层说明（用户拍板）：把「为什么读不到实际传输」的判死证据
+        // 变成用户自助可查的说明页，减少重复问询。
+        NavRow(
+            title = "实际传输说明",
+            subtitle = "为什么有些机型看不到实际传输",
+            actionLabel = "查看",
+        ) {
+            onOpenRealtimeInfo()
+        }
         NavRow(
             title = "运行日志",
             subtitle = "仅保存在本机，可复制反馈给作者",
@@ -376,6 +395,49 @@ private fun ProviderPage(
                 onRequestAuthorization = { onAction(SettingsAction.RequestRootAuthorization) },
             )
         }
+    }
+}
+
+/**
+ * v1.2.4 分层说明页（用户拍板）：把「读不到实际传输」的已取证事实写透，
+ * 让用户自助理解边界，而不是来问作者。内容只写有证据的机型结论，不推测。
+ */
+@Composable
+private fun RealtimeInfoPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SubPageTopBar(
+            title = "实际传输说明",
+            onBack = onBack,
+            windowInsets = noWindowInsets,
+        )
+        Text(
+            text = "「实际传输」显示的是耳机此刻的真实传输码率。它只能来自手机系统的回报，App 无法绕过系统自行测量。",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        SectionTitle("为什么有的机型看不到")
+        Text(
+            text = "· vivo / iQOO：系统回报码率，可以正常显示。\n" +
+                "· ColorOS（OPPO / 一加）搭配 LHDC：音频在 DSP 芯片里完成编码，蓝牙栈自身都接触不到码流，系统没有数据可报。这是系统设计，不是耳机坏了，也不是设置问题。（2026-11 真机取证）\n" +
+                "· 部分小米机型：系统没有提供该编码器的回报数据段。\n" +
+                "· ColorOS 搭配 LDAC 能否显示，仍在验证中。",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        SectionTitle("读不到会影响音质吗")
+        Text(
+            text = "不会。这一行只是观测窗口；采样率、位深、码率档的设置照常生效。",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        SectionTitle("想帮忙改进")
+        Text(
+            text = "如果你的机型与上面描述不符，欢迎到 设置 › 运行日志 复制日志反馈（酷安 @一般社畜橙子 / QQ 群 ${QqGroup.GROUP_NUMBER}），新机型证据会用于改进检测。",
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
 }
 

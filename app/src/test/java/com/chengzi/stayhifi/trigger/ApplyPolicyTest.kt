@@ -95,26 +95,82 @@ class ApplyPolicyTest {
     }
 
     @Test
-    fun fixedVendorLhdcOffers1000ThenLegacyCandidate() {
+    fun fixedVendorLhdcDescendsEveryQualityBeforeLegacyRateFallback() {
         val current = CodecConfig(19, 8004, 2, 2, 2, 0x8004, 0, 0, 0)
         val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0)
 
         val assessment = ApplyPolicy.assessTarget(current, listOf(capability))
 
         assertEquals(0x8008L, assessment.target?.cs1)
-        assertEquals(0x8004L, assessment.candidates[1].cs1)
-        assertTrue(ApplyPolicy.isRaisedLhdcQuality(current, assessment.target!!, listOf(capability)))
+        val qualityCandidates = assessment.candidates.take(9)
+        assertEquals(
+            listOf(
+                0x8008L, 0x8007L, 0x8006L, 0x8005L, 0x8004L,
+                0x8003L, 0x8002L, 0x8001L, 0x8000L,
+            ),
+            qualityCandidates.map { it.cs1 },
+        )
+        assertTrue(qualityCandidates.all {
+            it.sampleRate == assessment.target!!.sampleRate &&
+                it.bitsPerSample == assessment.target!!.bitsPerSample
+        })
+        assertEquals(listOf(8, 2, 1), assessment.candidates.drop(9).map { it.sampleRate })
+        assertTrue(assessment.candidates.drop(9).all { it.cs1 == 0x8004L })
+        assertEquals(
+            assessment.candidates.size,
+            assessment.candidates.map { it.sampleRate to it.cs1 }.distinct().size,
+        )
+        assertTrue("逐级探测的每一档都必须严格读回 cs1", assessment.candidates.all {
+            ApplyPolicy.isRaisedLhdcQuality(current, it, listOf(capability))
+        })
     }
 
     @Test
-    fun adaptiveVendorLhdcDoesNotForceFixedTier() {
+    fun adaptiveVendorLhdcProbesFixedTiersWithAdaptiveFallback() {
+        // 用户拍板（2026-11-08 ColorOS 17 真机）：拉满=双方都开得起的最高档，
+        // 自适应也纳入逐级探测，全被拒后兜底回自适应；撤销 v1.2.3「自适应不强制固定」。
         val current = CodecConfig(19, 8004, 2, 2, 2, 0x8009, 0, 0, 0)
         val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0)
 
         val assessment = ApplyPolicy.assessTarget(current, listOf(capability))
 
+        assertEquals(0x8008L, assessment.target?.cs1)
+        assertEquals(
+            listOf(0x8008L, 0x8007L, 0x8006L, 0x8005L, 0x8004L, 0x8003L, 0x8002L, 0x8001L, 0x8000L),
+            assessment.candidates.take(9).map { it.cs1 },
+        )
+        // 目标采样率下的自适应兜底候选必须存在，且排在所有固定档之后
+        val adaptive = assessment.candidates.filter { it.cs1 == 0x8009L }
+        assertTrue(adaptive.isNotEmpty())
+        assertEquals(assessment.target!!.sampleRate, adaptive.first().sampleRate)
+        assertTrue(assessment.candidates.indexOfFirst { it.cs1 == 0x8009L } >= 9)
+    }
+
+    @Test
+    fun lhdcQualityCeilingCapsLadderStart() {
+        // 已探测定档 0x8006 的设备，后续触发不再重探 1000/900
+        val current = CodecConfig(19, 8004, 2, 2, 2, 0x8004, 0, 0, 0)
+        val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0)
+
+        val assessment = ApplyPolicy.assessTarget(current, listOf(capability), lhdcQualityCeiling = 0x8006L)
+
+        assertEquals(0x8006L, assessment.target?.cs1)
+        assertEquals(
+            listOf(0x8006L, 0x8005L, 0x8004L, 0x8003L, 0x8002L, 0x8001L, 0x8000L),
+            assessment.candidates.take(7).map { it.cs1 },
+        )
+    }
+
+    @Test
+    fun lhdcQualityCeilingAdaptiveSkipsProbe() {
+        // 探测结论是「固定档全被拒、定档自适应」：目标即自适应，候选链无任何固定档
+        val current = CodecConfig(19, 8004, 2, 2, 2, 0x8009, 0, 0, 0)
+        val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0)
+
+        val assessment = ApplyPolicy.assessTarget(current, listOf(capability), lhdcQualityCeiling = 0x8009L)
+
         assertEquals(0x8009L, assessment.target?.cs1)
-        assertFalse(assessment.candidates.any { it.cs1 == 0x8008L })
+        assertFalse(assessment.candidates.any { it.cs1 in 0x8000L..0x8008L })
     }
 
     @Test

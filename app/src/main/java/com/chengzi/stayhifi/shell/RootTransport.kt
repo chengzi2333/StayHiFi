@@ -363,6 +363,14 @@ class RootTransport(
                 "dumpDevices 健康检查未通过: ${result.outcome}")
         }
 
+        if (!isCandidateCurrent(candidate)) {
+            publish(RootStatus.UNVERIFIED, reason = "candidate attempt 已失效，健康结果不再采用")
+            logPhase(RootLogEventKind.ROOT_BIND_END, "invalidated", candidate,
+                durationMs = clock() - bindStartedMs)
+            cleanupBinding(record)
+            throw RootAccessException(RootStatus.UNVERIFIED, "candidate attempt ${candidate.attemptId} 已失效")
+        }
+
         candidate.binding = record.binding
         candidate.service = service
         synchronized(bindLock) { record.isAnchor = true }
@@ -406,13 +414,16 @@ class RootTransport(
     }
 
     private fun ensureCandidateCurrent(candidate: RootCandidate) {
-        synchronized(lock) {
-            val rec = records[candidate.attemptId]
-            if (rec == null || rec.expired || current !== rec) {
-                throw RootAccessException(RootStatus.UNVERIFIED,
-                    "candidate attempt ${candidate.attemptId} 已失效")
-            }
+        if (!isCandidateCurrent(candidate)) {
+            throw RootAccessException(RootStatus.UNVERIFIED,
+                "candidate attempt ${candidate.attemptId} 已失效")
         }
+    }
+
+    /** Coordinator 提交前复核：健康检查/等待锁期间失效的 candidate 不得提升或写盘。 */
+    internal fun isCandidateCurrent(candidate: RootCandidate): Boolean = synchronized(lock) {
+        val rec = records[candidate.attemptId]
+        rec != null && !rec.expired && current === rec
     }
 
     private fun handleConnected(record: BindingRecord, service: ICodecService?) {

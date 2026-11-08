@@ -21,6 +21,24 @@ enum class RealtimeDisplay {
 }
 
 /**
+ * v1.2.4：NO_DATA 的证据分级（分层说明方案，用户拍板 2026-11-08）。
+ * 只陈述有证据的原因；证据不足一律 UNKNOWN，不伪造具体原因。
+ */
+enum class RealtimeNoDataReason {
+    /** dump 含 `Codec location: ADSP`：DSP 硬件卸载，栈自身看不到码流（ColorOS 17 实证）。 */
+    OFFLOAD_DSP,
+
+    /** 活跃编码器段存在但码率字段为空/缺失（如 ColorOS LHDC 的 {}）。 */
+    SECTION_EMPTY,
+
+    /** dump 中不存在该编码器的段落（如 Xiaomi 15 Pro）。 */
+    NO_SECTION,
+
+    /** 无 dump 或段落歧义等证据不足场景。 */
+    UNKNOWN,
+}
+
+/**
  * 首页实际传输的唯一裁决结果。仅 AVAILABLE 携带 bitrateKbps/qualityMode，
  * 其余三态两字段恒为 null，UI 不再靠布尔组合推断空态。
  */
@@ -28,6 +46,8 @@ data class RealtimeState(
     val display: RealtimeDisplay,
     val bitrateKbps: Int? = null,
     val qualityMode: String? = null,
+    /** 仅 NO_DATA 有意义；其余态恒为 UNKNOWN。 */
+    val noDataReason: RealtimeNoDataReason = RealtimeNoDataReason.UNKNOWN,
 ) {
     /**
      * 旧源码兼容计算属性（Task 44/46 的 realtimeNotStreaming 字段）：

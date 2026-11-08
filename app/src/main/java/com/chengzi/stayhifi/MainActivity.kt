@@ -63,6 +63,7 @@ import com.chengzi.stayhifi.codec.DiagnosticTrigger
 import com.chengzi.stayhifi.codec.ManualRejectionStore
 import com.chengzi.stayhifi.codec.Masks
 import com.chengzi.stayhifi.codec.PlaybackDiagnosticsController
+import com.chengzi.stayhifi.codec.QualityGapDiagnosticGate
 import com.chengzi.stayhifi.codec.RealtimeDisplay
 import com.chengzi.stayhifi.codec.VendorDiagnosticContext
 import com.chengzi.stayhifi.codec.VendorDiagnosticMetadata
@@ -89,6 +90,7 @@ import com.chengzi.stayhifi.shell.RootVerificationResult
 import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyTriggers
 import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.LhdcQualityCeilingStore
 import com.chengzi.stayhifi.trigger.ManualApplyResult
 import com.chengzi.stayhifi.trigger.TriggerSource
 import com.chengzi.stayhifi.trigger.TargetAssessment
@@ -340,6 +342,28 @@ class MainActivity : ComponentActivity() {
         rootSectionExpanded = true
         rootOpenSeq++
         LogStore.log("Root 修复入口：打开设置页 Root 区")
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // v1.2.4：仅在可见前台恢复冷 Root；Coordinator 保证每进程一次，失败不自动重试。
+        lifecycleScope.launch {
+            try {
+                when (val r = coordinator.restoreRootFromAppForeground(activityOwner)) {
+                    null -> Unit
+                    is RootVerificationResult.Committed ->
+                        LogStore.log("Root 前台自动恢复已提交（generation=${r.generation}）")
+                    is RootVerificationResult.Failed ->
+                        LogStore.log("Root 前台自动恢复失败: ${r.status} ${r.message ?: ""}")
+                    is RootVerificationResult.NotCommitted ->
+                        LogStore.log("Root 前台自动恢复未提交: ${r.reason}")
+                }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                LogStore.log("Root 前台自动恢复异常: $t")
+            }
+        }
     }
 
     override fun onResume() {
@@ -1942,7 +1966,7 @@ class MainActivity : ComponentActivity() {
                         val parsed = result.state
                         parsedState = parsed
                         parsedResult = result
-                        realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+                        realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result, dump = btDump)
                         // Task 8：实时诊断唯一出口——identity 门控 + 仅无段/无码率/歧义；
                         // NOT_STREAMING 走下方 vendor 证据，AVAILABLE 复位去重基准。
                         val issue = VendorDiagnostics.realtimeIssue(presentation.identity, result)
@@ -2018,6 +2042,17 @@ class MainActivity : ComponentActivity() {
         val manualActive = preferredActive || (manual != null && manual.first == mac &&
             ApplyPolicy.matches(manual.second, current))
         if (manual != null && !manualActive) manualSession = null
+        // v1.2.4 问题#4：码率格「—」取证。无档位概念族与未收录档位值分因记录，
+        // 每进程按 mac+codecType(+cs1) 去重；不改动任何展示行为（用户裁决本期只加日志）。
+        QualityGapDiagnosticGate.reasonToLog(mac, presentation)?.let { reason ->
+            LogStore.log(
+                "码率档位诊断: mac=$mac 编码器=${presentation.identity.displayName} " +
+                    "family=${presentation.identity.family} codecType=${current.codecType} " +
+                    "cs1=${current.cs1}(0x${current.cs1.toString(16).uppercase()}) " +
+                    "source=${presentation.identity.source} " +
+                    "原因=${if (reason == QualityGapDiagnosticGate.Reason.UNRECOGNIZED_QUALITY_VALUE) "档位值未收录" else "该编码器无码率档位"}"
+            )
+        }
         homeState = homeState.copy(
             headsetName = name,
             // 仅泛称身份可由唯一无歧义段补精确版本；精确身份不被旧段名降级。
@@ -2028,6 +2063,7 @@ class MainActivity : ComponentActivity() {
             realtimeKbps = realtime.bitrateKbps,
             realtimeQualityMode = realtime.qualityMode,
             realtimeDisplay = realtime.display,
+            realtimeNoDataReason = realtime.noDataReason,
             fullBars = fullBars,
             targetStatus = targetAssessment.status,
             manualActive = manualActive,
@@ -2053,6 +2089,8 @@ class MainActivity : ComponentActivity() {
     private fun onApplyNow() {
         val mac = connectedMac ?: return
         val name = connectedName
+        // 手动拉满 = 用户显式要求重新全量探测，作既定档记忆（自动路径仍以定档为上限）。
+        LhdcQualityCeilingStore.clear(mac)
         // Task 31 加载态：按下即进处理态，run 完成/异常 finally 回弹并刷新实况。
         homeState = homeState.copy(applying = true)
         lifecycleScope.launch {
