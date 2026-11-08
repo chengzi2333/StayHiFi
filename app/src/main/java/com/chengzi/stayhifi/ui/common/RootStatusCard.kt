@@ -124,6 +124,7 @@ internal fun rootStatusLine(root: RootSnapshot): String = when {
     root.status == RootStatus.READY -> "已连接"
     root.status == RootStatus.REQUESTING || root.status == RootStatus.BINDING -> "正在连接…"
     root.granted == false -> "未获得 Root 授权（可能被拒绝，或设备未 Root）"
+    root.status == RootStatus.GRANTED_NOT_READY -> "Root 已授权，服务未就绪"
     root.status == RootStatus.NEEDS_FOREGROUND_REVALIDATION -> "需要重新验证，点下方按钮授权"
     root.status == RootStatus.SHELL_FAILURE || root.status == RootStatus.AUTH_TIMEOUT ||
         root.status == RootStatus.BIND_NULL || root.status == RootStatus.BIND_TIMEOUT ||
@@ -172,9 +173,10 @@ private fun rootServiceText(root: RootSnapshot): String = when (root.status) {
 }
 
 /** 最近错误：只写可观察事实；推测原因（reasonHint）按 §11.6 另列，不与事实混写。 */
-private fun rootLastErrorText(root: RootSnapshot): String {
+internal fun rootLastErrorText(root: RootSnapshot): String {
     val isError = when (root.status) {
-        RootStatus.NOT_GRANTED, RootStatus.SHELL_FAILURE, RootStatus.AUTH_TIMEOUT,
+        RootStatus.GRANTED_NOT_READY, RootStatus.NOT_GRANTED,
+        RootStatus.SHELL_FAILURE, RootStatus.AUTH_TIMEOUT,
         RootStatus.BIND_NULL, RootStatus.BIND_TIMEOUT, RootStatus.BIND_FAILED,
         RootStatus.DISCONNECTED, RootStatus.NEEDS_FOREGROUND_REVALIDATION,
         -> true
