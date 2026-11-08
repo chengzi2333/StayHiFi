@@ -99,7 +99,7 @@ class ApplyWorker(context: Context) {
      * 首读/acquire），故闸门持实例内锁，只固定「锁后 acquire → withService IPC →
      * finally close」顺序，避免与外层全局锁重入死锁；跨入口互斥仍由外层全局锁保证。
      */
-    internal var applyGate: ApplyProviderGate = ApplyProviderGate(Mutex())
+    internal var applyGate: ApplyProviderGate = ApplyProviderGate(Mutex()) { message -> log(message) }
 
     /**
      * Task D8：restoreEnv 默认实现桥接的当前 lease（仅在 restoreWithLease 的 gate
@@ -472,9 +472,18 @@ class ApplyWorker(context: Context) {
                 val requireExactCs1 = ApplyPolicy.isRaisedLhdcQuality(current, candidate, selectable)
                 val verified = writeVerified(lease, mac, candidate, identity, requireExactCs1)
                 if (!verified) {
-                    log("候选 ${summary(candidate, identity)} 读回不一致，降档重试")
+                    log("候选 ${summary(candidate, identity)} 未通过写入/读回验证，降档重试")
                 }
                 verified
+            },
+            restoreOriginOnce = {
+                val localState = connectionGuard.currentState(mac)
+                val reason = when (localState) {
+                    LocalA2dpState.DISCONNECTED -> "DISCONNECTED"
+                    LocalA2dpState.UNKNOWN -> "UNKNOWN"
+                    LocalA2dpState.CONNECTED -> "READBACK_FAILED"
+                }
+                recoverOriginWithSingleWrite(lease, mac, current, identity, reason)
             },
         )
         when (result) {
@@ -509,6 +518,19 @@ class ApplyWorker(context: Context) {
                 log("所有候选均失败")
                 notifier.notifyResult("音质拉满失败", "${name ?: mac}：所有候选读回不一致")
             }
+            is ApplyRunResult.Recovered -> {
+                VerifiedTargetStore.record(mac, result.origin)
+                notifyResult(
+                    "拉满未完成，已恢复写前参数",
+                    "${name ?: mac} → ${summary(result.origin, identity)}",
+                )
+            }
+            is ApplyRunResult.RecoveryFailed -> {
+                notifier.notifyResult(
+                    "音质拉满失败",
+                    "${name ?: mac}：候选与写前配置恢复均未通过读回验证",
+                )
+            }
             ApplyRunResult.IncompleteCurrent -> {
                 log("参数不完整 · 暂无法判定，跳过写入: mac=$mac current=${current.toJson()}")
             }
@@ -516,8 +538,42 @@ class ApplyWorker(context: Context) {
     }
 
     /**
+     * 明确失败守卫：所有候选写读失败后，仅恢复写前配置一次（会触发一次重协商）。
+     * 只覆盖断连/读回等明确失败；isMusicActive 无法区分正常暂停与无声/杂音，
+     * 因此本守卫不宣称检测或修复“协商成功但播放异常”。
+     */
+    private suspend fun recoverOriginWithSingleWrite(
+        lease: ProviderLease,
+        mac: String,
+        origin: CodecConfig,
+        identity: CodecIdentity,
+        reason: String,
+    ): Boolean {
+        log(
+            "候选均失败，恢复写前配置一次: reason=$reason mac=$mac " +
+                "target=${summary(origin, identity)}；恢复将触发一次重协商"
+        )
+        val res = lease.withService { svc ->
+            withContext(Dispatchers.IO) { svc.writeConfig(mac, origin.toJson()) }
+        }
+        val error = parseError(res)
+        val final = parseFinal(res)
+        val recovered = error == null && parseApplied(res) && final != null &&
+            ApplyPolicy.matches(origin, final)
+        if (recovered) {
+            log("写前配置已恢复 ✓ reason=$reason final=${summary(final!!, identity)}")
+        } else {
+            log(
+                "写前配置恢复失败: reason=$reason error=${error ?: "—"} " +
+                    "final=${final?.let { summary(it, identity) } ?: "—"}"
+            )
+        }
+        return recovered
+    }
+
+    /**
      * writeConfig（内部 500ms×8 读回轮询）+ 外层 1s×3 重试。返回目标是否生效。
-     * [requireExactCs1]（手动显式档位专用，自动路径恒 false 不改语义）：
+     * [requireExactCs1]（手动显式档位与 LHDC 固定档逐级探测使用）：
      * 服务端 applied 只证明 codecType/rate/bits，cs1 必须由 final 读回证明——
      * final 缺失（服务端给不出读回证据）或 final 与目标不符（栈静默落档）都判未生效，
      * 绝不把别的码率档冒充成用户所选档位。

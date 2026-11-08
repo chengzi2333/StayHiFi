@@ -2,6 +2,8 @@ package com.chengzi.stayhifi.trigger
 
 import android.os.IBinder
 import com.chengzi.stayhifi.ICodecService
+import com.chengzi.stayhifi.shell.ProviderAccessException
+import com.chengzi.stayhifi.shell.ProviderAccessReason
 import com.chengzi.stayhifi.shell.ProviderCoordinator
 import com.chengzi.stayhifi.shell.ProviderKind
 import com.chengzi.stayhifi.shell.ProviderLease
@@ -60,12 +62,16 @@ class ApplyProviderGateTest {
     }
 
     private class FakeRootBackend : RootBackend {
+        val openShellCalls = AtomicInteger()
         val bindCalls = AtomicInteger()
         val unbindCalls = AtomicInteger()
         val service = FakeCodecService()
         private val bindingIds = AtomicLong(0)
         override fun grantedState(): Boolean? = true
-        override fun openShell(): RootShellObservation = RootShellObservation(isRoot = true)
+        override fun openShell(): RootShellObservation {
+            openShellCalls.incrementAndGet()
+            return RootShellObservation(isRoot = true)
+        }
         override fun bind(callbacks: RootBindCallbacks): RootBinding {
             bindCalls.incrementAndGet()
             callbacks.onConnected(service)
@@ -273,5 +279,58 @@ class ApplyProviderGateTest {
         assertFalse("异常后锁必须释放", lock.isLocked)
         assertEquals("异常后 lease 必须 close（unbind owner provider）",
             1, h.shizukuFactory.created.single().unbindCalls.get())
+    }
+
+    @Test
+    fun leaseGrantAndCloseExposeProviderIdentityAndGeneration() = runTest {
+        val h = harness()
+        advanceUntilIdle()
+        h.raw.emit("shizuku")
+        advanceUntilIdle()
+        val logs = mutableListOf<String>()
+        val gate = ApplyProviderGate(Mutex(), logs::add)
+        var observedGeneration = -1L
+
+        gate.withLease(h.coordinator, ProviderOwner("apply"), ProviderSource.APPLY) { lease ->
+            observedGeneration = lease.generation
+        }
+
+        assertTrue(logs.any {
+            it.contains("event=provider_gate_lock owner=apply source=APPLY")
+        })
+        assertTrue(logs.any {
+            it.contains("event=provider_gate_granted owner=apply source=APPLY") &&
+                it.contains("kind=SHIZUKU generation=$observedGeneration")
+        })
+        assertTrue(logs.any {
+            it.contains("event=provider_gate_closed owner=apply source=APPLY")
+        })
+    }
+
+    @Test
+    fun coldRootRejectionLogsExactReasonWithoutInteractiveWork() = runTest {
+        val h = harness()
+        advanceUntilIdle()
+        h.raw.emit("root")
+        advanceUntilIdle()
+        val logs = mutableListOf<String>()
+        val gate = ApplyProviderGate(Mutex(), logs::add)
+
+        val error = runCatching {
+            gate.withLease(h.coordinator, ProviderOwner("apply"), ProviderSource.APPLY) { }
+        }.exceptionOrNull()
+
+        assertTrue(error is ProviderAccessException)
+        assertEquals(
+            ProviderAccessReason.NEEDS_FOREGROUND_REVALIDATION,
+            (error as ProviderAccessException).reason,
+        )
+        assertTrue(logs.any {
+            it.contains("event=provider_gate_rejected owner=apply source=APPLY") &&
+                it.contains("reason=NEEDS_FOREGROUND_REVALIDATION")
+        })
+        assertEquals(0, h.backend.openShellCalls.get())
+        assertEquals(0, h.backend.bindCalls.get())
+        assertEquals(0, h.shizukuFactory.created.size)
     }
 }
