@@ -72,19 +72,47 @@ object VendorDiagnostics {
             "rawBitrate=${state.rawBitrate ?: "—"} " +
             "bitrateKbps=${state.bitrateKbps ?: "—"} notStreaming=${state.notStreaming}"
 
-    /** 优先保留关键诊断行，再补其他 State 行；不改原有 dumpsys 抓取。 */
+    /**
+     * 当前编码器的完整段落优先，其余仍按关键词→State 的原顺序补齐；全过程不新增 dumpsys。
+     * 活跃段与其他线索共用同一有界 limit，避免前置关键词把活跃字段挤掉。
+     */
     fun dumpClues(dump: String, limit: Int = 24): List<String> {
         val lines = dump.lineSequence()
             .map { it.trimEnd() }
             .filter { it.isNotBlank() }
-            .distinct()
             .toList()
-        val (keywordLines, remainingLines) = lines.partition { line ->
+        val activeLines = activeCodecSection(lines).distinct()
+        val activeSet = activeLines.toSet()
+        val (keywordLines, remainingLines) = lines.distinct().partition { line ->
             listOf("A2DP", "codec", "quality", "bitrate").any {
                 line.contains(it, ignoreCase = true)
             }
         }
         val stateLines = remainingLines.filter { it.contains("State:") }
-        return (keywordLines + stateLines).take(limit)
+        val legacyLines = (keywordLines + stateLines).filterNot { it in activeSet }
+        return (activeLines + legacyLines).take(limit)
     }
+
+    /** 从原始（未全局去重）行定位 Current Codec 对应段，避免同名值先去重后丢失活跃段。 */
+    private fun activeCodecSection(lines: List<String>): List<String> {
+        val activeCodec = lines.firstNotNullOfOrNull { line ->
+            CURRENT_CODEC.matchEntire(line.trim())?.groupValues?.get(1)
+        } ?: return emptyList()
+        val wanted = normalizeCodec(activeCodec)
+        val start = lines.indexOfFirst { line ->
+            val header = A2DP_SECTION.matchEntire(line.trim())
+            header != null && normalizeCodec(header.groupValues[1]) == wanted
+        }
+        if (start < 0) return emptyList()
+        val end = (start + 1 until lines.size).firstOrNull { index ->
+            A2DP_SECTION.matchEntire(lines[index].trim()) != null
+        } ?: lines.size
+        return lines.subList(start, end)
+    }
+
+    private fun normalizeCodec(value: String): String =
+        value.replace(" ", "").replace("-", "").uppercase()
+
+    private val CURRENT_CODEC = Regex("Current Codec:\\s*(.+?)")
+    private val A2DP_SECTION = Regex("A2DP\\s+(.+?)\\s+State:")
 }
