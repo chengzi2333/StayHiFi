@@ -46,3 +46,10 @@ Android statsd 有蓝牙字节类 atom（如 BluetoothBytesTransfer）。若可�
 
 - 不采集/上传原始 HCI 数据；不进反馈日志。
 - 不为它改 v1.2.4 的发布节奏。
+
+## 样本补充（2026-11-08，第三个独立样本）
+
+OPPO Find X9 Ultra（Android 17 / ColorOS / SM8850，Shizuku）+ FreeBuds Pro 2，LDAC 990kbps 播放中：
+- dump 存在 `A2DP LDAC State:` 段，但段内无任何 quality/bitrate 字段行（dumpClues 过滤器覆盖含 bitrate/quality 的全部行，排除我方漏抓）。
+- 同 dump 中 LHDC V3 段有值（LOW_64 / -1）但属非活跃编码器——佐证「只解析活跃编码器段」的现有设计正确。
+- **新线索**：`BT Quality Report Events: bluetooth_quality_report_support: 1` + aconfig 标志 `bluetooth_quality_report_v8`。BQR（Bluetooth Quality Report）是 SIG 标准链路质量事件，A2DP 类报告可能含字节/包计数；Android 侧经 statsd atom 落盘。若字节计数可读 → 免开发者选项的真实码率路线，优先级提到 snoop 之前验证。
