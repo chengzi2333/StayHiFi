@@ -292,6 +292,37 @@ class VendorDiagnosticsTest {
     }
 
     @Test
+    fun dumpCluesKeepsActiveCodecSectionFieldsWhenKeywordBudgetIsFull() {
+        val activeSection = listOf(
+            "A2DP LDAC State:",
+            "  Priority: 1000000",
+            "  Config: Rate=96000 Bits=32 Mode=STEREO",
+            "  Packet counts (expected/dropped)                        : 10 / 0",
+            "  PCM read bytes (expected/actual)                       : 1000 / 1000",
+            "  LDAC quality mode                                       : HIGH",
+            "  LDAC transmission bitrate (Kbps)                        : 990",
+        )
+        val dump = buildList {
+            add("A2DP Codecs State:")
+            add("  Current Codec: LDAC")
+            repeat(24) { index ->
+                add("  codec-$index quality bitrate: filler-$index")
+            }
+            addAll(activeSection)
+            add("A2DP LHDC V5 State:")
+            add("  LHDC transmission bitrate (Kbps)                  : -1")
+        }.joinToString("\n")
+
+        val clues = VendorDiagnostics.dumpClues(dump)
+
+        assertEquals("活跃段及其全部字段必须先于填充线索保留", activeSection, clues.take(activeSection.size))
+        assertEquals("默认反馈预算不变", 24, clues.size)
+        assertEquals("A2DP Codecs State:", clues[activeSection.size])
+        assertEquals("  Current Codec: LDAC", clues[activeSection.size + 1])
+        assertTrue("其余关键词线索保留原顺序", clues.contains("  codec-0 quality bitrate: filler-0"))
+    }
+
+    @Test
     fun dumpCluesLimitsDefaultResultTo24Lines() {
         val dump = (1..30).joinToString("\n") { "State: $it" }
 
