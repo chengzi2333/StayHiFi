@@ -4,6 +4,7 @@ import com.chengzi.stayhifi.codec.CodecConfig
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ApplyCandidateRunnerTest {
@@ -137,6 +138,31 @@ class ApplyCandidateRunnerTest {
 
         assertEquals(ApplyRunResult.Applied(assessment.candidates[1]), result)
         assertEquals(listOf(0x8008L, 0x8007L), writes.map { it.cs1 })
+    }
+
+    @Test
+    fun adaptiveSettlesBackToAdaptiveWhenAllFixedTiersRejected() = runBlocking {
+        // 用户拍板（2026-11-08）：自适应纳入探测；所有固定档被拒后，兜底候选写回自适应，
+        // 且该兜底写入在所有固定档尝试之后（不得提前短路）。
+        val current = CodecConfig(19, 8004, 2, 2, 2, 0x8009, 0, 0, 0)
+        val capability = current.copy(sampleRate = 43, bitsPerSample = 7, cs1 = 0, cs3 = 1)
+        val assessment = ApplyPolicy.assessTarget(current, listOf(capability))
+        val writes = mutableListOf<CodecConfig>()
+
+        val result = runner.run(
+            current = current,
+            assessment = assessment,
+            beforeFirstWrite = {},
+            writeVerified = { candidate ->
+                writes += candidate
+                candidate.cs1 == 0x8009L
+            },
+        )
+
+        assertEquals(0x8009L, (result as ApplyRunResult.Applied).candidate.cs1)
+        assertEquals(assessment.target!!.sampleRate, result.candidate.sampleRate)
+        val adaptiveIndex = writes.indexOfFirst { it.cs1 == 0x8009L }
+        assertTrue("自适应兜底必须在全部固定档尝试之后", adaptiveIndex >= 9)
     }
 
     @Test

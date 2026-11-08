@@ -457,7 +457,9 @@ class ApplyWorker(context: Context) {
         lease: ProviderLease, mac: String, name: String?,
         current: CodecConfig, selectable: List<CodecConfig>, identity: CodecIdentity,
     ) {
-        val assessment = ApplyPolicy.assessTarget(current, selectable)
+        // v1.2.4：本机已探测定档的 LHDC 设备以定档结果为探测上限，避免每次触发全量重探。
+        val ceiling = LhdcQualityCeilingStore.ceilingFor(mac, current.codecType)
+        val assessment = ApplyPolicy.assessTarget(current, selectable, lhdcQualityCeiling = ceiling)
         when (assessment.status) {
             TargetAssessment.Status.COMPLETE -> log("派生本机最高目标")
             TargetAssessment.Status.CAPABILITY_DEGRADED -> log("能力未完整暴露，按兼容目标重试")
@@ -502,6 +504,13 @@ class ApplyWorker(context: Context) {
             }
             is ApplyRunResult.Applied -> {
                 val candidate = result.candidate
+                // 探测在跑（目标是 LHDC 固定档）才记录定档；被栈降级接受的档位、
+                // 以及固定档全被拒后写回的自适应兜底，同样是定档结论——
+                // 后续自动触发以它为上限，不再重复探更高档。
+                if (assessment.target?.let { ApplyPolicy.isRaisedLhdcQuality(current, it, selectable) } == true) {
+                    LhdcQualityCeilingStore.record(mac, current.codecType, candidate.cs1)
+                    log("LHDC 码率定档: mac=$mac 定档 cs1=${candidate.cs1}(0x${candidate.cs1.toString(16).uppercase()})，后续自动触发不再重探更高档")
+                }
                 if (assessment.status == TargetAssessment.Status.COMPLETE && candidate == assessment.target) {
                     // v1.2.4 问题#6（用户拍板）：协商成功≠播放稳定且程序无法检测无声/杂音，
                     // 成功通知附带自救出口：恢复原参数或自定义调低档位。
@@ -524,6 +533,11 @@ class ApplyWorker(context: Context) {
                 notifier.notifyResult("音质拉满失败", "${name ?: mac}：所有候选读回不一致")
             }
             is ApplyRunResult.Recovered -> {
+                // 固定档全被拒、已恢复写前配置：定档为原 cs1（含自适应），不再重探。
+                if (assessment.target?.let { ApplyPolicy.isRaisedLhdcQuality(current, it, selectable) } == true) {
+                    LhdcQualityCeilingStore.record(mac, current.codecType, result.origin.cs1)
+                    log("LHDC 码率定档: mac=$mac 固定档全被拒，定档回原 cs1=${result.origin.cs1}(0x${result.origin.cs1.toString(16).uppercase()})")
+                }
                 VerifiedTargetStore.record(mac, result.origin)
                 notifyResult(
                     "拉满未完成，已恢复写前参数",
@@ -776,6 +790,8 @@ class ApplyWorker(context: Context) {
             log("恢复默认成功 ✓ 读回=${actual.summary()}")
             // Task 43：后悔药生效后旧的拉满目标作废，否则轮询立刻把默认参数误报成漂移
             VerifiedTargetStore.clear(mac)
+            // 定档记忆一并作废：恢复默认后下次拉满应重新全量探测
+            LhdcQualityCeilingStore.clear(mac)
             restoreEnv.notifyResultIfEnabled("已恢复默认参数", "$name → ${actual.summary()}")
             true
         } else {

@@ -62,7 +62,11 @@ object ApplyPolicy {
      * - 否则 → CAPABILITY_DEGRADED，target/candidates 严格走旧 [deriveTarget] + 单参降档链。
      * cs1 规则与 [deriveTarget] 一致（BEST_CS1 表），channel/cs2~cs4 继承 current。
      */
-    fun assessTarget(current: CodecConfig, selectable: List<CodecConfig>): TargetAssessment {
+    fun assessTarget(
+        current: CodecConfig,
+        selectable: List<CodecConfig>,
+        lhdcQualityCeiling: Long? = null,
+    ): TargetAssessment {
         if (!Negotiation.isValidBase(current)) {
             return TargetAssessment(TargetAssessment.Status.INCOMPLETE_CURRENT, null, emptyList())
         }
@@ -81,16 +85,18 @@ object ApplyPolicy {
                 bitsPerSample = bits,
                 cs1 = BEST_CS1[current.codecType] ?: current.cs1,
             )
-            val raisedTarget = raisedLhdcTarget(legacyTarget, selectable)
+            val raisedTarget = raisedLhdcTarget(legacyTarget, selectable, lhdcQualityCeiling)
             val target = raisedTarget ?: legacyTarget
             val legacyCandidates = Negotiation.descending(legacyTarget, selectable)
             val candidates = if (raisedTarget == null) {
                 legacyCandidates
             } else {
-                // 非 vivo 固定档从 1000kbps 逐级严格探测到 64kbps，再按原 cs1
-                // 做采样率回退；不得从 1000 直接跳回旧档而漏掉双方可开的更高档。
-                (LHDC_FIXED_QUALITY_CS1.map { legacyTarget.copy(cs1 = it) } + legacyCandidates)
-                    .distinct()
+                // 非 vivo LHDC（固定档与自适应都纳入，2026-11-08 用户拍板）从定档上限
+                // （默认 1000kbps）逐级严格探测到 64kbps，再按原 cs1 做采样率回退；
+                // 不得从最高档被拒直接跳回旧档而漏掉双方可开的更高档。
+                val topTier = lhdcQualityCeiling ?: LHDC_BEST_CS1
+                (LHDC_FIXED_QUALITY_CS1.filter { it <= topTier }.map { legacyTarget.copy(cs1 = it) } +
+                    legacyCandidates).distinct()
             }
             return TargetAssessment(
                 TargetAssessment.Status.COMPLETE,
@@ -115,11 +121,18 @@ object ApplyPolicy {
         candidate.cs1 in LHDC_FIXED_QUALITY_CS1 &&
         raisedLhdcTarget(current, selectable) != null
 
-    private fun raisedLhdcTarget(current: CodecConfig, selectable: List<CodecConfig>): CodecConfig? {
-        if (BEST_CS1[current.codecType] != null || current.cs1 == LHDC_ADAPTIVE_CS1) return null
+    private fun raisedLhdcTarget(
+        current: CodecConfig,
+        selectable: List<CodecConfig>,
+        ceiling: Long? = null,
+    ): CodecConfig? {
+        if (BEST_CS1[current.codecType] != null) return null
+        // ceiling=自适应：本机已探测定档为自适应（固定档全被拒），不再重复探测。
+        // 注意 current 本身是自适应（0x8009）不再排除探测（2026-11-08 用户拍板）。
+        if (ceiling == LHDC_ADAPTIVE_CS1) return null
         val capsMask = Masks.capsRateMask(current.codecType, selectable)
         if (Masks.qualityLabel(current.codecType, current.cs1, capsMask) == null) return null
-        return current.copy(cs1 = LHDC_BEST_CS1)
+        return current.copy(cs1 = ceiling ?: LHDC_BEST_CS1)
     }
 
     /**

@@ -90,6 +90,7 @@ import com.chengzi.stayhifi.shell.RootVerificationResult
 import com.chengzi.stayhifi.trigger.ApplyPolicy
 import com.chengzi.stayhifi.trigger.ApplyTriggers
 import com.chengzi.stayhifi.trigger.ApplyWorker
+import com.chengzi.stayhifi.trigger.LhdcQualityCeilingStore
 import com.chengzi.stayhifi.trigger.ManualApplyResult
 import com.chengzi.stayhifi.trigger.TriggerSource
 import com.chengzi.stayhifi.trigger.TargetAssessment
@@ -2087,6 +2088,8 @@ class MainActivity : ComponentActivity() {
     private fun onApplyNow() {
         val mac = connectedMac ?: return
         val name = connectedName
+        // 手动拉满 = 用户显式要求重新全量探测，作既定档记忆（自动路径仍以定档为上限）。
+        LhdcQualityCeilingStore.clear(mac)
         // Task 31 加载态：按下即进处理态，run 完成/异常 finally 回弹并刷新实况。
         homeState = homeState.copy(applying = true)
         lifecycleScope.launch {
