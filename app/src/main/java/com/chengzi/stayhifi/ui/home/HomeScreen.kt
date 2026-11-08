@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.RealtimeDisplay
 import com.chengzi.stayhifi.codec.RealtimeDisplayFormatter
+import com.chengzi.stayhifi.codec.RealtimeNoDataReason
 import com.chengzi.stayhifi.codec.RealtimeState
 import com.chengzi.stayhifi.trigger.TargetAssessment
 import com.chengzi.stayhifi.ui.nav.StayHiFiIcons
@@ -78,6 +79,8 @@ data class HomeUiState(
      * 文案唯一入口见 [RealtimeDisplayFormatter]。
      */
     val realtimeDisplay: RealtimeDisplay = RealtimeDisplay.NO_DATA,
+    /** v1.2.4：NO_DATA 的证据分级文案依据；仅 realtimeDisplay==NO_DATA 时有意义。 */
+    val realtimeNoDataReason: RealtimeNoDataReason = RealtimeNoDataReason.UNKNOWN,
     /** 是否已达本机最高音质输出；仅 COMPLETE 且读回匹配时为 true。 */
     val fullBars: Boolean = false,
     /**
@@ -398,9 +401,9 @@ private fun RealtimeSection(state: HomeUiState) {
             // STACK_REPORTS_IDLE 不显示该指引，其余状态保留调度解释。
             // UX 收敛：解释行压成一句人话，研究结论（vivo 栈实测等）只留日志/反馈报告。
             text = if (state.realtimeDisplay == RealtimeDisplay.NO_DATA) {
-                // v1.2.4 问题#1 口径：明说原因（栈未回报）而非含糊的「读取不到」，
-                // 不断言「多数品牌」等未取证范围。
-                "该机型系统未回报传输码率，可到 设置 › 运行日志 复制日志反馈"
+                // v1.2.4 分层说明：按证据说具体原因（DSP 卸载/段空/无段），
+                // 证据不足才回落反馈引导（UNKNOWN）。
+                RealtimeDisplayFormatter.noDataHint(state.realtimeNoDataReason)
             } else {
                 "部分机型固定档仍会自适应，以实际传输为准"
             },

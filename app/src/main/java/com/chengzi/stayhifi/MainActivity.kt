@@ -1966,7 +1966,7 @@ class MainActivity : ComponentActivity() {
                         val parsed = result.state
                         parsedState = parsed
                         parsedResult = result
-                        realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result)
+                        realtime = BtStateParser.realtimeDisplay(isMusicActive = true, result = result, dump = btDump)
                         // Task 8：实时诊断唯一出口——identity 门控 + 仅无段/无码率/歧义；
                         // NOT_STREAMING 走下方 vendor 证据，AVAILABLE 复位去重基准。
                         val issue = VendorDiagnostics.realtimeIssue(presentation.identity, result)
@@ -2063,6 +2063,7 @@ class MainActivity : ComponentActivity() {
             realtimeKbps = realtime.bitrateKbps,
             realtimeQualityMode = realtime.qualityMode,
             realtimeDisplay = realtime.display,
+            realtimeNoDataReason = realtime.noDataReason,
             fullBars = fullBars,
             targetStatus = targetAssessment.status,
             manualActive = manualActive,

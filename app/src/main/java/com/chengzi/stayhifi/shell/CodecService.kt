@@ -226,7 +226,10 @@ class CodecService : ICodecService.Stub() {
                 for (line in lines) {
                     if (line.contains("State:") ||
                         line.contains("quality", ignoreCase = true) ||
-                        line.contains("bitrate", ignoreCase = true)
+                        line.contains("bitrate", ignoreCase = true) ||
+                        // v1.2.4：DSP 卸载证据行（如 ColorOS "Codec location: ADSP"），
+                        // 是 NO_DATA 分层说明的判定依据，必须随 dump 回传
+                        line.contains("Codec location:", ignoreCase = true)
                     ) {
                         synchronized(kept) { kept.append(line).append('\n') }
                     }

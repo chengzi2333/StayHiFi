@@ -197,8 +197,14 @@ object BtStateParser {
      *   music=true + AVAILABLE 且有合法码率 → AVAILABLE（唯一携带 bitrate/quality 的态）
      *   music=true + NOT_STREAMING          → STACK_REPORTS_IDLE（栈回报 idle，与 isMusicActive 矛盾 → 暂无法确认）
      *   其余（无段/歧义/无码率字段）          → NO_DATA
+     * v1.2.4：NO_DATA 时若传入本轮 dump，附证据分级 [RealtimeNoDataReason]；
+     * dump 缺省（旧调用方/非 dump 路径）恒 UNKNOWN，不伪造原因。
      */
-    fun realtimeDisplay(isMusicActive: Boolean, result: BtStateParseResult): RealtimeState {
+    fun realtimeDisplay(
+        isMusicActive: Boolean,
+        result: BtStateParseResult,
+        dump: String? = null,
+    ): RealtimeState {
         val state = result.state
         return when {
             !isMusicActive -> RealtimeState(RealtimeDisplay.NOT_PLAYING)
@@ -206,7 +212,29 @@ object BtStateParser {
                 RealtimeState(RealtimeDisplay.AVAILABLE, state?.bitrateKbps, state?.qualityMode)
             result.status == BtStateParseStatus.NOT_STREAMING || state?.notStreaming == true ->
                 RealtimeState(RealtimeDisplay.STACK_REPORTS_IDLE)
-            else -> RealtimeState(RealtimeDisplay.NO_DATA)
+            else -> RealtimeState(
+                RealtimeDisplay.NO_DATA,
+                noDataReason = noDataReason(result, dump),
+            )
+        }
+    }
+
+    /** DSP 卸载线索行（ColorOS 17 实证 "Codec location: ADSP"）；全 dump 扫描，不限段落。 */
+    internal fun detectCodecLocation(dump: String): String? =
+        dump.lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("Codec location:") }
+            ?.substringAfter(':')?.trim()
+
+    private fun noDataReason(result: BtStateParseResult, dump: String?): RealtimeNoDataReason {
+        // ADSP 线索优先：它能解释「段在但字段空」，是最具体的有证据原因
+        if (dump != null && detectCodecLocation(dump).equals("ADSP", ignoreCase = true)) {
+            return RealtimeNoDataReason.OFFLOAD_DSP
+        }
+        return when (result.status) {
+            BtStateParseStatus.NO_BITRATE -> RealtimeNoDataReason.SECTION_EMPTY
+            BtStateParseStatus.NO_SECTION -> RealtimeNoDataReason.NO_SECTION
+            else -> RealtimeNoDataReason.UNKNOWN
         }
     }
 
