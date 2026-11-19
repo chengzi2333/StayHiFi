@@ -9,3 +9,9 @@ local.properties
 .analysis/
 docs/marketing/
 .playwright-mcp/
+# 本地打包产物（Release 走 GitHub Releases，不进仓库）
+*.apk
+*.idsig
+*.aab
+# 本地 Agent 工作日志（不入库）
+.workbuddy/
