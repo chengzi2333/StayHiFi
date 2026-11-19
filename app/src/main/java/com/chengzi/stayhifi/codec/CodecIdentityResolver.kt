@@ -63,7 +63,9 @@ object CodecIdentityResolver {
                         val systemIdentity = CodecIdentity(
                             nativeType = current.codecType,
                             family = codecFamilyOf(entry.codecName),
-                            displayName = entry.codecName.trim(),
+                            // 展示统一为 "LHDC V5" 读法（nubia 栈原名 "LHDCv5"）；
+                            // 段落匹配走 normalizeCodecName，与空格/连字符差异无关。
+                            displayName = canonicalCodecDisplayName(entry.codecName),
                             codecId = entry.codecId,
                             source = CodecIdentitySource.SYSTEM_TYPE,
                         )
@@ -85,7 +87,7 @@ object CodecIdentityResolver {
                     CodecIdentity(
                         nativeType = current.codecType,
                         family = codecFamilyOf(extendedName),
-                        displayName = extendedName.trim(),
+                        displayName = canonicalCodecDisplayName(extendedName),
                         codecId = extendedIdentity.codecId,
                         source = CodecIdentitySource.EXTENDED_CONFIG,
                     ),
@@ -167,10 +169,10 @@ object CodecIdentityResolver {
         return systemVersion != null && legacyVersion != null && systemVersion != legacyVersion
     }
 
-    /** LHDC 版本后缀（如 "V3"）；generic "LHDC" 或无版本信息返回 null。 */
-    private fun lhdcVersionSuffix(name: String): String? {
-        val upper = name.trim().uppercase()
-        if (upper != "LHDC" && !upper.startsWith("LHDC ")) return null
-        return upper.removePrefix("LHDC").trim().ifEmpty { null }
-    }
+    /**
+     * LHDC 版本后缀（如 "V3"）；generic "LHDC" 或无版本信息返回 null。
+     * 归一化后判定，故 "LHDCv5"/"LHDCV5"/"LHDC 5"/"LHDC-5.0" 都得到 "V5"/"V5.0"，
+     * "LHDCX" 这类非版本后缀仍返回 null（不硬认）。
+     */
+    private fun lhdcVersionSuffix(name: String): String? = lhdcVersionOf(name)
 }

@@ -77,25 +77,25 @@ fun RootStatusCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (!ready) {
-                    Button(
-                        onClick = onRequestAuthorization,
-                        enabled = !busy,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) {
-                        Text(if (busy) "正在验证…" else "请求 Root 授权")
-                    }
-                }
-                TextButton(
-                    onClick = { detailVisible = true },
-                    modifier = Modifier.heightIn(min = 48.dp),
+            // 与 ADB 授权卡统一：主操作满宽、48dp 高；次级入口统一为居中文字按钮。
+            if (!ready) {
+                Button(
+                    onClick = onRequestAuthorization,
+                    enabled = !busy,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp),
                 ) {
-                    Text("查看详情")
+                    Text(if (busy) "正在验证…" else "请求 Root 授权")
                 }
+            }
+            TextButton(
+                onClick = { detailVisible = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp),
+            ) {
+                Text("查看详情")
             }
         }
     }

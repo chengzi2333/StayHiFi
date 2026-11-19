@@ -5,9 +5,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -20,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -40,6 +44,7 @@ import com.chengzi.stayhifi.shell.RootShellStatus
 import com.chengzi.stayhifi.shell.RootSnapshot
 import com.chengzi.stayhifi.shell.RootStatus
 import com.chengzi.stayhifi.ui.common.RootStatusCard
+import com.chengzi.stayhifi.ui.nav.StayHiFiIcons
 import com.chengzi.stayhifi.ui.theme.StayHiFiTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -109,7 +114,6 @@ sealed interface OnboardingAction {
     data object Next : OnboardingAction
     data object Finish : OnboardingAction
 
-    data class InstallCarrier(val kind: CarrierKind) : OnboardingAction
     data class OpenCarrierGuide(val kind: CarrierKind) : OnboardingAction
     data class RequestCarrierPermission(val kind: CarrierKind) : OnboardingAction
 
@@ -121,9 +125,6 @@ sealed interface OnboardingAction {
     data object CancelRootAuthorization : OnboardingAction
 
     data object RefreshConnection : OnboardingAction
-
-    /** v1.2.2：连接页「排障日志」次级入口——直接复用运行日志页，不要求完成引导。 */
-    data object OpenLogs : OnboardingAction
 
     data object OpenAutostartSettings : OnboardingAction
     data object OpenBatteryWhitelist : OnboardingAction
@@ -256,41 +257,58 @@ private fun CarrierPage(state: OnboardingUiState, onAction: (OnboardingAction) -
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         PageHeader(
-            title = "选择特权方式",
-            subtitle = "StayHiFi 需要系统权限才能调校耳机参数，选一种方式准备好即可。",
+            title = "选择授权方式",
+            subtitle = "改耳机音质参数需要一次系统授权。两种方式挑一个，之后随时能改。",
         )
-        // Task D10（§11.2）：顶部两个明确选择，不按谁先 ready 自动改选；
-        // 选择是纯 UI 态，Root 只有显式「请求 Root 授权」验证成功后才持久化。
-        ProviderChoiceCard(
-            title = "Shizuku / Stellar（推荐）",
-            description = "安装任意一个并授权，即可获得调校权限。",
-            selected = state.providerChoice == ProviderKind.SHIZUKU,
-            onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.SHIZUKU)) },
-        )
-        ProviderChoiceCard(
-            title = "Root（实验）",
-            // spec §11.2 简洁事实句（UX 收敛后口径，三条边界齐全：实验/不提上限/可退回）
-            description = "已 Root 的设备可选；不提升音质上限，随时可切回。",
-            selected = state.providerChoice == ProviderKind.ROOT,
-            onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.ROOT)) },
-        )
+        // 内容组在剩余空间里垂直居中，避免上重下空的观感。
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+        ) {
+        // 一行两个模式卡：默认 ADB，选中哪张下面就展开哪张的授权卡（同一套交互）。
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Max),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            ModeCard(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                title = "ADB 模式",
+                description = "免 Root，装个工具授权一次",
+                selected = state.providerChoice == ProviderKind.SHIZUKU,
+                onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.SHIZUKU)) },
+            )
+            ModeCard(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                title = "Root 模式",
+                description = "已 Root 的设备可选，实验性",
+                selected = state.providerChoice == ProviderKind.ROOT,
+                onClick = { onAction(OnboardingAction.SelectProvider(ProviderKind.ROOT)) },
+            )
+        }
+        // 两种模式共用一套结构：一张状态卡 + 一个主操作（ADB / Root 交互完全对齐）。
         when (state.providerChoice) {
-            ProviderKind.SHIZUKU -> {
-                CarrierCard(state.shizuku, onAction)
-                CarrierCard(state.stellar, onAction)
-            }
+            ProviderKind.SHIZUKU -> AdbPermissionCard(state, onAction)
             ProviderKind.ROOT -> RootStatusCardSection(state, onAction)
+        }
         }
     }
 }
 
+/** 模式卡（一行两列共用）：标题 + 一行小字，选中态靠底色区分；两张卡等高。 */
 @Composable
-private fun ProviderChoiceCard(
+private fun ModeCard(
+    modifier: Modifier = Modifier,
     title: String,
     description: String,
     selected: Boolean,
@@ -298,7 +316,7 @@ private fun ProviderChoiceCard(
 ) {
     Card(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier,
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (selected) {
@@ -309,8 +327,10 @@ private fun ProviderChoiceCard(
         ),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .fillMaxHeight()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -318,14 +338,116 @@ private fun ProviderChoiceCard(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                 )
-                Spacer(Modifier.weight(1f))
-                if (selected) {
-                    StatusBadge(text = "已选", positive = true)
-                }
             }
             Text(
                 text = description,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** ADB 侧当前该操作哪个载体：就绪 > 运行中 > 已安装 > 默认 Shizuku（用于「去安装」）。 */
+private fun adbTarget(state: OnboardingUiState): CarrierUiState = when {
+    state.shizuku.ready -> state.shizuku
+    state.stellar.ready -> state.stellar
+    state.shizuku.running -> state.shizuku
+    state.stellar.running -> state.stellar
+    state.shizuku.installed -> state.shizuku
+    state.stellar.installed -> state.stellar
+    else -> state.shizuku
+}
+
+private fun carrierStateText(carrier: CarrierUiState): String = when {
+    carrier.ready -> "已就绪"
+    !carrier.installed -> "未安装"
+    !carrier.running -> "未启动"
+    else -> "未授权"
+}
+
+/**
+ * ADB 授权卡：把原「Shizuku 卡 + Stellar 卡」合成一张——用户只需要知道「现在能不能用」，
+ * 不需要分别理解两个工具的状态。结构与 Root 侧 [RootStatusCard] 一致：状态 + 一个主操作。
+ */
+@Composable
+private fun AdbPermissionCard(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
+    val target = adbTarget(state)
+    val ready = state.shizuku.ready || state.stellar.ready
+    val anyInstalled = state.shizuku.installed || state.stellar.installed
+    val statusText = when {
+        ready -> "已就绪，可以继续"
+        !anyInstalled -> "未检测到授权工具"
+        !target.running -> "${target.kind.displayName} 已安装，还没启动"
+        else -> "等待授权"
+    }
+    // 不提供任何安装渠道：工具由用户自行安装，这里只给「启动/授权」两个动作。
+    val primaryAction: (@Composable () -> Unit)? = when {
+        ready || !anyInstalled -> null
+        !target.running -> {
+            {
+                Button(
+                    onClick = { onAction(OnboardingAction.OpenCarrierGuide(target.kind)) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp),
+                ) { Text("启动 Shizuku") }
+            }
+        }
+        else -> {
+            {
+                Button(
+                    onClick = { onAction(OnboardingAction.RequestCarrierPermission(target.kind)) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp),
+                ) { Text("请求授权") }
+            }
+        }
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (ready) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (ready) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline,
+                        ),
+                )
+                Spacer(Modifier.size(10.dp))
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Text(
+                text = "Shizuku · ${carrierStateText(state.shizuku)}　" +
+                    "Stellar · ${carrierStateText(state.stellar)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            primaryAction?.invoke()
+            Text(
+                text = "装好 Shizuku、Shizuku-next 或 Stellar 任意一个后回到这里，检测是自动的；" +
+                    "授权弹窗显示 Shizuku 属正常（Stellar 是其兼容分支）。",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -352,161 +474,87 @@ private fun RootStatusCardSection(state: OnboardingUiState, onAction: (Onboardin
 }
 
 @Composable
-private fun CarrierCard(
-    carrier: CarrierUiState,
-    onAction: (OnboardingAction) -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = if (carrier.ready) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceVariant
-            },
-        ),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = carrier.kind.displayName,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(Modifier.weight(1f))
-                if (carrier.ready) {
-                    StatusBadge(text = "已就绪", positive = true)
-                }
-            }
-            CarrierStatusRow("已安装", carrier.installed)
-            CarrierStatusRow("运行中", carrier.running)
-            CarrierStatusRow("已授权", carrier.granted)
-            // Task 36 Bug A：授权弹窗由 Stellar 自己渲染且沿用了 Shizuku 文案（改不了它的字），
-            // 提前说明，避免用户看到「允许使用 Shizuku」以为装错了 App。
-            if (carrier.kind == CarrierKind.STELLAR) {
-                Text(
-                    text = "授权弹窗显示 Shizuku 属正常（Stellar 是其兼容分支）。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!carrier.installed) {
-                    Button(
-                        onClick = { onAction(OnboardingAction.InstallCarrier(carrier.kind)) },
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) { Text("去安装") }
-                } else {
-                    if (!carrier.running) {
-                        Button(
-                            onClick = { onAction(OnboardingAction.OpenCarrierGuide(carrier.kind)) },
-                            modifier = Modifier.heightIn(min = 48.dp),
-                        ) { Text("启动指引") }
-                    }
-                    if (!carrier.granted) {
-                        TextButton(
-                            onClick = { onAction(OnboardingAction.RequestCarrierPermission(carrier.kind)) },
-                            modifier = Modifier.heightIn(min = 48.dp),
-                        ) { Text("请求授权") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CarrierStatusRow(label: String, ok: Boolean) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .size(10.dp)
-                .clip(CircleShape)
-                .background(
-                    if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                ),
-        )
-        Spacer(Modifier.size(8.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
 private fun ConnectPage(state: OnboardingUiState, onAction: (OnboardingAction) -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         PageHeader(
-            title = "连接你的耳机",
-            subtitle = "请戴上耳机，或打开耳机盒盖，让手机完成蓝牙连接。",
+            title = "连接你的蓝牙音频设备",
+            subtitle = "耳机、音箱都行。打开设备并靠近手机，在系统蓝牙里连上它。",
         )
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = if (state.headsetConnected) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-            ),
+        // 视觉主体是设备本身：一个图标 + 设备名，状态只用一行字说明，不再叠口号。
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center,
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(
                     modifier = Modifier
-                        .size(12.dp)
+                        .size(168.dp)
                         .clip(CircleShape)
                         .background(
                             if (state.headsetConnected) {
-                                MaterialTheme.colorScheme.primary
+                                MaterialTheme.colorScheme.primaryContainer
                             } else {
-                                MaterialTheme.colorScheme.outline
+                                MaterialTheme.colorScheme.surfaceVariant
                             },
                         ),
-                )
-                Spacer(Modifier.size(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = if (state.headsetConnected) "已连接" else "等待连接…",
-                        style = MaterialTheme.typography.titleMedium,
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = StayHiFiIcons.Headphones,
+                        contentDescription = null,
+                        modifier = Modifier.size(72.dp),
+                        tint = if (state.headsetConnected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
-                    state.headsetName?.let {
-                        Text(
-                            text = it,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
                 }
+                Spacer(Modifier.size(28.dp))
+                Text(
+                    text = if (state.headsetConnected) {
+                        state.headsetName ?: "已连接"
+                    } else {
+                        "等待连接"
+                    },
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    text = if (state.headsetConnected) {
+                        "已连接"
+                    } else {
+                        "打开设备并靠近手机"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.size(16.dp))
                 TextButton(
                     onClick = { onAction(OnboardingAction.RefreshConnection) },
-                    modifier = Modifier.heightIn(min = 48.dp),
-                ) { Text("刷新") }
+                    modifier = Modifier.heightIn(min = 44.dp),
+                ) { Text("重新检测") }
             }
         }
-        // v1.2.2：排障日志次级入口——连接异常时用户可就地查看/复制日志反馈，
-        // 不强制完成引导；返回经 LogsScreen BackHandler 回到本页。
-        TextButton(
-            onClick = { onAction(OnboardingAction.OpenLogs) },
-            modifier = Modifier
-                .align(Alignment.CenterHorizontally)
-                .heightIn(min = 48.dp),
-        ) { Text("排障日志") }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "连不上？",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "确认设备在配对模式 · 检查是否还连着别的手机 · 已连上却没反应就点「重新检测」",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

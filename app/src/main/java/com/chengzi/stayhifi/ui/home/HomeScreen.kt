@@ -24,6 +24,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -165,12 +166,11 @@ fun HomeScreen(
                 StatusCard(state)
             }
 
-            // 底部动作组（UX 修正）：主按钮与「自定义音质」同宽同轴，
-            // 组内 8dp 建立邻近性，组外沿用 16dp；次级入口满宽保证点击热区与视觉对齐，
-            // 避免自适应宽度的 TextButton 与胶囊按钮中心轴错位 2–3dp。
-            Column(
+            // v1.2.5 底部动作组：主按钮与「自定义音质」并排一行（图标 + 文案），
+            // 主操作仍是填充按钮、次操作描边按钮，层级靠样式而不是靠上下错位区分。
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Button(
                     onClick = { onAction(HomeAction.ApplyNow) },
@@ -178,8 +178,9 @@ fun HomeScreen(
                     // 状态行已说明「已连接，授权后可用」，不给一个点了必失败的按钮。
                     enabled = state.headsetName != null && state.paramsAvailable && !state.applying,
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .weight(1f)
                         .heightIn(min = 56.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
                 ) {
                     if (state.applying) {
                         // Task 31 加载态：处理中禁用按钮，小号转圈 + 文案，完成信号回弹由 MainActivity 给。
@@ -194,32 +195,50 @@ fun HomeScreen(
                             )
                             Text(
                                 text = "应用中…",
-                                style = MaterialTheme.typography.titleMedium,
+                                style = MaterialTheme.typography.titleSmall,
                             )
                         }
                     } else {
-                        Text(
-                            // 两态文案（Task 27）：无对比行、无"最高/最强参数"字样；"满血"仅徽标保留。
-                            text = if (state.fullBars) "重新拉满" else "立即拉满",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                imageVector = StayHiFiIcons.Bolt,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                // 两态文案（Task 27）：无对比行、无"最高/最强参数"字样；"满血"仅徽标保留。
+                                text = if (state.fullBars) "重新拉满" else "立即拉满",
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+                        }
                     }
                 }
 
-                // 「自定义音质」次级入口（UX 拍板）：主按钮下方一行，不与主按钮并列；
-                // 仅在已连接且读到能力快照时可用。保持可见但禁用，避免主按钮随可用性跳位。
-                TextButton(
+                OutlinedButton(
                     onClick = { editorVisible = true },
                     enabled = state.manualEditor != null && !state.applying,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp),
+                        .weight(1f)
+                        .heightIn(min = 56.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
                 ) {
-                    Text(
-                        text = "自定义音质",
-                        style = MaterialTheme.typography.titleSmall,
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(
+                            imageVector = StayHiFiIcons.Tune,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            text = "自定义音质",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                    }
                 }
             }
         }

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -69,7 +70,8 @@ fun DevicesScreen(
     onAction: (DevicesAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Scaffold(modifier = modifier) { innerPadding ->
+    // v1.2.5：本页已在外层 Scaffold 内容区内，别再次应用状态栏内边距（会把标题压下去）。
+    Scaffold(modifier = modifier, contentWindowInsets = WindowInsets(0)) { innerPadding ->
         Column(
             modifier = Modifier
                 .padding(innerPadding)
