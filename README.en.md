@@ -30,10 +30,12 @@ StayHiFi takes that chore off your plate: the instant a headset connects, it wri
 
 - **Maxed the moment you connect**: the target parameters are derived on the fly from what the current connection actually supports, and verified by reading the config back after writing; trigger merging and disconnect protection keep reconnects and playback starts steady
 - **A status card that tells it straight**: "At this phone's maximum output quality" / "Not maxed out · tap to retry" / "Custom parameters active" / "Connected — authorize to continue" — no wishful claims
-- **Auto re-max on reconnect**: a foreground service listens for connection events — event-driven, no idle polling
+- **Auto re-max on reconnect**: the foreground service only listens for connection events — no periodic reads in the background; the privileged process is created on demand and exits when idle (v1.2.5)
 - **Custom Quality**: codec / sample rate / bit depth / bitrate can be adjusted manually within what the current connection supports; if maxing out leaves you with no sound or artifacts, step a notch down or return to adaptive with one tap — greyed-out choices are simply what your phone or headset doesn't offer right now. A custom setup is labeled "Custom" and never masquerades as "maxed out" — the default auto-max rule stays unchanged
 - **Identity & live diagnostics**: verifies which codec your phone is actually running; on devices whose stack reports it, the card shows the live transmitted bitrate — and says so plainly when it can't be read. On some devices even a "fixed" bitrate stays adaptive, so trust the live readout
 - **Persistent silent notification + QS tile**: optional live parameter readout; the QS tile re-applies the max with one tap, or opens the app when nothing is connected
+- **No background churn**: playback state is read only while the app is in the foreground; other apps playing audio no longer wake it, and repeated service restarts no longer re-run the max-out flow (v1.2.5)
+- **Settings & About**: grouped settings on one screen; About page with update check, logs, feedback group, license and disclaimer — plus a donate entry
 - **iOS-style floating Dock navigation**: spring lens + jelly-physics motion, drag-tracking
 - **Record current parameters**: the entry lives on the Devices page — capture the current negotiated parameters once and archive them, with device model / Android version provenance; model names resolve offline (v1.2.2)
 - **One-tap restore anytime**: the Devices page can write the parameters back to the original negotiated values from before the first max-out
