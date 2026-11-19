@@ -15,3 +15,4 @@ docs/marketing/
 *.aab
 # 本地 Agent 工作日志（不入库）
 .workbuddy/
+dist/
