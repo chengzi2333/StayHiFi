@@ -102,4 +102,49 @@ class LogBufferTest {
         val line = buffer.append("hello")
         assertTrue(Regex("""^\[\d{2}:\d{2}:\d{2}\] hello$""").matches(line))
     }
+
+    @Test
+    fun longMessageIsClampedAndMarked() {
+        val buffer = LogBuffer(nowMillis = { 0L })
+        val line = buffer.append("x".repeat(500))
+        // 220 字符正文 + 截断标注，且标注能说明截掉了多少
+        assertTrue(line.endsWith("…(截断 280 字)"))
+        assertEquals(1, buffer.snapshot().size)
+    }
+
+    @Test
+    fun consecutiveDuplicatesCollapseWithinWindow() {
+        var clock = 0L
+        val buffer = LogBuffer(nowMillis = { clock })
+        buffer.append("首页刷新：bind 超时")
+        clock = 2_000L
+        buffer.append("首页刷新：bind 超时")
+        clock = 4_000L
+        val merged = buffer.append("首页刷新：bind 超时")
+        assertTrue(merged.endsWith("（重复 3 次）"))
+        assertEquals(1, buffer.snapshot().size)
+    }
+
+    @Test
+    fun duplicatesOutsideWindowAreKeptSeparately() {
+        var clock = 0L
+        val buffer = LogBuffer(nowMillis = { clock })
+        buffer.append("同一句")
+        clock = 30_000L
+        buffer.append("同一句")
+        assertEquals(2, buffer.snapshot().size)
+    }
+
+    @Test
+    fun differentMessageBreaksCollapseChain() {
+        var clock = 0L
+        val buffer = LogBuffer(nowMillis = { clock })
+        buffer.append("A")
+        buffer.append("B")
+        clock = 1_000L
+        buffer.append("A")
+        val snap = buffer.snapshot()
+        assertEquals(3, snap.size)
+        assertTrue(snap.none { it.contains("重复") })
+    }
 }

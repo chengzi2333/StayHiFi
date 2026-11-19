@@ -37,7 +37,12 @@ object VendorStackDiagnostics {
     const val SCHEMA_VERSION = 1
 
     // ---- 预算（Global Constraints §诊断预算）----
-    const val MAX_TOTAL_CHARS = 12_000
+    /**
+     * 单行总预算。原来是 12_000：一行诊断就能把整份反馈日志撑满，用户反馈「日志几十 K」。
+     * 现在压到 1_400——identity / current / reasons / 前几条能力 + 线索都在，
+     * 更长的 local/selectable 由分节上限与 truncatedCount 表达，不再全文倾倒。
+     */
+    const val MAX_TOTAL_CHARS = 1_400
     const val MAX_LOCAL_ENTRIES = 8
     const val MAX_SELECTABLE_ENTRIES = 16
     const val MAX_SUPPORTED_TYPES = 32

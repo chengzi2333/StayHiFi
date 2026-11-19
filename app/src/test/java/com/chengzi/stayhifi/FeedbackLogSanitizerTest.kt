@@ -233,4 +233,24 @@ class FeedbackLogSanitizerTest {
 
         assertEquals("sampleRate=48000", out)
     }
+
+    @Test
+    fun longLineIsClampedInReport() {
+        val long = "[12:00:00] " + "x".repeat(600)
+        val out = sanitizer.sanitize(listOf(long))
+        assertTrue(out.endsWith("…(截断)"))
+        assertTrue(out.length <= 260)
+    }
+
+    @Test
+    fun overBudgetDropsOldestLinesAndMarksIt() {
+        // 每行 ~200 字符，60 行超过 9000 字符预算
+        val many = (1..60).map { "[12:00:00] " + "y".repeat(190) + "#$it" }
+        val out = sanitizer.sanitize(many)
+        assertTrue(out.startsWith("…(因体积预算省略较早的"))
+        val kept = out.lines()
+        assertTrue(kept.size < many.size)
+        // 最新一行必须保留
+        assertTrue(out.endsWith("#60"))
+    }
 }

@@ -72,11 +72,15 @@ class FeedbackLogSanitizer {
         val normal = lines.takeLast(normalWindow)
         if (normal.isEmpty() && diagnostic.isEmpty()) return ""
         (normal + diagnostic).forEach { discover(it) }
-        return listOf(normal, diagnostic)
-            .filter { it.isNotEmpty() }
-            .joinToString("\n") { section ->
-                section.joinToString("\n") { line -> sanitizeLine(line) }
-            }
+        // v1.2.5 体积治理：行数窗口之外再加一道字符预算——单行 dump/JSON 再长也不会
+        // 让整份报告膨胀到几十 K；超出预算时从最旧的一行开始丢，并留一行显式标记。
+        val (keptNormal, keptDiagnostic, droppedCount) = trimToBudget(normal, diagnostic)
+        val sections = listOf(keptNormal, keptDiagnostic).filter { it.isNotEmpty() }
+        val body = sections.joinToString("\n") { section ->
+            section.joinToString("\n") { line -> sanitizeLine(line) }
+        }
+        if (droppedCount == 0) return body
+        return "…(因体积预算省略较早的 $droppedCount 行)\n$body"
     }
 
     /** 仅清内存状态：不写真机日志、不持久化。清空按钮与跨报告隔离共用。 */
@@ -140,7 +144,9 @@ class FeedbackLogSanitizer {
 
     /** 第二遍：先名称（字面 + JSON 转义，长度从长到短），后全部 MAC（忽略大小写）。 */
     private fun sanitizeLine(line: String): String {
-        var out = line
+        var out = line.take(MAX_LINE_CHARS).let {
+            if (line.length > MAX_LINE_CHARS) "$it …(截断)" else it
+        }
         nameAliases.entries
             .sortedByDescending { it.key.length }
             .forEach { (name, alias) ->
@@ -151,6 +157,31 @@ class FeedbackLogSanitizer {
         return macRegex.replace(out) { match ->
             macAliases[match.value.lowercase(Locale.ROOT)] ?: match.value
         }
+    }
+
+    /**
+     * 按字符预算裁剪：诊断段（更新的证据）优先保留，普通日志从最旧的开始丢。
+     * 返回保留下来的两段与丢弃行数。
+     */
+    private fun trimToBudget(
+        normal: List<String>,
+        diagnostic: List<String>,
+    ): Triple<List<String>, List<String>, Int> {
+        var budget = MAX_REPORT_CHARS
+        val keptDiagnostic = ArrayDeque<String>()
+        for (line in diagnostic.asReversed()) {
+            if (line.length > budget) break
+            budget -= line.length + 1
+            keptDiagnostic.addFirst(line)
+        }
+        val keptNormal = ArrayDeque<String>()
+        for (line in normal.asReversed()) {
+            if (line.length > budget) break
+            budget -= line.length + 1
+            keptNormal.addFirst(line)
+        }
+        val dropped = (normal.size - keptNormal.size) + (diagnostic.size - keptDiagnostic.size)
+        return Triple(keptNormal.toList(), keptDiagnostic.toList(), dropped)
     }
 
     /** 用户内容按字面量替换：Regex.escape 转义元字符，不解释用户正则。 */
@@ -173,6 +204,9 @@ class FeedbackLogSanitizer {
     companion object {
         /** 设备名长度上限：超过视为异常/堆栈文本，不建立名称关联。 */
         private const val MAX_NAME_CHARS = 120
+        /** 单行上限与整份报告字符预算（普通日志 + 诊断附录合计）。 */
+        private const val MAX_LINE_CHARS = 240
+        private const val MAX_REPORT_CHARS = 6_000
         private const val NORMAL_WITH_DIAGNOSTIC_WINDOW = 139
         private const val DIAGNOSTIC_WINDOW_SIZE = 60
         private val DIAGNOSTIC_BLOCKED_MARKERS = listOf(

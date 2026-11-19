@@ -115,18 +115,20 @@ class VendorStackDiagnosticRecorderTest {
         val ctx = context().copy(dumpClues = clues)
         val event = VendorStackDiagnostics.format(big, ctx, snapshotSeq = 1, suppressedCount = 0)
 
-        assertTrue("总字符应<=12000: ${event.text.length}", event.text.length <= 12_000)
-        // 条数上限：第 17 条 selectable 被截断且计入 truncatedCount，其余完整存在。
-        assertEquals(1, event.truncatedCount)
-        assertTrue(event.text.contains("truncatedCount=1"))
-        assertTrue("第 16 条 selectable 应存在", event.text.contains("t=216"))
+        // v1.2.5 体积治理：单行总预算 12000 → 1400。关键字段必须完整，
+        // 大数组只渲染到预算用尽为止，被省略的条数由 truncatedCount 表达。
+        // 预算只约束「分节内容」，前面的 identity/current 头部不受预算裁剪，
+        // 因此整行实际上限约 1400 + 头部 ~100。日志缓冲的诊断行上限取 1600，保证不被二次截断。
+        assertTrue("总字符应<=1500: ${event.text.length}", event.text.length <= 1_500)
+        assertTrue("current 必须保留", event.text.contains("current=c{t=19"))
+        assertTrue("readStatus 必须保留", event.text.contains("readStatus={codecStatusNull=false"))
+        assertTrue("identity 必须保留", event.text.contains("identity="))
+        assertTrue("超预算必须计入 truncatedCount", event.truncatedCount > 0)
+        assertTrue(
+            "truncatedCount 必须写进行内",
+            event.text.contains("truncatedCount=${event.truncatedCount}"),
+        )
         assertFalse("第 17 条 selectable 不应渲染", event.text.contains("t=217"))
-        assertTrue("local 8 条完整", (1..8).all { event.text.contains("t=10$it") })
-        assertTrue("supportedTypes 32 条完整", (1..32).all { event.text.contains("name=codec-$it") })
-        assertTrue("dumpClues 24 条完整", (1..24).all { event.text.contains("clue-$it-") })
-        // current 与 readStatus 必须完整存在。
-        assertTrue(event.text.contains("current=c{t=19"))
-        assertTrue(event.text.contains("readStatus={codecStatusNull=false"))
         // 仅第 17 条改变也产生新 signature（完整未截断能力参与签名）。
         val changed = big.copy(
             selectable = selectable.dropLast(1) + selectable.last().copy(codecType = 299),
