@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -190,16 +191,18 @@ class ApplyProviderGateTest {
 
         assertEquals("ok", result)
         assertEquals(
-            "顺序必须为 lock→acquire→IPC→close→unlock",
+            "顺序必须为 lock→acquire→IPC→unlock；解绑延迟到空闲窗口之后",
             listOf(
                 "acquire locked=true",
                 "bind locked=true",
                 "ipc locked=true",
-                "close locked=true",
                 "returned locked=false",
             ),
             events,
         )
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
+        assertEquals("空闲窗口结束后解绑，此时锁已释放", "close locked=false", events.last())
     }
 
     @Test
@@ -277,7 +280,11 @@ class ApplyProviderGateTest {
             assertEquals("boom", e.message)
         }
         assertFalse("异常后锁必须释放", lock.isLocked)
-        assertEquals("异常后 lease 必须 close（unbind owner provider）",
+        assertEquals("异常后 lease 立即 close（计数归零），解绑在空闲窗口之后",
+            0, h.shizukuFactory.created.single().unbindCalls.get())
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
+        assertEquals("空闲窗口结束后解绑一次",
             1, h.shizukuFactory.created.single().unbindCalls.get())
     }
 

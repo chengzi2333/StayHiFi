@@ -3,7 +3,7 @@ package com.chengzi.stayhifi.codec
 import org.json.JSONException
 import org.json.JSONObject
 
-enum class DumpStatus { OK, EMPTY, TIMEOUT, ERROR, TRUNCATED }
+enum class DumpStatus { OK, EMPTY, TIMEOUT, ERROR, TRUNCATED, SKIPPED }
 
 data class RealtimeDiagnosticDump(
     val bluetooth: Source,

@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -199,7 +200,11 @@ class ApplyWorkerManualTest {
         assertEquals(target, VerifiedTargetStore.targetFor(mac))
         assertEquals("probe locked=true", events.first())
         assertTrue(events.contains("write locked=true"))
-        assertEquals("lease 必须 finally close", 1, h.providers.single().unbindCalls.get())
+        // v1.2.5：lease close 只做计数归零，真正 unbind 在空闲窗口后（避免每次 apply 重建 UserService 进程）
+        assertEquals("lease close 不立即解绑", 0, h.providers.single().unbindCalls.get())
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
+        assertEquals("空闲窗口结束后解绑一次", 1, h.providers.single().unbindCalls.get())
         assertFalse("结束后 ApplyLock 必须释放", ApplyLock.mutex.isLocked)
     }
 

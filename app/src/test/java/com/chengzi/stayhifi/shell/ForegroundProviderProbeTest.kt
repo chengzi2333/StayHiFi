@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -220,7 +221,11 @@ class ForegroundProviderProbeTest {
         assertSame("显式授权按钮仍走 lease 携带的原 provider",
             h.factory.created[1], lease.shizukuProvider)
         lease.close()
-        assertEquals("close 释放本 owner 的 Shizuku provider", 1, h.factory.created[1].unbindCalls.get())
+        // v1.2.5：解绑改为「计数归零 + 空闲窗口」延迟执行，避免每次读取都重建 UserService 进程。
+        assertEquals("close 不立即解绑", 0, h.factory.created[1].unbindCalls.get())
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
+        assertEquals("空闲窗口结束后解绑", 1, h.factory.created[1].unbindCalls.get())
     }
 
     // ─────────── 旧 generation 不得覆盖新 UI（refreshGeneration + lease.generation） ───────────

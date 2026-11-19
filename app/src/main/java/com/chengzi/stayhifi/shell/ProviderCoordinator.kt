@@ -10,6 +10,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -137,6 +138,18 @@ class ProviderCoordinator(
     private val storeWriteMutex = Mutex()
     /** 补偿写的独立宿主（非后台轮询）：与调用方/切换事务解耦，取消事务不取消补偿。 */
     private val appScope: CoroutineScope = applicationScope
+
+    // ── v1.2.5 资源治理：Shizuku UserService 复用 ──
+    /**
+     * 复用同一个 provider 实例。原实现每次 acquire 都 `shizukuFactory()` 新建一个，
+     * 用完 `release()` 直接 unbind(remove=true)：等于每轮读取都「拉起一个 :codec 进程再杀掉」。
+     * 首页 3s 轮询实测 45 秒新增 15 个孤儿 :codec 进程（每个 ~133MB），是发热与耗电的主因。
+     * 现在改为：provider 常驻复用，最后一个 lease 释放后延迟 [SHIZUKU_IDLE_UNBIND_MS] 再解绑。
+     */
+    private val sharedShizukuProvider: ShellProvider by lazy { shizukuFactory() }
+    private val leaseLock = Any()
+    private var activeShizukuLeases = 0
+    private var idleUnbindJob: Job? = null
 
     private fun beginStoreWriteLocked(stored: String): StoreWrite {
         val write = StoreWrite(stored, version = ++storeWriteVersion)
@@ -310,7 +323,7 @@ class ProviderCoordinator(
             kind = kind,
             generation = currentGeneration(),
             coordinator = this,
-            shizukuProvider = if (kind == ProviderKind.SHIZUKU) shizukuFactory() else null,
+            shizukuProvider = if (kind == ProviderKind.SHIZUKU) retainShizukuProvider() else null,
         )
     }
 
@@ -662,9 +675,40 @@ class ProviderCoordinator(
         }
     }
 
-    /** close 只释放 owner 资源：Shizuku 解绑本 owner 的 provider；Root anchor 不在此解绑（§11.3）。 */
+    /**
+     * close 只释放 owner 资源：Shizuku 侧不再立刻 unbind，而是计数归零后延迟解绑
+     * （见 [releaseShizukuProvider]）；Root anchor 不在此解绑（§11.3）。
+     */
     internal fun release(lease: ProviderLease) {
-        lease.shizukuProvider?.unbind()
+        if (lease.shizukuProvider != null) releaseShizukuProvider()
+    }
+
+    /** 取用共享 provider：increment 活跃计数并取消待执行的空闲解绑。 */
+    private fun retainShizukuProvider(): ShellProvider = synchronized(leaseLock) {
+        activeShizukuLeases += 1
+        idleUnbindJob?.cancel()
+        idleUnbindJob = null
+        sharedShizukuProvider
+    }
+
+    /** 释放引用：最后一个 lease 结束后延迟解绑，避免每次读取都重建 UserService 进程。 */
+    private fun releaseShizukuProvider() {
+        synchronized(leaseLock) {
+            activeShizukuLeases = (activeShizukuLeases - 1).coerceAtLeast(0)
+            if (activeShizukuLeases > 0) return
+            idleUnbindJob?.cancel()
+            idleUnbindJob = appScope.launch {
+                delay(SHIZUKU_IDLE_UNBIND_MS)
+                synchronized(leaseLock) {
+                    if (activeShizukuLeases != 0) return@synchronized
+                    runCatching { sharedShizukuProvider.unbind() }
+                    // JVM 单测里 LogStore 会抛「not mocked」，日志失败不能影响解绑。
+                    runCatching {
+                        log("Shizuku UserService 空闲 ${SHIZUKU_IDLE_UNBIND_MS / 1000}s，已解绑（下次读取再绑）")
+                    }
+                }
+            }
+        }
     }
 
     companion object {
@@ -672,6 +716,8 @@ class ProviderCoordinator(
         const val SWITCH_TIMEOUT_MS = 20_000L
         /** 有界等待的轮询间隔。 */
         private const val DRAIN_POLL_MS = 100L
+        /** Shizuku UserService 空闲解绑窗口：覆盖首页 3s 轮询与会话内的连续操作。 */
+        private const val SHIZUKU_IDLE_UNBIND_MS = 90_000L
     }
 }
 

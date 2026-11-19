@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -227,28 +228,32 @@ class ProviderLeaseTest {
     // ─────────────────────────── Shizuku 每 owner 绑定 ───────────────────────────
 
     @Test
-    fun shizukuLeasePerOwnerBindsAndUnbindsIndependently() = runTest {
+    fun shizukuLeasesShareOneProviderAndUnbindAfterIdle() = runTest {
         val h = harness()
         advanceUntilIdle()
         h.raw.emit("shizuku")
 
         val l1 = h.coordinator.acquire(ProviderOwner("main"), ProviderSource.ONBOARDING)
         val l2 = h.coordinator.acquire(ProviderOwner("qs"), ProviderSource.QS)
-        assertEquals("Shizuku 每 owner 一个 provider", 2, h.shizukuFactory.created.size)
+        // v1.2.5：两个 lease 复用同一个 provider——每次 acquire 新建会让 Shizuku 反复拉起
+        // :codec 进程（实测首页 3s 轮询 45s 涨 15 个孤儿进程）。
+        assertEquals("Shizuku 复用同一个 provider", 1, h.shizukuFactory.created.size)
         val p1 = h.shizukuFactory.created[0]
-        val p2 = h.shizukuFactory.created[1]
 
         l1.withService { }
         l2.withService { }
         advanceUntilIdle()
-        assertEquals(1, p1.bindCalls.get())
-        assertEquals(1, p2.bindCalls.get())
+        // fake provider 计的是 bind() 调用次数；真实 ShizukuShellProvider 内部缓存 service，
+        // 同一 provider 上第二次 bind() 直接返回缓存，不会拉起新进程。
+        assertEquals("两个 lease 共用同一 provider", 2, p1.bindCalls.get())
 
         l1.close()
-        assertEquals(1, p1.unbindCalls.get())
-        assertEquals(0, p2.unbindCalls.get())
+        assertEquals("关掉单个 lease 不应立即解绑", 0, p1.unbindCalls.get())
         l2.close()
-        assertEquals(1, p2.unbindCalls.get())
+        assertEquals("最后一个 lease 关闭后仍在空闲窗口内", 0, p1.unbindCalls.get())
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
+        assertEquals("空闲窗口结束后解绑一次", 1, p1.unbindCalls.get())
 
         assertAccessFails(ProviderAccessReason.LEASE_CLOSED) { l1.withService { } }
     }

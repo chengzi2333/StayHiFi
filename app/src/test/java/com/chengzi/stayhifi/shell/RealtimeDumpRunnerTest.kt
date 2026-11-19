@@ -94,6 +94,39 @@ class RealtimeDumpRunnerTest {
         assertEquals(DumpStatus.OK, result.audioFlinger.status)
     }
 
+
+    @Test
+    fun bluetoothOnlyEntrySpansSingleDump() {
+        val started = mutableListOf<String>()
+        val runner = RealtimeDumpRunner { service ->
+            started += service
+            FakeProcess(
+                stdout = "A2DP LHDC V5 State:\n  LHDC transmission bitrate : 400000",
+            )
+        }
+
+        val bluetooth = runner.runBluetooth("LHDC V5")
+
+        // 只跑一个 dumpsys：audio / media.audio_flinger 在拿得到码率时不再执行。
+        assertEquals(listOf("bluetooth_manager"), started)
+        assertTrue(bluetooth.content.contains("bitrate"))
+    }
+
+    @Test
+    fun auxRunsAudioAndFlingerOnly() {
+        val started = mutableListOf<String>()
+        val runner = RealtimeDumpRunner { service ->
+            started += service
+            FakeProcess(stdout = "sample rate: 48000")
+        }
+
+        val (audio, flinger) = runner.runAux()
+
+        assertEquals(listOf("audio", "media.audio_flinger"), started)
+        assertEquals(DumpStatus.OK, audio.status)
+        assertEquals(DumpStatus.OK, flinger.status)
+    }
+
     private fun runner(vararg processes: Pair<String, Process>): RealtimeDumpRunner {
         val byService = processes.toMap()
         return RealtimeDumpRunner { service ->

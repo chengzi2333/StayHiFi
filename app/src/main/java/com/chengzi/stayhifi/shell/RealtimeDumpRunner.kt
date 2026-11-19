@@ -9,11 +9,20 @@ class RealtimeDumpRunner(
         Runtime.getRuntime().exec(arrayOf("/system/bin/dumpsys", service))
     },
 ) {
-    fun run(codecName: String): RealtimeDiagnosticDump = RealtimeDiagnosticDump(
-        bluetooth = runSource("bluetooth_manager", bluetoothFilter(codecName)),
-        audio = runSource("audio", ::isAudioLine),
-        audioFlinger = runSource("media.audio_flinger", ::isAudioLine),
-    )
+    /** 全量：蓝牙 + audio + audio_flinger（三个独立 dumpsys，其中 audio_flinger 最重）。 */
+    fun run(codecName: String): RealtimeDiagnosticDump {
+        val bluetooth = runBluetooth(codecName)
+        val (audio, audioFlinger) = runAux()
+        return RealtimeDiagnosticDump(bluetooth, audio, audioFlinger)
+    }
+
+    /** 只跑蓝牙 dumpsys：调用方先看这一步能不能拿到码率，够用就不用再跑两个媒体 dump。 */
+    fun runBluetooth(codecName: String): RealtimeDiagnosticDump.Source =
+        runSource("bluetooth_manager", bluetoothFilter(codecName))
+
+    /** 蓝牙 dump 缺码率时的补充证据（AudioTrack 采样率 / 混音线程格式）。 */
+    fun runAux(): Pair<RealtimeDiagnosticDump.Source, RealtimeDiagnosticDump.Source> =
+        runSource("audio", ::isAudioLine) to runSource("media.audio_flinger", ::isAudioLine)
 
     private fun runSource(
         service: String,

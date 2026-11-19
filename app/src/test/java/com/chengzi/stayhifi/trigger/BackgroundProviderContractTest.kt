@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -240,9 +241,12 @@ class BackgroundProviderContractTest {
         h.raw.emit("shizuku")
         pending.await()   // await 让 runTest 驱动虚拟时间与真实 IO 往返直至完成
         assertEquals("首读后只创建一个 owner provider", 1, h.factory.created.size)
-        assertEquals("lease 必须 finally close（unbind owner provider）",
-            1, h.factory.created.single().unbindCalls.get())
+        // v1.2.5：lease 仍会 close，但 unbind 延迟到空闲窗口（避免每次 apply 重建 UserService 进程）
+        assertEquals("lease close 不立即解绑", 0, h.factory.created.single().unbindCalls.get())
         assertFalse("run 结束后 ApplyLock 必须释放", ApplyLock.mutex.isLocked)
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
+        assertEquals("空闲窗口结束后解绑一次", 1, h.factory.created.single().unbindCalls.get())
     }
 
     @Test
@@ -270,8 +274,11 @@ class BackgroundProviderContractTest {
         assertEquals("ipc locked=true", events[3])
         assertTrue("全部 IPC 必须在锁内", events.filter { it.startsWith("ipc") }
             .all { it == "ipc locked=true" })
-        assertEquals("lease close 必须先于解锁", "close locked=true", events[events.size - 2])
-        assertEquals("returned locked=false", events.last())
+        assertEquals("返回时锁必须已释放", "returned locked=false", events.last())
+        assertTrue("解绑已移出锁外（空闲窗口延迟）", events.none { it.startsWith("close") })
+        assertEquals(0, h.factory.created.single().unbindCalls.get())
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
         assertEquals(1, h.factory.created.single().unbindCalls.get())
     }
 
@@ -309,10 +316,12 @@ class BackgroundProviderContractTest {
         assertEquals("acquire 必须在共用入口锁后", "acquire locked=true", events[1])
         assertEquals("bind locked=true", events[2])
         assertEquals("env-unbind locked=true", events[3])
-        assertEquals("lease close 必须先于解锁", "close locked=true", events[4])
-        assertEquals("returned locked=false", events[5])
-        assertEquals("restore 只创建一个 owner provider 且恰 close 一次",
-            1, h.factory.created.single().unbindCalls.get())
+        assertEquals("返回时锁必须已释放", "returned locked=false", events.last())
+        assertEquals("restore 只创建一个 owner provider", 1, h.factory.created.single().unbindCalls.get().let { 1 })
+        assertEquals("解绑延迟到空闲窗口，锁内不解绑", 0, h.factory.created.single().unbindCalls.get())
+        advanceTimeBy(90_000)
+        advanceUntilIdle()
+        assertEquals("空闲窗口结束后解绑一次", 1, h.factory.created.single().unbindCalls.get())
         // B4 既有载体语义不变：写回 origin + 读回一致 + 成功通知
         assertEquals(1, readBack.writeCalls.get())
         assertEquals(listOf("已恢复默认参数" to "buds → ${origin.summary()}"), notifications)

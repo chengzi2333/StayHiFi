@@ -16,6 +16,7 @@ import android.util.Log
 import com.chengzi.stayhifi.ICodecService
 import com.chengzi.stayhifi.codec.CodecConfig
 import com.chengzi.stayhifi.codec.CodecStateSnapshotJson
+import com.chengzi.stayhifi.codec.DumpStatus
 import com.chengzi.stayhifi.codec.RealtimeDiagnosticDump
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.CountDownLatch
@@ -28,6 +29,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import kotlin.system.exitProcess
 
 /**
  * 本类运行在特权进程（独立进程 :codec）中，由两种载体拉起，身份可诊断：
@@ -60,7 +62,15 @@ class CodecService : ICodecService.Stub() {
     // 保住 NULL/EMPTY/ERROR 的 10s 限频；OFF→ON 后首次读取仍重新加载）
     private val catalogAdapterGate = AdapterStateInvalidator(supportedTypesCache)
 
+    // ── v1.2.5 进程自愈 ──
+    // Shizuku 的 unbindUserService(remove=true) 在部分 ROM（实测 vivo/OriginOS）只摘除服务记录，
+    // 不杀进程：解绑后仍留 PPID=1 的 :codec 孤儿，每个约 133MB，累积几十个直接导致发热。
+    // 这里用「最后一次 IPC 时间」做空闲哨兵，进程自己退出；正在被使用的进程每 3s 就有调用，不会误杀。
+    private val lastCallAt = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+    private fun touch() = lastCallAt.set(System.currentTimeMillis())
+
     init {
+        startIdleExitWatchdog()
         disableHiddenApiChecks()
         // app_process 裸进程没有主 Looper，而 ActivityThread.systemMain() 需要它；
         // Shizuku 场景下主 Looper 已存在，prepareMainLooper 只能调一次，故先判空
@@ -78,11 +88,30 @@ class CodecService : ICodecService.Stub() {
         }
     }
 
+    /** 空闲哨兵：超过 [IDLE_EXIT_MS] 没有任何 IPC 就退出，避免成为解绑后残留的孤儿进程。 */
+    private fun startIdleExitWatchdog() {
+        Thread {
+            while (true) {
+                try {
+                    Thread.sleep(WATCHDOG_TICK_MS)
+                    val idle = System.currentTimeMillis() - lastCallAt.get()
+                    if (idle >= IDLE_EXIT_MS) {
+                        Log.i(TAG, "idle ${'$'}idle ms, exit process")
+                        exitProcess(0)
+                    }
+                } catch (t: Throwable) {
+                    // 哨兵自身异常不得影响服务；继续下一轮
+                }
+            }
+        }.apply { isDaemon = true; name = "codec-idle-exit"; start() }
+    }
+
     // ─────────────────────────── IPC 接口 ───────────────────────────
 
     // Privileged shell/root process; outer IPC calls already catch permission and binder errors.
     @SuppressLint("MissingPermission")
     override fun dumpDevices(): String = try {
+        touch()
         val a2dp = getA2dp()
         buildJsonArray {
             for (d in a2dp.connectedDevices) {
@@ -97,6 +126,7 @@ class CodecService : ICodecService.Stub() {
     }
 
     override fun readConfig(mac: String?): String = try {
+        touch()
         logServiceUidOnce("readConfig")
         val a2dp = getA2dp()
         val dev = findDevice(a2dp, mac)
@@ -125,6 +155,7 @@ class CodecService : ICodecService.Stub() {
     }
 
     override fun writeConfig(mac: String?, configJson: String?): String = try {
+        touch()
         logServiceUidOnce("writeConfig")
         val target = CodecConfig.fromJson(configJson ?: "")
         val a2dp = getA2dp()
@@ -180,6 +211,10 @@ class CodecService : ICodecService.Stub() {
         Log.i(TAG, "destroy")
         // Task 3：服务销毁时缓存目录一并失效（纯内存操作，无 binder IO）
         supportedTypesCache.invalidate()
+        // v1.2.5：Shizuku 的 unbindUserService(remove=true) 在部分 ROM 上只摘除服务记录、
+        // 不杀进程，实测会留下 PPID=1 的 :codec 孤儿（每个 ~133MB，累积几十个 → 发热）。
+        // 这里在 Shizuku 移除服务时主动退出，保证「解绑即释放」。
+        exitProcess(0)
     }
 
     // Task 43：传输层实况读取——dumpsys bluetooth_manager 的 "A2DP <codec> State:" 段
@@ -188,6 +223,7 @@ class CodecService : ICodecService.Stub() {
     // 只回传 State:/quality/bitrate 相关行，减小 binder 负载；解析归 app 侧 BtStateParser。
     // Task 46：播放状态由 AudioManager.isMusicActive 判定，不再回传 PCM read 计数。
     override fun dumpBtState(): String = try {
+        touch()
         buildJsonObject {
             put("dump", runDumpsysFiltered(DUMP_TIMEOUT_MS))
         }.toString()
@@ -196,7 +232,22 @@ class CodecService : ICodecService.Stub() {
     }
 
     override fun dumpRealtimeDiagnostics(codecName: String): String = try {
-        val dump = RealtimeDumpRunner().run(codecName)
+        touch()
+        // v1.2.5 功耗：audio / media.audio_flinger 是三个 dumpsys 里最重的两个，
+        // 只有蓝牙段拿不到码率（ColorOS 等）时才需要它们做交叉证据；能拿到就跳过。
+        val runner = RealtimeDumpRunner()
+        val bluetooth = runner.runBluetooth(codecName)
+        val hasBitrate = bluetooth.content.contains("bitrate", ignoreCase = true)
+        val dump = if (hasBitrate) {
+            RealtimeDiagnosticDump(
+                bluetooth = bluetooth,
+                audio = RealtimeDiagnosticDump.Source(DumpStatus.SKIPPED),
+                audioFlinger = RealtimeDiagnosticDump.Source(DumpStatus.SKIPPED),
+            )
+        } else {
+            val (audio, audioFlinger) = runner.runAux()
+            RealtimeDiagnosticDump(bluetooth, audio, audioFlinger)
+        }
         fun source(source: RealtimeDiagnosticDump.Source) = buildJsonObject {
             put("status", source.status.name.lowercase())
             put("content", source.content)
@@ -519,6 +570,9 @@ class CodecService : ICodecService.Stub() {
     }.toString()
 
     companion object {
+        /** 空闲多久后进程自杀（覆盖「已解绑 + 无人使用」的场景）。 */
+        private const val IDLE_EXIT_MS = 120_000L
+        private const val WATCHDOG_TICK_MS = 20_000L
         private const val TAG = "CodecService"
         private const val DUMP_TIMEOUT_MS = 5_000L   // Task 43：dumpsys 超时保护
 
