@@ -33,8 +33,14 @@ class SettingsRepository(private val context: Context) : ProviderSelectionStore 
         val NOTIFY_PERSISTENT = booleanPreferencesKey("notifyPersistent")
         val QS_TILE = booleanPreferencesKey("qsTile")
         val ONBOARDED = booleanPreferencesKey("onboarded")
+        // v1.2.5：后台隐藏（仿 GKD 的「后台隐藏」）——只把任务卡片移出最近任务
+        val HIDE_FROM_RECENTS = booleanPreferencesKey("hideFromRecents")
+        // v1.2.5：新手教程结束后待展示的「实际传输」一次性说明（教程完成时置 true）
+        val REALTIME_INTRO_PENDING = booleanPreferencesKey("realtimeIntroPending")
         // Task 38：上次更新检查时间戳（24h 节流，毫秒）
         val LAST_UPDATE_CHECK = longPreferencesKey("lastUpdateCheckMillis")
+        // v1.2.5：上次「启动补触发」时间戳——FGS 被 ROM 反复重建时避免每次重启都跑整轮拉满
+        val LAST_STARTUP_TRIGGER = longPreferencesKey("lastStartupTriggerMillis")
         // Task D2：特权通道选择（只存字符串 shizuku/root，不存 enum ordinal，设计 §11.3）
         val PROVIDER = stringPreferencesKey("provider")
     }
@@ -49,6 +55,15 @@ class SettingsRepository(private val context: Context) : ProviderSelectionStore 
         .map { it[K.QS_TILE] ?: false }
     val onboarded: Flow<Boolean> = context.settingsDataStore.data
         .map { it[K.ONBOARDED] ?: false }
+    /** v1.2.5：后台隐藏——最近任务里不显示本 App 卡片（默认关，需二次确认后开启）。 */
+    val hideFromRecents: Flow<Boolean> = context.settingsDataStore.data
+        .map { it[K.HIDE_FROM_RECENTS] ?: false }
+    /**
+     * v1.2.5：「实际传输」一次性说明是否还待展示。
+     * 只在新手教程完成时置 true（老用户升级不会被补弹），用户确认「不再提醒」后置 false。
+     */
+    val realtimeIntroPending: Flow<Boolean> = context.settingsDataStore.data
+        .map { it[K.REALTIME_INTRO_PENDING] ?: false }
     /** Task 38：上次更新检查时间戳（0 = 从未检查）。 */
     val lastUpdateCheckMillis: Flow<Long> = context.settingsDataStore.data
         .map { it[K.LAST_UPDATE_CHECK] ?: 0L }
@@ -69,6 +84,13 @@ class SettingsRepository(private val context: Context) : ProviderSelectionStore 
     suspend fun setNotifyPersistent(v: Boolean) = put(K.NOTIFY_PERSISTENT, v)
     suspend fun setQsTile(v: Boolean) = put(K.QS_TILE, v)
     suspend fun setOnboarded(v: Boolean) = put(K.ONBOARDED, v)
+    /** v1.2.5：启动补触发节流用的持久时间戳（0=从未跑过）。 */
+    val lastStartupTriggerAt: Flow<Long> = context.settingsDataStore.data
+        .map { it[K.LAST_STARTUP_TRIGGER] ?: 0L }
+
+    suspend fun setLastStartupTriggerAt(millis: Long) = put(K.LAST_STARTUP_TRIGGER, millis)
+    suspend fun setHideFromRecents(v: Boolean) = put(K.HIDE_FROM_RECENTS, v)
+    suspend fun setRealtimeIntroPending(v: Boolean) = put(K.REALTIME_INTRO_PENDING, v)
 
     /** Task 38：记录一次更新检查（成功/失败都记，保证 24h 内不重复联网）。 */
     suspend fun setLastUpdateCheckMillis(v: Long) {
@@ -76,6 +98,10 @@ class SettingsRepository(private val context: Context) : ProviderSelectionStore 
     }
 
     private suspend fun put(key: androidx.datastore.preferences.core.Preferences.Key<Boolean>, v: Boolean) {
+        context.settingsDataStore.edit { it[key] = v }
+    }
+
+    private suspend fun put(key: androidx.datastore.preferences.core.Preferences.Key<Long>, v: Long) {
         context.settingsDataStore.edit { it[key] = v }
     }
 }

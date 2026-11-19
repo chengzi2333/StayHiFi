@@ -1,10 +1,12 @@
 package com.chengzi.stayhifi
 
 import android.Manifest
+import android.app.Activity
 import android.app.Application
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.AudioPlaybackConfiguration
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
@@ -25,6 +27,7 @@ import com.chengzi.stayhifi.shell.ProviderSource
 import com.chengzi.stayhifi.shell.RootLogContext
 import com.chengzi.stayhifi.shell.RootTransport
 import com.chengzi.stayhifi.shell.ShizukuShellProvider
+import com.chengzi.stayhifi.trigger.HeadsetEvents
 import com.chengzi.stayhifi.trigger.ListenerService
 import com.chengzi.stayhifi.updater.UpdateCleanup
 import com.chengzi.stayhifi.util.DeviceNames
@@ -58,6 +61,19 @@ class StayHiFiApp : Application() {
         private set
 
     private var playbackCallback: AudioManager.AudioPlaybackCallback? = null
+
+    /** 上一次观察到的「正在放音乐」状态：用来识别播放↔暂停的跳变。 */
+    @Volatile
+    private var lastMusicActive = false
+
+    /**
+     * v1.2.5 功耗治理：App 是否在前台。播放诊断的 dumpsys 采样只在为 true 时进行，
+     * 后台（进程被 FGS 保活）不再因别的 App 播放音频而跑媒体 dump。
+     */
+    @Volatile
+    var isAppForeground: Boolean = false
+        private set
+    private var startedActivities = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -110,6 +126,7 @@ class StayHiFiApp : Application() {
             applyPreferences = ApplyPreferenceStore.create(this)
             initializePlaybackDiagnostics(appScope)
         }
+        registerForegroundTracking()
         // 对抗审查 C2：权限被撤（隐私恐慌后常见）时 startForeground 会抛 SecurityException
         // 连带进程崩溃死循环。拉起前先查 BLUETOOTH_CONNECT，runBlocking 整体兜底 try/catch。
         try {
@@ -147,18 +164,58 @@ class StayHiFiApp : Application() {
                 }
             },
             openCapture = { connection -> openPlaybackCapture(connection) },
+            canCapture = { isAppForeground },
         )
         val callback = object : AudioManager.AudioPlaybackCallback() {
             override fun onPlaybackConfigChanged(configurations: List<AudioPlaybackConfiguration>) {
-                if (audioManager.isMusicActive) {
+                val active = audioManager.isMusicActive
+                val transitioned = active != lastMusicActive
+                lastMusicActive = active
+                if (active) {
                     playbackDiagnostics.onPlaybackSignal()
                 } else {
                     playbackDiagnostics.onPlaybackStopped()
+                }
+                // 播放↔暂停跳变时立即让首页刷新一次：首页轮询已改为「播放 3s / 暂停 15s」，
+                // 靠轮询感知切换最坏要等 15s，这里用现有事件总线把它变成即时。
+                // 只在 App 前台时 bump：后台刷新会白跑一次特权读取。
+                if (transitioned && isAppForeground) {
+                    HeadsetEvents.bump()
                 }
             }
         }
         playbackCallback = callback
         audioManager.registerAudioPlaybackCallback(callback, Handler(Looper.getMainLooper()))
+    }
+
+    /**
+     * 前台/后台跟踪：以「started Activity 数量」判定，避免多 Activity 场景误判。
+     * 回到前台时若音乐仍在播放且上一次采样被跳过，这里补一个信号把窗口续上。
+     */
+    private fun registerForegroundTracking() {
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                startedActivities += 1
+                val wasBackground = !isAppForeground
+                isAppForeground = true
+                if (wasBackground && ::playbackDiagnostics.isInitialized &&
+                    getSystemService(AudioManager::class.java).isMusicActive
+                ) {
+                    playbackDiagnostics.onPlaybackSignal()
+                }
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                startedActivities = (startedActivities - 1).coerceAtLeast(0)
+                if (startedActivities == 0) isAppForeground = false
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+            override fun onActivityDestroyed(activity: Activity) = Unit
+        })
     }
 
     private suspend fun openPlaybackCapture(

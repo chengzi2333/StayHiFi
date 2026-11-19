@@ -106,6 +106,7 @@ import com.chengzi.stayhifi.ui.home.HomeScreen
 import com.chengzi.stayhifi.ui.home.HomeStateMerge
 import com.chengzi.stayhifi.ui.home.HomeUiState
 import com.chengzi.stayhifi.ui.home.ManualEditorInput
+import com.chengzi.stayhifi.ui.home.RealtimeIntroDialog
 import com.chengzi.stayhifi.ui.logs.LogsAction
 import com.chengzi.stayhifi.ui.logs.LogsScreen
 import com.chengzi.stayhifi.ui.logs.LogsUiState
@@ -129,6 +130,7 @@ import com.chengzi.stayhifi.updater.UpdateChecker
 import com.chengzi.stayhifi.util.DeviceNames
 import com.chengzi.stayhifi.util.KeepAlive
 import com.chengzi.stayhifi.util.QqGroup
+import com.chengzi.stayhifi.util.RecentsHider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -211,6 +213,12 @@ class MainActivity : ComponentActivity() {
     private val activityOwner = ProviderOwner("main-activity")
     private lateinit var settingsRepo: SettingsRepository
     private lateinit var profileRepo: ProfileRepository
+    // v1.2.5 后台隐藏：已下发的标记值（onResume 重放，避免进程重建后的新任务丢失标记）。
+    // known=false 表示 DataStore 首读还没回来，此时不清洗任务标记，避免把已隐藏的卡片放回去。
+    @Volatile private var hideFromRecentsApplied = false
+    @Volatile private var hideFromRecentsKnown = false
+    // v1.2.5：本次进程内是否展示「实际传输」一次性说明；pending 未清时下次启动仍会来一次。
+    private var realtimeIntroVisible by mutableStateOf(false)
     // Task 46：公开 API 本地即时判定音乐播放，替代需要两轮采样的 PCM 计数增量。
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
     // v1.2.2：本机 A2DP 设备来源（普通系统 API，无需特权）——连接事实的第一裁决来源。
@@ -252,7 +260,6 @@ class MainActivity : ComponentActivity() {
     private var logsVisible by mutableStateOf(false)
     private var logs by mutableStateOf<List<String>>(emptyList())
     // v1.2.2：教程连接页「排障日志」覆盖层——复用 LogsScreen，不要求完成引导。
-    private var onboardingLogsVisible by mutableStateOf(false)
 
     // ---- Task D11：设置页「特权方式」区状态 ----
     /** Root 授权/切换操作进行中（本 Activity 粒度，立即反馈禁用重复点击）。 */
@@ -284,6 +291,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         settingsRepo = SettingsRepository(this)
         profileRepo = ProfileRepository(this)
+
+        // v1.2.5 后台隐藏（仿 GKD）：设置一变就下发到当前任务，无需重启；
+        // 任务级标记会随任务重建丢失，故 onResume 还会重放一次已下发的值。
+        lifecycleScope.launch {
+            settingsRepo.hideFromRecents.collect { hide ->
+                hideFromRecentsApplied = hide
+                hideFromRecentsKnown = true
+                RecentsHider.apply(this@MainActivity, hide)
+            }
+        }
 
         setContent {
             StayHiFiTheme {
@@ -368,6 +385,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // v1.2.5：后台隐藏是任务级标记，回到前台时重放（首读未完成则不动，避免闪回）。
+        if (hideFromRecentsKnown) {
+            RecentsHider.apply(this, hideFromRecentsApplied)
+        }
         // 首次读完成前不触发任何 IPC
         lifecycleScope.launch {
             val onboarded = settingsRepo.onboarded.first()
@@ -402,6 +423,27 @@ class MainActivity : ComponentActivity() {
         val notifyResultOn by settingsRepo.notifyResult.collectAsState(initial = false)
         val notifyPersistentOn by settingsRepo.notifyPersistent.collectAsState(initial = false)
         val qsTileOn by settingsRepo.qsTile.collectAsState(initial = false)
+        val hideFromRecentsOn by settingsRepo.hideFromRecents.collectAsState(initial = false)
+        // v1.2.5：教程结束后的「实际传输」一次性说明（老用户升级不补弹，pending 只在教程完成时置 true）
+        val realtimeIntroPending by settingsRepo.realtimeIntroPending.collectAsState(initial = false)
+        LaunchedEffect(realtimeIntroPending) {
+            if (realtimeIntroPending) realtimeIntroVisible = true
+        }
+        if (realtimeIntroVisible) {
+            RealtimeIntroDialog(
+                onDismiss = { remember ->
+                    realtimeIntroVisible = false
+                    if (remember) {
+                        lifecycleScope.launch {
+                            settingsRepo.setRealtimeIntroPending(false)
+                            LogStore.log("实际传输说明：用户确认不再提醒")
+                        }
+                    } else {
+                        LogStore.log("实际传输说明：本次关闭，下次启动再提示")
+                    }
+                },
+            )
+        }
 
         // Task D11：设置页「特权方式」区的只读数据源——持久选择/生效通道/Root 快照/切换事务。
         // 只进 UI 态，绝不触发授权/探测/写盘。
@@ -441,17 +483,19 @@ class MainActivity : ComponentActivity() {
                 if (prevPage != -1 && cur == 0 && prevPage != 0) refreshHome()
                 prevPage = cur
             }
-            // Task 46：首页可见期间每 3s 补刷实况（原 5s，用户要求更快反映停播）。
-            // 仅首页 tab 且 RESUMED 时跑：离开页面（isHomePage 翻 false 取消协程）/
-            // 退后台（repeatOnLifecycle 挂起）即停；dumpsys 开销前台 3s 一次可接受（用户拍板）。
-            // 无连接设备时跳过（ headsetName==null ），避免未授权分支每 3s 刷一条日志。
+            // Task 46 + v1.2.5：首页实况刷新改为「自适应间隔」——
+            // 播放中 3s（用户要看码率实时变化），暂停时 15s（此时只需反映状态，没必要每 3s 读一次特权通道）。
+            // 播放↔暂停的切换由 StayHiFiApp 的播放回调直接 bump 事件，切回播放时立即刷一次，不等轮询。
             val isHomePage = (pageOrder?.get(pagerState.currentPage) ?: pagerState.currentPage) == 0
             val lifecycleOwner = LocalLifecycleOwner.current
             LaunchedEffect(isHomePage, lifecycleOwner) {
                 if (!isHomePage) return@LaunchedEffect
                 lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                     while (true) {
-                        delay(3_000)
+                        // 还在播放（或界面上仍显示着码率）就保持 3s；确认掉到「未在播放」后才降到 15s。
+                        // 这样「暂停」最多 3s 就能反映出来，而不是等一个 15s 的长周期。
+                        val active = audioManager.isMusicActive || homeState.realtimeKbps != null
+                        delay(if (active) HOME_POLL_PLAYING_MS else HOME_POLL_IDLE_MS)
                         if (homeState.headsetName != null) refreshHome()
                     }
                 }
@@ -512,6 +556,7 @@ class MainActivity : ComponentActivity() {
                                 notifyResult = notifyResultOn,
                                 notifyPersistent = notifyPersistentOn,
                                 qsTile = qsTileOn,
+                                hideFromRecents = hideFromRecentsOn,
                                 batteryWhitelisted = KeepAlive.isBatteryWhitelisted(this@MainActivity),
                                 checkingUpdate = updateChecking,
                                 updateMessage = updateMessage,
@@ -631,6 +676,15 @@ class MainActivity : ComponentActivity() {
                     ComponentName(this@MainActivity, QsTileService::class.java),
                 )
                 LogStore.log("QS 磁贴 = ${action.enabled}")
+            }
+            is SettingsAction.SetHideFromRecents -> lifecycleScope.launch {
+                // v1.2.5：开关只落盘；任务标记由 onCreate 的 flow 订阅即时下发，
+                // onResume 再兜一次（进程重建/新任务出现时标记会丢）。
+                settingsRepo.setHideFromRecents(action.enabled)
+                LogStore.log(
+                    if (action.enabled) "后台隐藏 = true（已从最近任务移除卡片）"
+                    else "后台隐藏 = false（恢复显示任务卡片）"
+                )
             }
             SettingsAction.OpenAutostart -> onOpenAutostartSettings()
             SettingsAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
@@ -1017,17 +1071,9 @@ class MainActivity : ComponentActivity() {
             }
             if (wanted.isNotEmpty()) permLauncher.launch(wanted.toTypedArray())
         }
-        // v1.2.2：连接页「排障日志」覆盖层——复用 LogsScreen（单一口吻复制/清空/系统返回），
-        // 不要求完成引导；BackHandler 关闭覆盖层即回到原教程页。
-        Box(Modifier.fillMaxSize()) {
-            OnboardingScreen(state = onboardingState, onAction = ::onOnboardingAction)
-            if (onboardingLogsVisible) {
-                LogsScreen(
-                    state = LogsUiState(logs),
-                    onAction = ::onOnboardingLogsAction,
-                )
-            }
-        }
+        // v1.2.5：引导页不再提供「排障日志」入口（引导期给排障入口只会增加认知负担），
+        // 覆盖层一并撤掉，教程就是纯四页。
+        OnboardingScreen(state = onboardingState, onAction = ::onOnboardingAction)
         // Task D10：Root 卡与门槛的三路只读数据源——持久选择/生效通道/Root 快照流。
         // 只进 UI 态，绝不触发授权/写盘；离开 Onboarding 组合即停止收集。
         LaunchedEffect(Unit) {
@@ -1040,16 +1086,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** v1.2.2：教程日志覆盖层的复制/清空与设置页同一实现（含脱敏与诊断复位），返回仅关覆盖层。 */
-    private fun onOnboardingLogsAction(action: LogsAction) =
-        onLogsAction(action) { onboardingLogsVisible = false }
-
     private fun onOnboardingAction(action: OnboardingAction) {
         when (action) {
             OnboardingAction.Back -> moveTaskToBack(true)
             OnboardingAction.Next -> Unit // 翻页由 OnboardingScreen 内部 pager 处理
             OnboardingAction.Finish -> onOnboardingFinish()
-            is OnboardingAction.InstallCarrier -> onInstallCarrier(action.kind)
             is OnboardingAction.OpenCarrierGuide -> openPackageOrLog(carrierPackage(action.kind))
             is OnboardingAction.RequestCarrierPermission -> onRequestCarrierPermission()
             is OnboardingAction.SelectProvider -> onSelectProvider(action.kind)
@@ -1057,10 +1098,6 @@ class MainActivity : ComponentActivity() {
             OnboardingAction.CancelRootAuthorization ->
                 coordinator.cancelForegroundAttempt(activityOwner)
             OnboardingAction.RefreshConnection -> onRefreshConnection()
-            OnboardingAction.OpenLogs -> {
-                logs = LogStore.snapshot().asReversed()
-                onboardingLogsVisible = true
-            }
             OnboardingAction.OpenAutostartSettings -> onOpenAutostartSettings()
             OnboardingAction.OpenBatteryWhitelist -> onOpenBatteryWhitelist()
             OnboardingAction.OpenBackgroundPower -> onOpenBackgroundPower()
@@ -1075,7 +1112,7 @@ class MainActivity : ComponentActivity() {
      */
     private fun refreshCarriers() {
         lifecycleScope.launch {
-            val shizukuInstalled = withContext(Dispatchers.IO) { isInstalled(SHIZUKU_PACKAGE) }
+            val shizukuInstalled = withContext(Dispatchers.IO) { isShizukuManagerInstalled() }
             val stellarInstalled = withContext(Dispatchers.IO) { isInstalled(STELLAR_PACKAGE) }
             val probe = withContext(Dispatchers.IO) {
                 coordinator.probeSelected(ProviderSource.ONBOARDING)
@@ -1134,16 +1171,6 @@ class MainActivity : ComponentActivity() {
             } finally {
                 onboardingState = onboardingState.copy(providerOperationInFlight = false)
             }
-        }
-    }
-
-    private fun onInstallCarrier(kind: CarrierKind) {
-        // 网页兜底：酷安搜索对应管理器名（Shizuku 亦可走 shizuku.rikka.app/download）
-        val url = "https://www.coolapk.com/search?q=${carrierPackage(kind)}"
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-        } catch (t: Throwable) {
-            LogStore.log("打开安装指引失败: $t")
         }
     }
 
@@ -1335,6 +1362,8 @@ class MainActivity : ComponentActivity() {
             withContext(Dispatchers.IO) {
                 settingsRepo.setOnboarded(true)
                 settingsRepo.setAutoEnabled(true)
+                // v1.2.5：教程刚讲完，紧接着在首页补一次「实际传输」说明（一次性）
+                settingsRepo.setRealtimeIntroPending(true)
             }
             LogStore.log("Onboarding 完成：onboarded=true, autoEnabled=true")
             // 对抗审查 C1：引导完成时进程早已存活，StayHiFiApp.onCreate / 开关切换 /
@@ -2153,6 +2182,18 @@ class MainActivity : ComponentActivity() {
         return check.bindable
     }
 
+    /**
+     * v1.2.5：Shizuku 生态有多个分支（Shizuku-next / Stellar 等），包名不一定等于
+     * moe.shizuku.privileged.api；只要 binder 活着就说明管理器确实装着并在运行，
+     * 因此「安装态」用「包名命中 或 binder 存活」判定，避免误报「未安装」。
+     */
+    private fun isShizukuManagerInstalled(): Boolean =
+        isInstalled(SHIZUKU_PACKAGE) || try {
+            rikka.shizuku.Shizuku.pingBinder()
+        } catch (t: Throwable) {
+            false
+        }
+
     private fun isInstalled(pkg: String): Boolean = try {
         @Suppress("DEPRECATION")
         packageManager.getPackageInfo(pkg, 0)
@@ -2200,6 +2241,9 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        /** 首页轮询间隔：播放中 / 暂停或未播放。 */
+        private const val HOME_POLL_PLAYING_MS = 3_000L
+        private const val HOME_POLL_IDLE_MS = 15_000L
         private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         private const val STELLAR_PACKAGE = "roro.stellar.manager"
         /** Task D11：Root 修复入口 extra——onCreate/onNewIntent 消费后打开设置 tab 并展开 Root 区。 */

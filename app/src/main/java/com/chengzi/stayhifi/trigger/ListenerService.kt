@@ -35,6 +35,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -281,6 +282,18 @@ class ListenerService : Service() {
      * NEEDS_FOREGROUND_REVALIDATION，绝不弹授权、不回退 Shizuku（§11.4.5）。
      */
     private suspend fun retriggerIfAlreadyConnected() {
+        // v1.2.5 功耗治理：FGS 是 START_STICKY，被 ROM 反复杀掉重建时每次都跑整轮拉满
+        // （3s 等 binder + 5s 等设备 + 1.5s settle + 写入读回），是后台发热的放大器。
+        // 这里按「最近跑过就不再跑」节流：进程重启会丢 TriggerGate 记忆，只能靠持久时间戳。
+        val now = System.currentTimeMillis()
+        val last = settings.lastStartupTriggerAt.first()
+        if (!shouldRunStartupTrigger(now, last, STARTUP_TRIGGER_MIN_INTERVAL_MS)) {
+            LogStore.log(
+                "启动补触发：${(now - last) / 1000}s 前刚跑过，本次跳过（低于 " +
+                    "${STARTUP_TRIGGER_MIN_INTERVAL_MS / 1000}s 节流窗口）"
+            )
+            return
+        }
         val locallyConnected = isA2dpConnectedLocally()
         LogStore.log("启动补触发预检: localA2dpConnected=$locallyConnected")
         if (!locallyConnected) return
@@ -298,6 +311,8 @@ class ListenerService : Service() {
             LogStore.log("启动补触发：载体未就绪或未授权，跳过")
             return
         }
+        // 载体已就绪、确实要干活了才落时间戳；未就绪的跳过不占用节流窗口。
+        settings.setLastStartupTriggerAt(System.currentTimeMillis())
         try {
             // Root/ROM 组合可能 connectedDevices=[]，但本机普通 proxy 已能给出真实 MAC。
             // 优先走与首页相同的本机来源，避免耳机先于 App 连接时被 Root 空枚举卡死。
@@ -547,6 +562,15 @@ class ListenerService : Service() {
 
         private const val ID_LISTENER = 100
         private const val POLL_MS = 30_000L
+        /** 启动补触发节流窗口：同一进程/重启后 2 分钟内不重复跑整轮拉满。 */
+        private const val STARTUP_TRIGGER_MIN_INTERVAL_MS = 120_000L
+
+        /**
+         * 启动补触发是否放行（纯函数，便于 JVM 单测）：
+         * 从未跑过（last<=0）或距上次已超过 [windowMillis] 才允许；时钟回拨按「跑了」处理，宁可少跑。
+         */
+        internal fun shouldRunStartupTrigger(now: Long, last: Long, windowMillis: Long): Boolean =
+            last <= 0L || now - last >= windowMillis
         private const val CARRIER_READ_TIMEOUT_MS = 8_000L
         private const val TEXT_WAITING = "等待耳机连接"
         private const val TEXT_RUNNING = "音质满血守护中"
